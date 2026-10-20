@@ -48,7 +48,12 @@ Rules worth remembering:
 - The search price is the cheapest variant and often bait (an accessory, a
   bare chip). Never compare offers by it.
 - Generic variant names hide different articles: "Chip" was the bare
-  ESP32-S3 module, "Module" the dev board.
+  ESP32-S3 module, "Module" the dev board. Put the kind of article into
+  `match` ("N16R8 board", not just "N16R8"): the cheapest "ESP32-S3 N16R8"
+  hits were bare WROOM modules without USB, and expansion boards without
+  the chip. Look at a winner's picture when its price is far below the rest.
+- A search returns 60 hits; shop_list tries the `candidates` cheapest whose
+  title has the match words (default 5) — raise it for wide markets.
 - Coupons: only automatic and collected coupons count in the ranking.
   `collect_coupon` / apply collect plain "Collect" coupons in a browser
   (AliExpress accepts that only from its own page); "Follow & collect" is

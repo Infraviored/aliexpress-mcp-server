@@ -444,8 +444,67 @@ def _parse_search_cards(html: str) -> list[dict]:
     return products
 
 
+def _parse_search_json(html: str) -> list[dict]:
+    """
+    The whole result page (60 hits) from the page's embedded `itemList`
+    JSON. Only the first ~9 are also rendered as HTML cards.
+
+    Choice shows as the selling point `platformFreeShipping_atm` ("free
+    shipping over 10,00€"); orders and ship-from sit in trace.pdpParams.pdp_cdi.
+    """
+    from urllib.parse import unquote
+
+    i = html.find('"itemList":{"content":[')
+    if i < 0:
+        return []
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(html, i + len('"itemList":'))
+    except ValueError:
+        return []
+    out = []
+    for it in obj.get("content") or []:
+        pid = str(it.get("productId") or it.get("redirectedId") or "")
+        title = ((it.get("title") or {}).get("displayTitle") or "").strip()
+        if not pid or not title:
+            continue
+        prices = it.get("prices") or {}
+        sale = (prices.get("salePrice") or {}).get("minPrice")
+        orig = (prices.get("originalPrice") or {}).get("minPrice")
+        points = it.get("sellingPoints") or []
+        texts = [re.sub(r"<[^>]+>", "", m.get("value") or "") for sp in points
+                 for m in sp.get("materials") or [] if m.get("type") == "TEXT"]
+        sources = {str(sp.get("source") or "") for sp in points}
+        try:
+            cdi = json.loads(unquote(((it.get("trace") or {}).get("pdpParams") or {}).get("pdp_cdi") or "{}"))
+        except ValueError:
+            cdi = {}
+        try:
+            orders = int(cdi.get("order")) if cdi.get("order") else None
+        except (TypeError, ValueError):
+            orders = None
+        out.append({
+            "item_id": pid,
+            "title": title[:200],
+            "price": sale,
+            "original_price": orig if orig and sale and orig > sale else None,
+            "currency": (prices.get("salePrice") or {}).get("currencyCode"),
+            "discount_pct": round(100 * (1 - sale / orig)) if sale and orig and orig > sale else None,
+            "rating": (it.get("evaluation") or {}).get("starRating"),
+            "orders": orders,
+            "sold_count": (it.get("trade") or {}).get("tradeDesc"),
+            "shipping": next((t for t in texts if re.search(r"versand|shipping|delivery", t, re.I)), None),
+            "choice": any("platformFreeShipping" in x or "choice" in x.lower() for x in sources),
+            "ship_from": cdi.get("shipFrom"),
+            "url": f"{BASE_URL}/item/{pid}.html",
+        })
+    return out
+
+
 def parse_search_results(html: str) -> list[dict]:
     """Parse product cards from an AliExpress search results page."""
+    hits = _parse_search_json(html)
+    if hits:
+        return hits
     cards = _parse_search_cards(html)
     if cards:
         return cards
@@ -735,7 +794,7 @@ def search_products(
     choice_only: bool = False,
 ) -> str:
     """
-    Search AliExpress for products (12 results per page).
+    Search AliExpress for products (60 results per page; the first 25 are listed).
 
     The price shown is the CHEAPEST variant, which is often bait: an
     accessory, a bare chip or 1 piece of a pack (ESP32-S3 "6.19 €" was a
@@ -1621,10 +1680,17 @@ def _candidate_ids(spec: dict) -> list[str]:
     ids = [str(x) for x in spec.get("item_ids") or []]
     if not spec.get("query"):
         return ids
-    avoid = _words(spec.get("avoid", ""))
+    avoid, match = _words(spec.get("avoid", "")), _words(spec.get("match", ""))
     hits = [h for h in _search(spec["query"], spec.get("sort_by", "best_match"), choice_only=_choice_only(spec))
             if not any(w in (h.get("title") or "").lower() for w in avoid)]
-    for h in hits[: int(spec.get("candidates", 3))]:
+    if _choice_only(spec):
+        hits = [h for h in hits if h.get("choice")] or hits
+    # 60 hits per page: keep those naming the match words, cheapest first.
+    # The search price is only a hint (often a bait variant); the product
+    # page decides.
+    named = [h for h in hits if all(w in (h.get("title") or "").lower() for w in match)]
+    hits = sorted(named or hits, key=lambda h: h.get("price") if h.get("price") is not None else 1e9)
+    for h in hits[: int(spec.get("candidates", 5))]:
         if h["item_id"] not in ids:
             ids.append(h["item_id"])
     return ids
@@ -1644,10 +1710,19 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
     title = (offer.get("title") or "").lower()
     ok = [v for v in offer["variants"] if v["salable"] and v["price"] is not None
           and not any(w in v["label"].lower() for w in avoid)]
-    vs = [v for v in ok if all(w in v["label"].lower() for w in match)]
-    if not vs and not any(w in v["label"].lower() for v in offer["variants"] for w in match):
-        # No variant names it at all: the title speaks for every variant.
-        vs = [v for v in ok if all(w in title for w in match)]
+    # Every match word must stand in the variant name or the title. When the
+    # product has several kinds of article ("S3 Expansion Board", "N16R8
+    # soldered"), at least one match word must be in the variant name itself:
+    # a title word alone says nothing about which variant has it.
+    kinds = {deals.base_name(v["label"]) for v in ok}
+
+    def fits(v):
+        label = v["label"].lower()
+        if not all(w in label or w in title for w in match):
+            return False
+        return len(kinds) <= 1 or not match or any(w in label for w in match)
+
+    vs = [v for v in ok if fits(v)]
     if spec.get("sku_id"):
         vs = [v for v in offer["variants"] if v["sku_id"] == str(spec["sku_id"])]
     if not vs:
@@ -1933,7 +2008,8 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     Each item is a dict:
         need:      what it is, for the report ("ESP32-S3 N16R8 dev board")
         pieces:    how many pieces are needed (packs are counted in pieces)
-        query:     search term — the top `candidates` hits (default 3) compete
+        query:     search term — of its 60 hits, the `candidates` (default 5)
+                   cheapest whose title has the match words compete
         item_ids:  candidate products (compete with the search hits, if any)
         match:     words the chosen variant name or the product title must
                    contain ("N16R8 Module")
