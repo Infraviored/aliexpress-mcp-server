@@ -737,6 +737,7 @@ def search_products(
     max_price: float = 0,
     sort_by: str = "best_match",
     page: int = 1,
+    with_shipping: bool = False,
 ) -> str:
     """
     Search AliExpress for products (12 results per page).
@@ -752,6 +753,8 @@ def search_products(
         max_price: Maximum price in the account currency. 0 disables filter.
         sort_by: One of "best_match", "orders", "price_asc", "price_desc"
         page: Result page, starting at 1.
+        with_shipping: Also fetch real shipping to the configured country for the
+            first 8 non-Choice hits (one product-page call each, slower).
     """
     # AliExpress URL slug pattern
     slug = quote_plus(query.strip()).replace("+", "-")
@@ -793,6 +796,16 @@ def search_products(
             suffix = f" with {', '.join(filters)}" if filters else ""
             return f"No products found for '{query}'{suffix}."
 
+        if with_shipping:
+            for p in [x for x in products if not x.get("choice")][:8]:
+                try:
+                    offer = _pdp_offer(p["item_id"])
+                    if offer:
+                        p["shipping"] = _fmt_shipping(offer["shipping"]).replace("shipping to ", "to ")
+                except Exception as e:
+                    logger.debug("shipping lookup %s failed: %s", p["item_id"], e)
+                time.sleep(1.0)
+
         lines = [f"Found {len(products)} result(s) for '{query}' (sort: {sort_by}, page {page}):"]
         for p in products[:25]:
             line = f"- {p['title']}"
@@ -826,10 +839,14 @@ def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
     payload = {
         "productId": item_id,
         "_currency": CURRENCY,
-        "_lang": "en_US",
+        # "<lang>_<country>": the country here decides where shipping is quoted to.
+        "_lang": f"en_{COUNTRY}",
         "country": COUNTRY,
+        "province": "",
+        "city": "",
         "channel": "",
         "sourceType": "pc",
+        "clientType": "pc",
         "pdp_ext_f": "",
     }
 
@@ -1136,20 +1153,130 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
     return "\n".join(lines)
 
 
-_PACK_RE = re.compile(r"(\d+)\s*(?:pcs|pc|pieces?|stück|stk|st\b|x\b|er\b|set|pack)", re.I)
+# Pack size from a variant name: "5PCS", "10 Stück", "3pcs X", "Pack of 4".
+# Deliberately strict — "8 bit", "16LEDs", "2m" are not pack sizes.
+_PACK_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:pcs|pc|pieces?|stück|stk|pack|lots?)\b|pack of\s*(\d{1,4})", re.I)
 
 
 def _pack_size(text: str) -> int:
     m = _PACK_RE.search(text or "")
-    return int(m.group(1)) if m and 0 < int(m.group(1)) <= 1000 else 1
+    if not m:
+        return 1
+    n = int(m.group(1) or m.group(2))
+    return n if 0 < n <= 1000 else 1
+
+
+def _pdp_offer(item_id: str) -> Optional[dict]:
+    """
+    Everything a buying decision needs from one product page: variants with
+    price per piece, shipping to COUNTRY, Choice (combined-shipping threshold),
+    store, promotions.
+    """
+    resp = _fetch_pdp_mtop(item_id)
+    res = ((resp or {}).get("data") or {}).get("result") or {}
+    sku = res.get("SKU") or {}
+    paths = sku.get("skuPaths") or []
+    if not paths:
+        return None
+
+    # propertyId:valueId -> (name, image, hot). Sellers often give several
+    # values the same name and tell them apart only by picture.
+    names: dict[str, tuple[str, Optional[str], bool]] = {}
+    for prop in sku.get("skuProperties") or []:
+        pid = prop.get("skuPropertyId")
+        for v in prop.get("skuPropertyValues") or []:
+            names[f"{pid}:{v.get('propertyValueIdLong')}"] = (
+                v.get("propertyValueDisplayName") or v.get("propertyValueDefinitionName") or v.get("propertyValueName") or "",
+                v.get("skuPropertyImagePath"),
+                bool(v.get("showHot")),
+            )
+    prices = (res.get("PRICE") or {}).get("skuIdStrPriceInfoMap") or {}
+    qty = ((res.get("QUANTITY_PC") or {}).get("allSkuQuantityView")) or {}
+
+    variants = []
+    for pth in paths:
+        sid = str(pth.get("skuIdStr") or pth.get("skuId"))
+        parts = [names.get(part, (part, None, False)) for part in (pth.get("path") or "").split(";") if part]
+        label = " / ".join(n for n, _, _ in parts) or "default"
+        image = next((img for _, img, _ in parts if img), None)
+        hot = any(h for _, _, h in parts)
+        info = prices.get(sid) or {}
+        price = parse_price((info.get("salePriceString") or "").replace("€", "$").replace(",", "."))
+        pack = _pack_size(label)
+        variants.append({
+            "sku_id": sid,
+            "label": label,
+            "price": price,
+            "pack": pack,
+            "unit": (price / pack) if price else None,
+            "max_per_order": (qty.get(sid) or {}).get("maxBuyCount", pth.get("skuStock")),
+            "salable": pth.get("salable", True),
+            "image": image,
+            "hot": hot,
+        })
+    counts: dict[str, int] = {}
+    for v in variants:
+        counts[v["label"]] = counts.get(v["label"], 0) + 1
+    for v in variants:
+        v["ambiguous"] = counts[v["label"]] > 1
+
+    shipping: dict[str, Any] = {}
+    layouts = (res.get("SHIPPING") or {}).get("deliveryLayoutInfo") or []
+    if layouts:
+        b = layouts[0].get("bizData") or {}
+        free = b.get("shippingFee") == "free"
+        shipping = {
+            "ship_to": b.get("shipToCode"),
+            "fee": 0.0 if free else b.get("displayAmount"),
+            "free": free,
+            "company": b.get("company") or b.get("deliveryProviderName"),
+            "days": (b.get("deliveryDayMin"), b.get("deliveryDayMax")),
+            "choice_threshold": parse_price((b.get("logisticsComposeThreshold") or "").replace("€", "$").replace(",", ".")),
+        }
+
+    promos = []
+    for v in (res.get("PRICE_EXTEND") or {}).get("priceExtendViews") or []:
+        if v.get("content"):
+            promos.append(v["content"])
+    banner = (res.get("PRICE_BANNER") or {}).get("targetSkuBanner") or {}
+    if banner.get("supplementaryText"):
+        promos.append(re.sub(r"<[^>]+>", "", banner["supplementaryText"]))
+    if (res.get("COUPON_BLOCK_PC") or {}) and not (res.get("COUPON_BLOCK_PC") or {}).get("hideCouponBlock"):
+        promos.append("coupons available on the product page")
+
+    shop = res.get("SHOP_CARD_PC") or {}
+    return {
+        "item_id": item_id,
+        "title": ((res.get("PRODUCT_TITLE") or {}).get("text")) or item_id,
+        "url": f"{BASE_URL}/item/{item_id}.html",
+        "variants": variants,
+        "shipping": shipping,
+        "choice": bool(shipping.get("choice_threshold")),
+        "store": shop.get("storeName"),
+        "store_positive": shop.get("sellerPositiveRate"),
+        "promos": promos,
+    }
+
+
+def _fmt_shipping(sh: dict) -> str:
+    if not sh:
+        return "shipping: unknown"
+    days = sh.get("days") or (None, None)
+    when = f", {days[0]}–{days[1]} days" if days[0] else ""
+    if sh.get("choice_threshold"):
+        fee = "free" if sh.get("free") else f"{sh.get('fee')} {CURRENCY}"
+        return f"shipping to {sh.get('ship_to')}: Choice — {fee}, free once Choice items reach {sh['choice_threshold']:.2f} {CURRENCY}{when}"
+    fee = "free" if sh.get("free") else f"{sh.get('fee')} {CURRENCY}"
+    return f"shipping to {sh.get('ship_to')}: {fee} ({sh.get('company')}){when}"
 
 
 @mcp.tool()
 def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
     """
-    List the variants (SKUs) of a product with price, purchase limit and sku_id,
-    cheapest price per piece first. Pack size is read from the variant name
-    ("5PCS", "10 Stück"); check it against the name before trusting it.
+    List the variants (SKUs) of a product with price, price per piece,
+    purchase limit and sku_id (cheapest per piece first), plus shipping to
+    the configured country, Choice threshold, store and promotions.
+    Pack size is read from the variant name ("5PCS", "10 Stück").
 
     Args:
         item_id: AliExpress item ID (e.g., "1005007655628250")
@@ -1157,46 +1284,10 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
             e.g. "5V 10pcs". Empty = all.
         limit: Max variants to show (some items have 100+).
     """
-    resp = _fetch_pdp_mtop(item_id)
-    res = ((resp or {}).get("data") or {}).get("result") or {}
-    sku = res.get("SKU") or {}
-    paths = sku.get("skuPaths") or []
-    if not paths:
+    offer = _pdp_offer(item_id)
+    if not offer:
         return f"No variant data for {item_id} (session expired or product gone)."
-
-    # propertyId:valueId -> display name
-    names: dict[str, str] = {}
-    for prop in sku.get("skuProperties") or []:
-        pid = prop.get("skuPropertyId")
-        for v in prop.get("skuPropertyValues") or []:
-            names[f"{pid}:{v.get('propertyValueIdLong')}"] = (
-                v.get("propertyValueDisplayName") or v.get("propertyValueDefinitionName") or v.get("propertyValueName") or ""
-            )
-
-    prices = (res.get("PRICE") or {}).get("skuIdStrPriceInfoMap") or {}
-    qty = ((res.get("QUANTITY_PC") or {}).get("allSkuQuantityView")) or {}
-    title = ((res.get("PRODUCT_TITLE") or {}).get("text")) or item_id
-
-    rows = []
-    for pth in paths:
-        sid = str(pth.get("skuIdStr") or pth.get("skuId"))
-        label = " / ".join(
-            names.get(part, part) for part in (pth.get("path") or "").split(";") if part
-        ) or (pth.get("skuAttr") or "default")
-        info = prices.get(sid) or {}
-        price = parse_price((info.get("salePriceString") or "").replace("€", "$").replace(",", "."))
-        orig = parse_price((info.get("originalPrice", {}) or {}).get("formatedAmount", "") if isinstance(info.get("originalPrice"), dict) else "")
-        pack = _pack_size(label)
-        rows.append({
-            "sku_id": sid,
-            "label": label,
-            "price": price,
-            "original": orig,
-            "pack": pack,
-            "unit": (price / pack) if price else None,
-            "stock": (qty.get(sid) or {}).get("maxBuyCount", pth.get("skuStock")),
-            "salable": pth.get("salable", True),
-        })
+    rows = offer["variants"]
     total = len(rows)
     words = [w.lower() for w in match.split()]
     if words:
@@ -1204,22 +1295,160 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
     rows.sort(key=lambda r: (not r["salable"], r["unit"] if r["unit"] is not None else 1e9))
 
     head = f"{len(rows)} of {total} variant(s)" + (f" matching '{match}'" if words else "")
-    lines = [f"{title}", f"{BASE_URL}/item/{item_id}.html", f"{head}, cheapest per piece first:"]
+    lines = [offer["title"], offer["url"]]
+    if offer.get("store"):
+        lines.append(f"store: {offer['store']}" + (f" ({offer['store_positive']}% positive)" if offer.get("store_positive") else ""))
+    lines.append(_fmt_shipping(offer["shipping"]))
+    if offer["promos"]:
+        lines.append("promotions: " + "; ".join(offer["promos"]))
+    lines.append(f"{head}, cheapest per piece first:")
     for r in rows[:max(1, limit)]:
         line = f"- {r['label']}"
         if r["price"] is not None:
             line += f" — {r['price']:.2f} {CURRENCY}"
             if r["pack"] > 1:
                 line += f" ({r['unit']:.2f}/pc for {r['pack']})"
-        if r["stock"] is not None:
-            line += f" · max {r['stock']}/order"
+        if r["max_per_order"] is not None:
+            line += f" · max {r['max_per_order']}/order"
+        if r.get("hot"):
+            line += " · bestseller"
         if not r["salable"]:
             line += " · NOT AVAILABLE"
         line += f"\n  sku_id: {r['sku_id']}"
+        if r.get("ambiguous") and r.get("image"):
+            line += f"\n  same name as another variant — tell apart by picture: {r['image']}"
         lines.append(line)
     if len(rows) > limit:
         lines.append(f"… {len(rows) - limit} more (raise limit or narrow match)")
     return "\n".join(lines)
+
+
+@mcp.tool()
+def get_product_reviews(item_id: str, pages: int = 2, only_low: bool = False, keyword: str = "") -> str:
+    """
+    Read buyer reviews of a product: star distribution plus review texts
+    (translated to English), with the variant each buyer bought.
+    Good for spotting fakes ("got INMP441 instead of ICS-43434") and duds.
+
+    Args:
+        item_id: AliExpress item ID.
+        pages: Pages of 20 reviews to read (max 10).
+        only_low: Only reviews with 3 stars or fewer.
+        keyword: Only reviews whose text contains this word (case-insensitive).
+    """
+    url = "https://feedback.aliexpress.com/pc/searchEvaluation.do"
+    stats = None
+    total = 0
+    picked = []
+    with httpx.Client(timeout=20.0, headers={"User-Agent": USER_AGENT, "Referer": f"{BASE_URL}/"}) as c:
+        for page in range(1, max(1, min(pages, 10)) + 1):
+            try:
+                d = c.get(url, params={
+                    "productId": item_id, "lang": "en_US", "country": COUNTRY, "page": page,
+                    "pageSize": 20, "filter": "all", "sort": "complex_default",
+                }).json().get("data") or {}
+            except Exception as e:
+                return f"Review request failed: {e}"
+            stats = stats or d.get("productEvaluationStatistic")
+            total = d.get("totalNum") or total
+            for e in d.get("evaViewList") or []:
+                text = (e.get("buyerTranslationFeedback") or e.get("buyerFeedback") or "").strip()
+                stars = round((e.get("buyerEval") or 0) / 20)
+                if only_low and stars > 3:
+                    continue
+                if keyword and keyword.lower() not in text.lower():
+                    continue
+                if text or only_low:
+                    picked.append((stars, e.get("evalDate"), e.get("buyerCountry"), (e.get("skuInfo") or "").strip(), text))
+            if page >= (d.get("totalPage") or 1):
+                break
+
+    lines = [f"Reviews for {item_id}: {total} total"]
+    if stats:
+        lines.append(
+            f"average {stats.get('evarageStar')}★ · 5★ {stats.get('fiveStarNum')} · 4★ {stats.get('fourStarNum')} · "
+            f"3★ {stats.get('threeStarNum')} · 2★ {stats.get('twoStarNum')} · 1★ {stats.get('oneStarNum')}"
+        )
+    if not picked:
+        lines.append("No matching reviews with text.")
+    for stars, date, country, sku_info, text in picked[:40]:
+        lines.append(f"- {stars}★ {date} {country} [{sku_info}] {text[:300]}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def plan_basket(items: list[str]) -> str:
+    """
+    Price a shopping list before it goes into the cart: per line price,
+    Choice items vs. others, whether the Choice free-shipping threshold is
+    reached, shipping for non-Choice lines, and the total.
+
+    Args:
+        items: Lines "item_id:sku_id:quantity" (sku_id from get_product_variants;
+            "item_id::qty" takes the cheapest-per-piece variant).
+    """
+    lines_out = []
+    choice_sub = 0.0
+    choice_threshold = None
+    choice_fee_if_below = 0.0
+    other_sub = 0.0
+    other_ship = 0.0
+    problems = []
+    for raw in items:
+        parts = [x.strip() for x in str(raw).split(":")]
+        if len(parts) < 2:
+            problems.append(f"{raw}: expected item_id:sku_id:quantity")
+            continue
+        iid, sid = parts[0], parts[1]
+        q = int(parts[2]) if len(parts) > 2 and parts[2] else 1
+        offer = _pdp_offer(iid)
+        time.sleep(1.0)
+        if not offer:
+            problems.append(f"{iid}: no data")
+            continue
+        vs = [v for v in offer["variants"] if v["salable"]]
+        v = next((x for x in vs if x["sku_id"] == sid), None) if sid else min(
+            (x for x in vs if x["unit"] is not None), key=lambda x: x["unit"], default=None)
+        if not v or v["price"] is None:
+            problems.append(f"{iid}: variant {sid or '(cheapest)'} not found or unavailable")
+            continue
+        if v["max_per_order"] and q > int(v["max_per_order"]):
+            problems.append(f"{iid}: {q} > max {v['max_per_order']} per order")
+        line_total = v["price"] * q
+        sh = offer["shipping"]
+        tag = "Choice" if offer["choice"] else "seller"
+        if offer["choice"]:
+            choice_sub += line_total
+            choice_threshold = max(choice_threshold or 0, sh.get("choice_threshold") or 0)
+            choice_fee_if_below = max(choice_fee_if_below, sh.get("fee") or 0)
+        else:
+            other_sub += line_total
+            other_ship += sh.get("fee") or 0
+        pcs = v["pack"] * q
+        lines_out.append(
+            f"- {q} × {v['label']} — {line_total:.2f} {CURRENCY} [{tag}]"
+            + (f" ({pcs} pcs, {line_total / pcs:.2f}/pc)" if pcs > 1 else "")
+            + f"\n  {offer['title'][:90]} ({iid}, sku {v['sku_id']})"
+            + ("" if offer["choice"] else f"\n  {_fmt_shipping(sh)}")
+        )
+
+    choice_ship = 0.0
+    if choice_sub and choice_threshold and choice_sub < choice_threshold:
+        choice_ship = choice_fee_if_below
+    out = ["Basket:"] + lines_out + [""]
+    if choice_sub:
+        status = (
+            f"reached ({choice_sub:.2f} ≥ {choice_threshold:.2f}) → free shipping"
+            if choice_ship == 0 else
+            f"NOT reached ({choice_sub:.2f} < {choice_threshold:.2f}) → about {choice_ship:.2f} shipping; add {choice_threshold - choice_sub:.2f} to make it free"
+        )
+        out.append(f"Choice items: {choice_sub:.2f} {CURRENCY}, threshold {status}")
+    if other_sub:
+        out.append(f"Other sellers: {other_sub:.2f} {CURRENCY} + shipping {other_ship:.2f} (per line, upper bound)")
+    out.append(f"Estimated total: {choice_sub + choice_ship + other_sub + other_ship:.2f} {CURRENCY} (before coins/coupons)")
+    if problems:
+        out.append("Problems: " + "; ".join(problems))
+    return "\n".join(out)
 
 
 @mcp.tool()
@@ -1698,6 +1927,46 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
         f"Added {quantity} × item {item_id} (sku {sku_id}) to the cart. "
         f"cart_id: {data.get('cartId')}, cart now holds {data.get('cartNum')} line(s)."
     )
+
+
+@mcp.tool()
+def update_cart_quantity(cart_id: str, quantity: int) -> str:
+    """
+    Set the quantity of one cart line. This changes the real cart.
+
+    Args:
+        cart_id: cart_id from view_cart.
+        quantity: New quantity (>= 1; use remove_from_cart to delete).
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    if quantity < 1:
+        return "quantity must be at least 1 (use remove_from_cart to delete a line)."
+    cid = str(cart_id).strip()
+    try:
+        for state in _cart_pages(cookies):
+            bid = _cart_item_blocks(state).get(cid)
+            if not bid:
+                continue
+            block = json.loads(json.dumps(state["data"][bid]))
+            fields = block.setdefault("fields", {})
+            q = fields.get("quantity")
+            if isinstance(q, dict):
+                q["current"] = int(quantity)
+            else:
+                fields["quantity"] = {"current": int(quantity)}
+            fields["operationType"] = "update_quantity"
+            new_state = _cart_async(state, bid, block, cookies)
+            response = (new_state.get("global") or {}).get("response") or {}
+            if response.get("success") is False:
+                return f"Refused: {response.get('tip') or 'update_quantity failed'}"
+            nb = (new_state.get("data") or {}).get(bid) or {}
+            nq = ((nb.get("fields") or {}).get("quantity") or {}).get("current")
+            return f"cart_id {cid}: quantity now {nq if nq is not None else quantity}."
+    except Exception as e:
+        return f"Cart call failed: {e}"
+    return f"cart_id {cid} not found in cart."
 
 
 @mcp.tool()
