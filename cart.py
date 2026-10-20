@@ -238,7 +238,7 @@ def _summary(f: dict) -> dict:
         return out
     pb = blocks[0]
     out["total"] = _cents(pb.get("total"))
-    out["checked_ids"] = [str((c or {}).get("cartId")) for c in pb.get("chosenCartLines") or []]
+
     discounts = []
     for sl in pb.get("summaryLines") or []:
         kind = sl.get("type") or ""
@@ -276,21 +276,30 @@ def shipping_report(cart: dict, choice_threshold: float = 10.0) -> dict:
     seen_store: dict[str, dict] = {}
     seen_item: dict[str, dict] = {}
     for ln in checked:
-        if not ln.get("ship"):
-            continue
-        reasons = []
-        if ln["group"] == "group_choice":
-            reasons.append("Choice below the free-shipping threshold")
-        else:
-            reasons.append("global seller: every cart line pays its own shipping")
-            if ln["item_id"] in seen_item:
-                reasons.append(f"same product already in another line ({seen_item[ln['item_id']]['variant']}) — shipping paid twice")
-            elif ln["seller_id"] and ln["seller_id"] in seen_store:
-                reasons.append(f"same store as '{seen_store[ln['seller_id']]['title'][:30]}' — shipping paid twice")
-            if ln["ship"] > _goods(ln):
-                reasons.append(f"shipping {ln['ship']:.2f} is more than the goods ({_goods(ln):.2f})")
-        paid.append((ln, "; ".join(reasons)))
-        seen_store.setdefault(ln["seller_id"], ln)
+        has_ship = ln.get("ship")  # 0.0 (free) is falsy; only truthy values are paid
+        if has_ship:
+            reasons = []
+            if ln["group"] == "group_choice":
+                reasons.append("Choice below the free-shipping threshold")
+            else:
+                reasons.append("global seller: every cart line pays its own shipping")
+                if ln["item_id"] in seen_item:
+                    reasons.append(
+                        f"same product already in another line "
+                        f"({seen_item[ln['item_id']]['variant']}) — shipping paid twice"
+                    )
+                elif ln["seller_id"] and ln["seller_id"] in seen_store:
+                    store_title = seen_store[ln["seller_id"]]["title"][:30]
+                    reasons.append(f"same store as '{store_title}' — shipping paid twice")
+                if ln["ship"] > _goods(ln):
+                    reasons.append(
+                        f"shipping {ln['ship']:.2f} is more than the goods ({_goods(ln):.2f})"
+                    )
+            paid.append((ln, "; ".join(reasons)))
+        # Track every line (paid or free) so a paid line arriving after a free
+        # line from the same store still triggers the duplicate-shipping note.
+        if ln["seller_id"]:
+            seen_store.setdefault(ln["seller_id"], ln)
         seen_item.setdefault(ln["item_id"], ln)
     dated = [ln for ln in checked if ln["delivery"][1]]
     slowest = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None

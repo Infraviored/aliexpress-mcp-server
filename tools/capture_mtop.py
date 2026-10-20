@@ -21,9 +21,13 @@ Steps:
                             their URL (e.g. keep a click from leaving the page)
 
 Example (toggle the first cart line's checkbox twice):
-    python tools/capture_mtop.py https://www.aliexpress.com/p/shoppingcart/index.html out.json \
+    python tools/capture_mtop.py https://www.aliexpress.com/p/shoppingcart/index.html /tmp/cap.json \
         wait:6 "clicknth:1:.cart-product .comet-v2-checkbox" wait:3 \
         "clicknth:1:.cart-product .comet-v2-checkbox" wait:3
+
+The output file may contain buyer address, buyer_id, and order details when
+recording checkout or account pages — write it outside the repository
+(e.g. /tmp/) and never commit it.
 """
 
 import json

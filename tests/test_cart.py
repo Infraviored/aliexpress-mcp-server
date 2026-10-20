@@ -79,3 +79,32 @@ def test_merge_moves_a_line_instead_of_listing_it_twice():
     b = {"data": {}, "page": {"structure": {"choice": ["p2"]}}, "asyncHandler": {}}
     m = cart.merge(cart.merge(None, a), b)
     assert m["page"]["structure"] == {"global": ["p1"], "choice": ["p3", "p2"]}
+
+
+def _make_line(cart_id, seller_id, item_id, ship, group="global", checked=True):
+    return {
+        "cart_id": cart_id, "item_id": item_id, "sku_id": "1",
+        "variant": "default", "title": f"item-{cart_id}", "valid": True,
+        "checked": checked, "price": 5.0, "currency": "EUR",
+        "qty": 1, "max_qty": 10, "store": f"store-{seller_id}",
+        "seller_id": seller_id, "ship": ship,
+        "ship_service": None, "ship_from": None,
+        "delivery": (None, None), "days": (None, None), "group": group,
+    }
+
+
+def test_shipping_report_free_then_paid_same_store_warns_paid_twice():
+    """A free-shipping line followed by a paid line from the same store must
+    trigger the 'paid twice' note on the paid line (regression for F1: the old
+    code skipped free lines in seen_store, so the paid line never matched)."""
+    free_line = _make_line("cid-1", seller_id="s99", item_id="i1", ship=0.0)
+    paid_line = _make_line("cid-2", seller_id="s99", item_id="i2", ship=3.50)
+    c = {"lines": [free_line, paid_line], "groups": {}, "header": {}, "summary": {}}
+    r = cart.shipping_report(c)
+    reasons = {ln["cart_id"]: why for ln, why in r["paid"]}
+    assert "cid-1" not in reasons, "free line must not appear in paid"
+    assert "cid-2" in reasons, "paid line must appear in paid"
+    assert "paid twice" in reasons["cid-2"], (
+        f"Expected 'paid twice' in reason for paid line, got: {reasons['cid-2']!r}"
+    )
+

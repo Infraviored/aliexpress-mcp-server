@@ -30,6 +30,9 @@ The usual job — a shopping list into a ready cart — is one tool:
    having, unchecks everything else, checks the plan, and returns the
    checkout link with every plan line. It ends with "Plan vs cart": any price,
    shipping or delivery difference is listed — tell the user.
+   Note: deletions are scoped to this list's candidate products. Lines the MCP
+   added for other, unrelated lists are left alone; remove them with
+   `remove_from_cart` if they are no longer needed.
 4. Give the user the checkout link and the totals. Paying is their click.
 
 Single questions: `best_offer(item_id, pieces)` (cheapest way to N pieces from

@@ -1987,6 +1987,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         else:
             try:
                 cid = _cart_add(cookies, iid, sku, e["qty"], known=known)
+                known.add(cid)  # F2: keep known current so later adds in same run see it
                 log.append(f"added {e['qty']}× {e['label']}: {e['need']}")
             except Exception as ex:
                 log.append(f"FAILED to add {e['need']} ({e['label']}): {ex}")
@@ -2084,6 +2085,11 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     user's own lines), unchecks everything else, checks the plan (AliExpress
     keeps at most 10 checked) and returns the checkout link with all plan
     lines, then compares plan and cart (shipping, delivery).
+
+    Deletions are scoped to candidate products of this shopping list. Lines
+    the MCP added for other, unrelated shopping lists are left untouched —
+    remove them yourself with remove_from_cart if they are no longer needed.
+
 
     Args:
         items: The shopping list (see above).
@@ -2422,8 +2428,9 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False, select
         failed.update(f)
         out.insert(0, f"Checked {len(done_on)} line(s); {len(keep) - len(on)} were already checked.")
         if len(want) > cartlib.MAX_CHECKED:
-            out.append(f"AliExpress keeps only {cartlib.MAX_CHECKED} lines checked; the other "
-                       f"{len(want) - cartlib.MAX_CHECKED} are in the checkout link below.")
+            out.append(f"AliExpress keeps only {cartlib.MAX_CHECKED} lines checked on the cart page; "
+                       f"the other {len(want) - cartlib.MAX_CHECKED} stay unchecked there "
+                       f"but are included in the checkout link below.")
     for c, why in failed.items():
         out.append(f"Failed {titles.get(c, c)}: {why}")
     if unknown:
