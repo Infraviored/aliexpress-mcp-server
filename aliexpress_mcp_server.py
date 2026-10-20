@@ -118,7 +118,7 @@ AUTH_EXPIRED_MSG = (
 #   sign    = md5( token + "&" + t + "&" + appKey + "&" + data )
 #
 # The response is wrapped in an HTTP envelope. When ret[0] starts with
-# "FAIL_SYS_TOKEN_EMPTY" or "FAIL_SYS_TOKEN_EXOIRED" the server returns fresh
+# "FAIL_SYS_TOKEN_EMPTY" or "FAIL_SYS_TOKEN_EXPIRED" (sometimes spelled EXOIRED) the server returns fresh
 # `_m_h5_tk` cookies — the real browser retries; we can too.
 
 MTOP_APP_KEY = "12574478"
@@ -220,7 +220,7 @@ def mtop_call(
         # Retry once if the token expired (the server will have set fresh cookies).
         # httpx.Response.cookies iterates as cookie-name strings, so pull values by key.
         if retries > 0 and any(
-            s in ret_str for s in ("FAIL_SYS_TOKEN_EMPTY", "FAIL_SYS_TOKEN_EXOIRED", "TOKEN_EMPTY", "TOKEN_EXPIRED")
+            s in ret_str for s in ("FAIL_SYS_TOKEN_EMPTY", "FAIL_SYS_TOKEN_EXPIRED", "FAIL_SYS_TOKEN_EXOIRED", "TOKEN_EMPTY", "TOKEN_EXPIRED")
         ):
             new_cookies = dict(cookies)
             for name in resp.cookies:
@@ -1454,7 +1454,9 @@ def plan_basket(items: list[str]) -> str:
     if choice_sub and choice_threshold and choice_sub < choice_threshold:
         choice_ship = choice_fee_if_below
     out = ["Basket:"] + lines_out + [""]
-    if choice_sub:
+    if choice_sub and not choice_threshold:
+        out.append(f"Choice items: {choice_sub:.2f} {CURRENCY} (no threshold advertised; shipping as shown per item)")
+    elif choice_sub:
         status = (
             f"reached ({choice_sub:.2f} ≥ {choice_threshold:.2f}) → free shipping"
             if choice_ship == 0 else
@@ -2006,8 +2008,10 @@ def remove_from_cart(cart_ids: list[str]) -> str:
 
     # Each item can only be deleted from the snapshot of the page it is on.
     # Walk the pages; on the first page holding targets, delete them one by one
-    # (each response is the new snapshot), then start over from page 1 because
-    # the pages have shifted.
+    # (each response is the new snapshot). When a target is no longer in the
+    # newest snapshot, start over from page 1 because the pages have shifted.
+    # A pass that attempted anything (deleted or rejected) counts as progress,
+    # so a rejected item never stops the walk to later pages.
     for _ in range(len(todo) + CART_MAX_PAGES):
         if not todo:
             break
@@ -2020,7 +2024,8 @@ def remove_from_cart(cart_ids: list[str]) -> str:
                 for cid in targets:
                     bid = _cart_item_blocks(state).get(cid)
                     if bid is None:
-                        continue
+                        break  # snapshot moved on; re-walk from page 1
+                    progressed = True
                     block = json.loads(json.dumps(state["data"][bid]))
                     block.setdefault("fields", {})["operationType"] = "delete"
                     try:
@@ -2035,7 +2040,6 @@ def remove_from_cart(cart_ids: list[str]) -> str:
                         failed[cid] = response.get("tip") or "rejected"
                         continue
                     removed.append(cid)
-                    progressed = True
                 break
             else:
                 break  # walked every page, nothing left to find

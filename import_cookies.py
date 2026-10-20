@@ -53,7 +53,7 @@ def main() -> int:
     with os.fdopen(fd, "w") as f:
         json.dump({"cookies": cookies}, f)
     os.chmod(out, 0o600)
-    if "--keep" not in sys.argv:
+    if "--keep" not in sys.argv and src.resolve() != out.resolve():
         src.unlink()
     print(f"Wrote {len(cookies)} cookies to {out}: {', '.join(sorted(cookies))}")
     missing = [k for k in ("_m_h5_tk", "xman_t") if k not in cookies]
