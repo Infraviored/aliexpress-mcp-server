@@ -147,9 +147,10 @@ def mtop_call(
     cookies: Optional[dict[str, str]] = None,
     retries: int = 1,
     referer: Optional[str] = None,
+    method: str = "GET",
 ) -> dict:
     """
-    Make a signed MTOP request. Returns the parsed JSON response dict on success.
+    Make a signed MTOP request (`method` POST sends `data` as a form body). Returns the parsed JSON response dict on success.
 
     Raises RuntimeError on signing/network failure.
     """
@@ -194,7 +195,12 @@ def mtop_call(
     url = f"{MTOP_BASE}/h5/{api}/{version}/"
 
     with httpx.Client(timeout=30.0, follow_redirects=True) as c:
-        resp = c.get(url, params=params, headers=headers)
+        if method.upper() == "POST":
+            body = {"data": params.pop("data")}
+            params["type"] = "originaljson"
+            resp = c.post(url, params=params, data=body, headers=headers)
+        else:
+            resp = c.get(url, params=params, headers=headers)
 
         # MTOP sometimes wraps valid JSON inside `mtopjsonp1({...})` even when
         # we request originaljson. Strip the wrapper if present.
@@ -221,7 +227,7 @@ def mtop_call(
                 val = resp.cookies.get(name)
                 if val is not None:
                     new_cookies[name] = val
-            return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer)
+            return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer, method=method)
 
         # Bot check: solve the slider in real Chrome on a virtual display, retry once.
         punish_url = (data.get("data") or {}).get("url") if isinstance(data.get("data"), dict) else None
@@ -235,7 +241,7 @@ def mtop_call(
                 logger.warning("slider solver failed: %s", e)
                 solved = False
             if solved:
-                return mtop_call(api, version, payload, cookies=load_cookies(), retries=retries - 1, referer=referer)
+                return mtop_call(api, version, payload, cookies=load_cookies(), retries=retries - 1, referer=referer, method=method)
 
         return data
 
@@ -1643,6 +1649,55 @@ def view_cart() -> str:
             lines.append(f"Estimated total: {cart['total']:.2f} {currency}")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
+    """
+    Add a product variant to the AliExpress cart. This changes the real cart
+    (it does not buy anything).
+
+    Args:
+        item_id: AliExpress item ID.
+        sku_id: Variant from get_product_variants (required; picks pack size/color).
+        quantity: How many of that variant.
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    if quantity < 1:
+        return "quantity must be at least 1."
+    payload = {
+        "locale": "en_US",
+        "shipToCountry": COUNTRY,
+        "state": "",
+        "city": "",
+        "currency": CURRENCY,
+        "_saasRegion": "AEG",
+        "addFrom": "",
+        "addItems": json.dumps([{
+            "bundleCode": None, "logisticService": None, "itemId": str(item_id),
+            "toRemovedAttributeKeys": [], "quantity": int(quantity), "subItems": [],
+            "bundleId": 0, "attributes": {"carAdditionalInfo": None, "warranty_ext": None},
+            "skuId": str(sku_id), "bundleSellerId": 0, "channelCode": None,
+        }]),
+    }
+    _cart_pace()
+    try:
+        resp = mtop_call(
+            "mtop.aliexpress.trade.cart.add", "1.0", payload,
+            cookies=cookies, referer=f"{BASE_URL}/item/{item_id}.html", method="POST",
+        )
+        _cart_check(resp)
+    except Exception as e:
+        return f"Add to cart failed: {e}"
+    data = resp.get("data") or {}
+    if data.get("addFailed"):
+        return f"Add to cart refused: {data.get('errorMessage') or data.get('failReason') or 'addFailed'}"
+    return (
+        f"Added {quantity} × item {item_id} (sku {sku_id}) to the cart. "
+        f"cart_id: {data.get('cartId')}, cart now holds {data.get('cartNum')} line(s)."
+    )
 
 
 @mcp.tool()
