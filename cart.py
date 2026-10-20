@@ -238,7 +238,6 @@ def _summary(f: dict) -> dict:
         return out
     pb = blocks[0]
     out["total"] = _cents(pb.get("total"))
-
     discounts = []
     for sl in pb.get("summaryLines") or []:
         kind = sl.get("type") or ""

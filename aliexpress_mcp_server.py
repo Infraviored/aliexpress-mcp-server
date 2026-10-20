@@ -2090,7 +2090,6 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     the MCP added for other, unrelated shopping lists are left untouched —
     remove them yourself with remove_from_cart if they are no longer needed.
 
-
     Args:
         items: The shopping list (see above).
         apply: Put the plan into the cart.
