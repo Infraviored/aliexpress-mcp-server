@@ -23,6 +23,14 @@ How to find the best deal (the tools do the arithmetic; keep calls few):
 6. `add_to_cart(item_id, sku_id, qty)` only when the user asked for it.
 
 Rules worth remembering:
+- The search price is the cheapest variant and often bait (an accessory, a
+  bare chip). Never compare offers by it; compare best_offer totals.
+- Generic variant names hide different articles: "Chip" was the bare
+  ESP32-S3 module, "Module" the dev board. best_offer prints "!" when the
+  winner is far cheaper than every other variant: look at the pictures.
+- Bot check: calls are paced (ALIEXPRESS_MTOP_GAP, 0.8 s) and product pages
+  cached 10 min. A reCAPTCHA box is clicked automatically; if lookups still
+  say "bot check not passed", stop calling for 15-30 min (every call extends it).
 - Always mention when a bigger pack is much cheaper per piece or nearly free
   (1 pc 0.32 €, 5 pcs 1.39 €). The tools print a "pack ladder" and "tip" line.
 - A bigger pack can also be dearer per piece (10 pcs 1.54/pc vs 5 pcs 1.44/pc);

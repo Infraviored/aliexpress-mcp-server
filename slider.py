@@ -59,6 +59,46 @@ def _drag(page, distance: float, start_x: float, y: float) -> None:
     page.mouse.up()
 
 
+def _click_recaptcha(page, ctx) -> bool:
+    """
+    `action=captcharecaptcha`: a Google reCAPTCHA box instead of the slider.
+    Click the box like a hand would; that passes when Google trusts the
+    browser. An image challenge is not attempted (returns False).
+    """
+    anchor = None
+    for _ in range(30):
+        anchor = next((f for f in page.frames if "recaptcha" in f.url and "/anchor" in f.url), None)
+        if anchor:
+            break
+        time.sleep(0.5)
+    if not anchor:
+        return False
+    box = anchor.locator("#recaptcha-anchor")
+    box.wait_for(state="visible", timeout=15000)
+    bb = box.bounding_box()
+    if not bb:
+        return False
+    x, y = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+    page.mouse.move(x - random.uniform(80, 160), y + random.uniform(-40, 40))
+    time.sleep(random.uniform(0.3, 0.6))
+    page.mouse.move(x + random.uniform(-3, 3), y + random.uniform(-3, 3), steps=random.randint(12, 20))
+    time.sleep(random.uniform(0.1, 0.3))
+    page.mouse.click(x, y)
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if any(c["name"] == "x5sec" for c in ctx.cookies()):
+            return True
+        if anchor.locator("#recaptcha-anchor[aria-checked='true']").count():
+            time.sleep(2.0)  # the page posts the token, then sets x5sec
+            continue
+        challenge = page.locator("iframe[src*='recaptcha'][src*='bframe']")
+        if challenge.count() and (challenge.first.bounding_box() or {}).get("height", 0) > 100:
+            logger.info("reCAPTCHA asks for an image challenge; not attempted")
+            return False
+        time.sleep(0.4)
+    return any(c["name"] == "x5sec" for c in ctx.cookies())
+
+
 def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> bool:
     """Pass the slider at `punish_url`; merge new cookies into `credentials_path`."""
     from playwright.sync_api import sync_playwright
@@ -86,7 +126,9 @@ def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> boo
                 page.goto(punish_url, wait_until="networkidle", timeout=int(timeout_s * 1000))
 
                 passed = False
-                for attempt in range(3):
+                if "recaptcha" in punish_url:
+                    passed = _click_recaptcha(page, ctx)
+                for attempt in range(0 if "recaptcha" in punish_url else 3):
                     knob = page.locator(KNOB)
                     knob.wait_for(state="visible", timeout=15000)
                     kb = knob.bounding_box()
@@ -113,6 +155,9 @@ def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> boo
                     logger.info("slider attempt %d did not pass", attempt + 1)
 
                 if not passed:
+                    shot = os.environ.get("ALIEXPRESS_CAPTCHA_SHOT")
+                    if shot:
+                        page.screenshot(path=shot)
                     return False
 
                 time.sleep(1.0)  # let the page finish setting cookies

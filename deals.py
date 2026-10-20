@@ -177,6 +177,27 @@ def best_ways(
     return ways[:limit]
 
 
+def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.75) -> Optional[str]:
+    """
+    Warn when the winning way uses a variant far cheaper per piece than every
+    other kind of variant: usually a different article ("Chip" = bare module
+    vs. "Module" = dev board, "expansion board", a cable), not a bargain.
+    """
+    if not ways:
+        return None
+    win = {base_name(v["label"]) for v, _ in ways[0]["lines"]}
+    unit = lambda v: v["price"] / v["pack"]
+    mine = min(unit(v) for v, _ in ways[0]["lines"])
+    others = [unit(v) for v in variants
+              if v.get("price") is not None and base_name(v["label"]) not in win]
+    if others and mine < ratio * min(others):
+        names = ", ".join(sorted({v["label"] for v, _ in ways[0]["lines"]}))
+        return (f"! '{names}' costs under {ratio:.0%} of every other variant per piece — "
+                "probably a different article (bare chip, accessory). Check get_variant_images, "
+                "then pass match= for the one you want.")
+    return None
+
+
 def fmt_way(w: dict, currency: str) -> str:
     parts = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
     ship = f" + {w['ship']:.2f} ship" if w["ship"] else ""

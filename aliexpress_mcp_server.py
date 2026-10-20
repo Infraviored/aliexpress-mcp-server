@@ -158,6 +158,7 @@ def mtop_call(
     """
     if cookies is None:
         cookies = load_cookies()
+    _mtop_pace()
 
     token = _h5_token_prefix(cookies)
     if not token:
@@ -231,8 +232,11 @@ def mtop_call(
                     new_cookies[name] = val
             return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer, method=method)
 
-        # Bot check: solve the slider in real Chrome on a virtual display, retry once.
+        # Bot check: solve the slider (or click the reCAPTCHA box) in real Chrome
+        # on a virtual display, retry once.
         punish_url = (data.get("data") or {}).get("url") if isinstance(data.get("data"), dict) else None
+        if "FAIL_SYS_USER_VALIDATE" in ret_str:
+            BOT_CHECK["since"] = BOT_CHECK.get("since") or time.time()
         # `action=deny` (after hammering past a solved slider) has no slider: wait it out.
         if retries > 0 and punish_url and "action=captcha" in punish_url:
             import slider
@@ -243,9 +247,35 @@ def mtop_call(
                 logger.warning("slider solver failed: %s", e)
                 solved = False
             if solved:
+                BOT_CHECK.clear()
                 return mtop_call(api, version, payload, cookies=load_cookies(), retries=retries - 1, referer=referer, method=method)
+        elif ret_str.startswith("SUCCESS"):
+            BOT_CHECK.clear()
 
         return data
+
+
+# Set while AliExpress answers with a bot check we could not pass.
+BOT_CHECK: dict[str, float] = {}
+MTOP_MIN_GAP = float(os.environ.get("ALIEXPRESS_MTOP_GAP", "0.8"))
+_last_mtop = [0.0]
+
+
+def _mtop_pace() -> None:
+    """Keep a small gap between MTOP calls: bursts are what trigger the bot check."""
+    wait = _last_mtop[0] + MTOP_MIN_GAP - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    _last_mtop[0] = time.time()
+
+
+def blocked_msg() -> str:
+    """Why a lookup came back empty, when it was the bot check."""
+    if not BOT_CHECK:
+        return ""
+    mins = int((time.time() - BOT_CHECK["since"]) / 60)
+    return (f" AliExpress bot check (captcha) not passed, blocked for {mins} min."
+            " Wait 10-30 min, or pass it once in a browser and re-import cookies.")
 
 
 def _walk_find(obj: Any, match_keys: set) -> Any:
@@ -762,7 +792,10 @@ def search_products(
     """
     Search AliExpress for products (12 results per page).
 
-    Each hit shows the price of its default variant, orders, rating and the
+    The price shown is the CHEAPEST variant, which is often bait: an
+    accessory, a bare chip or 1 piece of a pack (ESP32-S3 "6.19 €" was a
+    breakout board; the dev board was 12.19 €). Judge with best_offer.
+    Each hit also shows orders, rating and the
     shipping line ("Kostenloser Versand ab 10,00€" = free above that cart value).
     Pack sizes (1/5/10 pcs) are variants with their own prices:
     use get_product_variants before comparing deals.
@@ -850,11 +883,19 @@ def search_products(
         client.close()
 
 
+# Product pages repeat within one deal search (variants, pictures, best_offer).
+PDP_TTL = 600
+_PDP_CACHE: dict[str, tuple[float, dict]] = {}
+
+
 def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
     """
     Call the PDP MTOP endpoint and return the raw response dict, or None on failure.
     Tries the PC endpoint first, then the msite endpoint as a fallback.
     """
+    hit = _PDP_CACHE.get(item_id)
+    if hit and time.time() - hit[0] < PDP_TTL:
+        return hit[1]
     referer = f"{BASE_URL}/item/{item_id}.html"
     payload = {
         "productId": item_id,
@@ -881,7 +922,10 @@ def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
             logger.debug("MTOP %s failed: %s", api, e)
             continue
         ret = resp.get("ret", [])
+        if ret and any("FAIL_SYS_USER_VALIDATE" in r for r in ret):
+            return None
         if ret and any("SUCCESS" in r for r in ret):
+            _PDP_CACHE[item_id] = (time.time(), resp)
             return resp
         # Some endpoints return data even without SUCCESS::API_SUCCESS in ret
         if resp.get("data") and isinstance(resp["data"], dict) and resp["data"]:
@@ -1315,7 +1359,7 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     """
     offer = _pdp_offer(item_id)
     if not offer:
-        return f"No variant data for {item_id} (session expired or product gone)."
+        return f"No variant data for {item_id} (session expired or product gone)." + blocked_msg()
     rows = offer["variants"]
     total = len(rows)
     words = [w.lower() for w in match.split()]
@@ -1374,7 +1418,7 @@ def get_variant_images(item_id: str, match: str = ""):
     """
     offer = _pdp_offer(item_id)
     if not offer:
-        return f"No variant data for {item_id}."
+        return f"No variant data for {item_id}." + blocked_msg()
     words = [w.lower() for w in match.split()]
     rows = [v for v in offer["variants"] if all(w in v["label"].lower() for w in words)]
     table = [offer["title"][:100]] + [
@@ -1408,7 +1452,7 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     """
     offer = _pdp_offer(item_id)
     if not offer:
-        return f"No variant data for {item_id}."
+        return f"No variant data for {item_id}." + blocked_msg()
     words = [w.lower() for w in match.split()]
     vs = [v for v in offer["variants"] if v["salable"] and all(w in v["label"].lower() for w in words)]
     if not vs:
@@ -1422,6 +1466,9 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     tip = deals.upsell(ways, CURRENCY)
     if tip:
         lines.append(tip)
+    odd = deals.odd_one_out(ways, vs)
+    if odd:
+        lines.append(odd)
     lines += deals.ladder_lines(vs, CURRENCY)
     return "\n".join(lines)
 
