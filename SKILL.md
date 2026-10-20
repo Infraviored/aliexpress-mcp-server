@@ -5,6 +5,13 @@ reads reviews, collects store coupons and manages the cart (add, change
 quantity, remove, check for checkout). It does NOT check out or pay: it hands
 the user the checkout link.
 
+Before searching, ask the user once — unless they already said — whether
+global sellers are fine (often cheaper, 2–4 weeks, shipping per cart line) or
+only Choice / "Shipped by AliExpress" (about a week, free above ~10 €). Pass
+the answer as `choice_only=True` (search_products, shop_list) or per item
+`seller: "choice"`. With a mixed answer, show both prices: run shop_list with
+and without choice_only and say what the speed costs.
+
 The usual job — a shopping list into a ready cart — is one tool:
 
 1. `shop_list(items)` with one dict per part: `need`, `pieces`, and `query`

@@ -732,6 +732,7 @@ def search_products(
     sort_by: str = "best_match",
     page: int = 1,
     with_shipping: bool = False,
+    choice_only: bool = False,
 ) -> str:
     """
     Search AliExpress for products (12 results per page).
@@ -752,9 +753,11 @@ def search_products(
         page: Result page, starting at 1.
         with_shipping: Also fetch real shipping to the configured country for the
             first 8 non-Choice hits (one product-page call each, slower).
+        choice_only: Only "Shipped by AliExpress" (Choice) offers: about a
+            week to DE, free shipping above the Choice threshold.
     """
     try:
-        products = _search(query, sort_by, page)
+        products = _search(query, sort_by, page, choice_only)
     except PermissionError:
         return AUTH_EXPIRED_MSG
     if min_rating > 0:
@@ -803,8 +806,12 @@ def search_products(
     return "\n".join(lines)
 
 
-def _search(query: str, sort_by: str = "best_match", page: int = 1) -> list[dict]:
-    """Search results as dicts (item_id, title, price, rating, orders, choice, ...)."""
+def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only: bool = False) -> list[dict]:
+    """
+    Search results as dicts (item_id, title, price, rating, orders, choice, ...).
+    `choice_only`: AliExpress's own "Choice" filter (selectedSwitches
+    filterCode:choice_atm).
+    """
     slug = quote_plus(query.strip()).replace("+", "-")
     url_path = f"/w/wholesale-{slug}.html"
     sort_map = {
@@ -818,12 +825,17 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1) -> list[dict
         params["SortType"] = sort_map[sort_by]
     if page > 1:
         params["page"] = page
+    if choice_only:
+        params["SearchText"] = query
+        params["selectedSwitches"] = "filterCode:choice_atm"
     client = get_client()
     try:
         resp = client.get(url_path, params=params)
         if check_auth_redirect(resp):
             raise PermissionError("auth expired")
         resp.raise_for_status()
+        # The filter lets the odd hit through whose card lacks the Choice
+        # badge; the product page decides (shop_list checks it there).
         return parse_search_results(resp.text)
     finally:
         client.close()
@@ -1600,13 +1612,17 @@ def _words(text: str) -> list[str]:
     return [w.lower() for w in (text or "").split()]
 
 
+def _choice_only(spec: dict) -> bool:
+    return str(spec.get("seller", "any")).lower() == "choice"
+
+
 def _candidate_ids(spec: dict) -> list[str]:
     """Given item_ids plus the top search hits for `query` (both compete)."""
     ids = [str(x) for x in spec.get("item_ids") or []]
     if not spec.get("query"):
         return ids
     avoid = _words(spec.get("avoid", ""))
-    hits = [h for h in _search(spec["query"], spec.get("sort_by", "best_match"))
+    hits = [h for h in _search(spec["query"], spec.get("sort_by", "best_match"), choice_only=_choice_only(spec))
             if not any(w in (h.get("title") or "").lower() for w in avoid)]
     for h in hits[: int(spec.get("candidates", 3))]:
         if h["item_id"] not in ids:
@@ -1619,11 +1635,19 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
     offer = _pdp_offer(item_id)
     if not offer:
         return [], [f"{item_id}: no product data" + blocked_msg()]
+    if _choice_only(spec) and not offer["choice"]:
+        return [], [f"{item_id}: not Choice (global seller) — skipped, Choice only was asked"]
     pieces = max(1, int(spec.get("pieces", 1)))
     match, avoid = _words(spec.get("match", "")), _words(spec.get("avoid", ""))
-    vs = [v for v in offer["variants"] if v["salable"] and v["price"] is not None
-          and all(w in v["label"].lower() for w in match)
+    # A match word may stand in the variant name or, for every variant, in
+    # the title ("ESP32 S3 N16R8 CAM …" has the single variant "default").
+    title = (offer.get("title") or "").lower()
+    ok = [v for v in offer["variants"] if v["salable"] and v["price"] is not None
           and not any(w in v["label"].lower() for w in avoid)]
+    vs = [v for v in ok if all(w in v["label"].lower() for w in match)]
+    if not vs and not any(w in v["label"].lower() for v in offer["variants"] for w in match):
+        # No variant names it at all: the title speaks for every variant.
+        vs = [v for v in ok if all(w in title for w in match)]
     if spec.get("sku_id"):
         vs = [v for v in offer["variants"] if v["sku_id"] == str(spec["sku_id"])]
     if not vs:
@@ -1650,9 +1674,15 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
         w.update(offer=offer, quote=quote, disc=disc)
     ways.sort(key=lambda w: (w["score"], len(w["lines"])))
     notes = []
-    odd = deals.odd_one_out(ways, vs)
-    if odd:
-        notes.append(odd)
+    # A winner far cheaper than every other variant is usually another
+    # article (bare chip, adapter): rank it out, say so.
+    for _ in range(3):
+        if not ways or not deals.odd_one_out(ways, vs):
+            break
+        bad = {v["label"] for v, _ in ways[0]["lines"]}
+        ways = [w for w in ways if not any(v["label"] in bad for v, _ in w["lines"])]
+        notes.append(f"{item_id}: skipped variant {', '.join(sorted(bad))} — far cheaper than the others, "
+                     "probably an accessory or bare chip (get_variant_images to check)")
     if ways and any(v.get("ambiguous") for v, _ in ways[0]["lines"]):
         notes.append(f"! variant names repeat — look at get_variant_images({item_id}) before trusting the pick")
     return ways, notes
@@ -1732,6 +1762,26 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST) -> dict:
     }
 
 
+def _count_cart_choice(cookies: dict[str, str], plan: dict) -> None:
+    """
+    Choice ships free per order: checked Choice lines already in the cart
+    (other products) count towards the threshold together with the plan.
+    """
+    try:
+        cart = _read_cart(cookies)
+    except Exception as e:
+        plan["notes"].append(f"could not read the cart for the Choice threshold: {e}")
+        return
+    other = sum((ln["price"] or 0) * ln["qty"] for ln in cart["lines"]
+                if ln["checked"] and ln["group"] == "group_choice" and ln["item_id"] not in plan["candidates"])
+    plan["cart_choice"] = round(other, 2)
+    if other + plan["choice_goods"] >= plan["threshold"]:
+        plan["ship"] -= plan["choice_fee"]
+        plan["total"] -= plan["choice_fee"]
+        plan["choice_fee_waived"] = plan["choice_fee"]
+        plan["choice_fee"] = 0.0
+
+
 def _fmt_plan(plan: dict) -> str:
     cur = CURRENCY
     out = [f"Plan: {len(plan['picks'])} item(s), "
@@ -1753,8 +1803,14 @@ def _fmt_plan(plan: dict) -> str:
                        f" → {alt['score'] - w['score']:+.2f} incl. delivery time")
     out.append("")
     if plan["threshold"]:
-        st = ("free shipping" if not plan["choice_fee"] else
-              f"{plan['choice_fee']:.2f} shipping — add {plan['threshold'] - plan['choice_goods']:.2f} Choice goods to make it free")
+        if plan.get("choice_fee_waived"):
+            st = (f"free shipping together with the checked Choice lines already in the cart "
+                  f"({plan['cart_choice']:.2f}); alone it would cost {plan['choice_fee_waived']:.2f}")
+        elif plan["choice_fee"]:
+            short = plan["threshold"] - plan["choice_goods"] - plan.get("cart_choice", 0)
+            st = f"{plan['choice_fee']:.2f} shipping — add {short:.2f} Choice goods to make it free"
+        else:
+            st = "free shipping"
         out.append(f"Choice goods {plan['choice_goods']:.2f} {cur} (threshold {plan['threshold']:.2f}): {st}")
     for st in plan["stores"].values():
         if st["save"] or st["coupon"] or st["more"]:
@@ -1866,7 +1922,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
 
 
 @mcp.tool()
-def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST) -> str:
+def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST, choice_only: bool = False) -> str:
     """
     From a shopping list to a checked cart: finds the best offer for every
     item, prices the basket as checkout will (shipping per cart line for
@@ -1879,9 +1935,16 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
         pieces:    how many pieces are needed (packs are counted in pieces)
         query:     search term — the top `candidates` hits (default 3) compete
         item_ids:  candidate products (compete with the search hits, if any)
-        match:     words every chosen variant name must contain ("N16R8 Module")
+        match:     words the chosen variant name or the product title must
+                   contain ("N16R8 Module")
         avoid:     words that rule out a variant or search hit ("chip shell")
         sku_id + qty: take exactly this variant and quantity (no optimizing)
+        seller:    "choice" = only "Shipped by AliExpress" offers (fast, free
+                   above the Choice threshold); default "any" also allows
+                   global sellers (often cheaper, 2–4 weeks, shipping per line)
+
+    Ask the user first whether global sellers are fine or only Choice, unless
+    they already said; pass the answer as choice_only or per item `seller`.
 
     Ranking: net price (goods + shipping − store discount) + day_cost per day
     of delivery. When the report says variant names repeat or a variant is
@@ -1897,15 +1960,20 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
         items: The shopping list (see above).
         apply: Put the plan into the cart.
         day_cost: EUR per delivery day when ranking (default 0.15).
+        choice_only: `seller: "choice"` for every item.
     """
+    if choice_only:
+        items = [{**it, "seller": "choice"} for it in items]
     try:
         plan = _plan(items, day_cost)
     except PermissionError:
         return AUTH_EXPIRED_MSG
+    cookies = load_cookies()
+    if plan["choice_fee"] and cookies:
+        _count_cart_choice(cookies, plan)
     text = _fmt_plan(plan)
     if not apply or not plan["picks"]:
         return text
-    cookies = load_cookies()
     if not cookies:
         return text + "\n\n" + AUTH_EXPIRED_MSG
     try:
