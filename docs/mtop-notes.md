@@ -66,3 +66,24 @@ and URL. Their lines are not part of this cart.
 `deliveryDayMin/Max`, `shipFrom`. Global sellers pay shipping per line; two
 variants of one product in two lines pay twice. Choice lines share one free
 shipment above the threshold.
+
+## Store coupons (2026-10-20)
+
+**Read.** `mtop.aliexpress.pdp.promotion.panel` (see `_discounts`). Each
+`shopCoupon` entry has `campaignId`, `collectText` ("Collect" / "Follow &
+collect"), `collected`, `couponCode`, and `couponAssignParam.couponMeta`.
+The panel marks private coupons (store welcome offer) as collected, public
+code coupons never — the MCP remembers those in
+`~/.mcp-credentials/aliexpress-coupons.json`.
+
+**Collect.** The page calls `mtop.aliexpress.ump.coupon.common.assignNew`
+(POST, `scenario: AssignSingleCoupon`, `couponMetaList: [couponMeta]`) with
+browser fingerprints `ua` and `umidToken`. Without them the call answers
+SUCCESS with empty success and fail lists and collects nothing. So
+`browser_actions.collect_coupons` clicks it on the product page: open the
+coupon entry `[class*=coupon-block--wrap]`, then the button
+`[ae_button_type="Promotion_shopCoupon_collect"][ae_object_value*="activityId=<campaignId>;"]`
+(language-independent), and reads the `assignNew` response.
+
+**Product page extras seen, not used yet:** quantity price tiers ("3,15€ ≥10
+Stücke") and an express shipping option.

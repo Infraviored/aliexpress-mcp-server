@@ -1808,7 +1808,8 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
                     log.append(f"FAILED to add {p['need']} ({v['label']}): {e}")
                     continue
             want.append(cid)
-            expect[cid] = {"need": p["need"], "ship": ship, "days": w["days"], "choice": w["offer"]["choice"]}
+            expect[cid] = {"need": p["need"], "ship": ship, "days": w["days"], "choice": w["offer"]["choice"],
+                           "price": v["price"]}
     mine = _mcp_lines()
     drop = [ln for ln in cart["lines"]
             if ln["cart_id"] in mine and ln["item_id"] in plan["candidates"] and ln["cart_id"] not in want]
@@ -1838,15 +1839,25 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         if not ln:
             diffs.append(f"{e['need']}: line {cid} not in the cart")
             continue
+        if ln["price"] is not None and e["price"] and abs(ln["price"] - e["price"]) > 0.05:
+            diffs.append(f"{e['need']}: {ln['price']:.2f} each in the cart, {e['price']:.2f} on the product page")
         if ln["ship"] is not None and not e["choice"] and abs(ln["ship"] - e["ship"]) > 0.5:
             diffs.append(f"{e['need']}: shipping {ln['ship']:.2f} in the cart, planned {e['ship']:.2f}")
         days = ln["days"][1]
         if days and e["days"] and abs(int(days) - int(e["days"])) > 3:
             diffs.append(f"{e['need']}: {days} days in the cart, planned {e['days']}")
     out = ["Applied:"] + [f"- {x}" for x in log] + ["", sel, ""]
-    out.append("Plan vs cart: " + ("matches (shipping within 0.50, delivery within 3 days)." if not diffs
+    out.append("Plan vs cart: " + ("matches (price, shipping within 0.50, delivery within 3 days)." if not diffs
                                    else "differs:\n" + "\n".join(f"- {d}" for d in diffs)))
-    r = cartlib.shipping_report({**after, "lines": [ln for ln in after["lines"] if ln["cart_id"] in want]})
+    # The checkout link holds every plan line, also those beyond the 10 the
+    # cart page keeps checked: report on all of them.
+    sub = [dict(lines[c], checked=True) for c in want if c in lines]
+    goods = sum((ln["price"] or 0) * ln["qty"] for ln in sub)
+    ship = sum(ln["ship"] or 0 for ln in sub)
+    out.append(f"Checkout link total ≈ goods {goods:.2f} + shipping {ship:.2f}"
+               f" − store discounts {plan['saved']:.2f} = {goods + ship - plan['saved']:.2f} {CURRENCY}"
+               " (the checkout page has the final figure)")
+    r = cartlib.shipping_report({**after, "lines": sub})
     for ln, why in r["paid"]:
         out.append(f"- paid shipping {ln['ship']:.2f}: {ln['title'][:40]} — {why}")
     if r["slowest"]:

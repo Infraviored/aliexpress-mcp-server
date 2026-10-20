@@ -1,15 +1,41 @@
 # AliExpress MCP Server
 
-An MCP server that wraps AliExpress search and product detail scraping for a Canadian shopper — prices in CAD, shipping to Vancouver, BC.
+An MCP server for shopping on AliExpress from an agent: search, compare offers
+as checkout will price them, collect store coupons, and put a shopping list
+into the cart, checked and ready. Prices, shipping and delivery are for the
+configured country and currency (`ALIEXPRESS_COUNTRY`, `ALIEXPRESS_CURRENCY`,
+default DE / EUR).
 
-Read-only by design: it searches, fetches product details, and checks shipping. It does **not** add to cart, check out, or pay.
+It never checks out or pays. It hands out the checkout link; paying is the
+user's click.
 
 ## Tools
 
-- `search_products(query, min_rating, max_price, sort_by)` — searches the public wholesale search URL and parses the embedded JSON.
-- `get_product_details(item_id | url)` — title, price, discount, rating, sold count, seller, shipping cost & ETA.
-- `get_shipping_estimate(item_id)` — shipping cost + ETA to the configured country.
-- `view_cart()` — current cart contents via the signed `mtop.aliexpress.trade.cart.render` endpoint. Read-only.
+- `shop_list(items, apply)` — a shopping list to a ready cart. Finds the best
+  offer per part (shipping per cart line for global sellers, Choice
+  free-shipping threshold, store discounts, delivery time), and with
+  `apply=True` adds/resizes the lines, removes its own replaced lines,
+  collects the store coupon worth having, checks exactly the plan, returns
+  the checkout link and compares plan and cart.
+- `view_cart(checked_only)` — the cart as the web page shows it, grouped into
+  "Shipped by AliExpress" (Choice) and global sellers, with what checkout
+  would charge, a shipping analysis (every paid shipping line and why, the
+  slowest line) and the other channel carts.
+- `select_cart_items(cart_ids, only)` — check lines for checkout; returns the
+  checkout link (AliExpress itself keeps at most 10 lines checked).
+- `add_to_cart`, `update_cart_quantity`, `remove_from_cart` — cart lines.
+- `best_offer(item_id, pieces)`, `plan_basket(lines)` — pricing without
+  touching the cart.
+- `get_discounts(item_id, subtotal)`, `collect_coupon(item_id, subtotal)` —
+  store discounts and coupons; collecting runs the product page in Chrome.
+- `search_products`, `get_product_details`, `get_product_variants`,
+  `get_variant_images`, `get_product_reviews`, `get_shipping_estimate`.
+
+The cart and coupon protocols were learned by recording the real pages with
+`tools/capture_mtop.py`; see `docs/mtop-notes.md`. A bot check (slider or
+reCAPTCHA box) is passed automatically in Chrome on a virtual display
+(`slider.py`); cart lines this MCP added are remembered in
+`~/.mcp-credentials/aliexpress-mcp-lines.json`.
 
 ## How it works
 
