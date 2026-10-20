@@ -287,3 +287,109 @@ def upsell(ways: list[dict], currency: str, max_extra: float = 1.5, max_ratio: f
     if extra <= max(max_extra, max_ratio * best["total"]):
         return f"tip: +{extra:.2f} {currency} gets {w['pieces']} pcs instead of {best['pieces']} — " + fmt_way(w, currency)
     return None
+
+
+# ─── Store discounts, coupons, coins (pdp.promotion.panel) ──────────────────
+
+_NUM = r"(\d+(?:[.,]\d+)?)"
+
+
+def _money(text: str) -> Optional[float]:
+    m = re.search(_NUM, text or "")
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def parse_discounts(resp: dict) -> dict:
+    """
+    The "Discounts & coupon codes" panel as data:
+    {"seller_id", "tiers": [(min, off)] store discount (automatic, best tier
+    applies), "coupons": [{off, min, how, code, label}] (one per order per
+    store, must be collected or typed), "coins_pct", "coins", "other": [text]}.
+    """
+    out = {"seller_id": None, "tiers": [], "coupons": [], "coins_pct": 0.0, "coins": None, "other": []}
+    raw = ((resp.get("data") or {}).get("result") or {}).get("panelPageGroupResultStr")
+    if not raw:
+        return out
+    try:
+        groups = json.loads(raw).get("panelPageGroupInfoList") or []
+    except ValueError:
+        return out
+    for g in groups:
+        for p in g.get("panelPagePromotionList") or []:
+            tips = {r.get("key"): r.get("tipList") or [] for r in p.get("resourcePositions") or []}
+            title, sub, desc = tips.get("title", []), tips.get("sub_title", []), tips.get("description", [])
+            kind = p.get("displayType") or ""
+            out["seller_id"] = out["seller_id"] or p.get("sellerId")
+            if kind == "flexiCoin":
+                pct = re.search(r"(\d+(?:[.,]\d+)?)\s*%", " ".join(title))
+                out["coins_pct"] = float(pct.group(1).replace(",", ".")) if pct else 0.0
+                have = re.search(r"(\d+)\s*coins", " ".join(sub))
+                out["coins"] = int(have.group(1)) if have else None
+            elif kind == "fixedDiscount":
+                for t in title:  # "Get 0,91€ off orders over 18,25€"
+                    m = re.search(_NUM + r"\D+off\D+over\D*" + _NUM, t)
+                    if m:
+                        out["tiers"].append((float(m.group(2).replace(",", ".")), float(m.group(1).replace(",", "."))))
+            elif title and _money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
+                how = p.get("couponCode") and f"code {p['couponCode']}" or (p.get("collectText") or "automatic").lower()
+                out["coupons"].append({
+                    "off": _money(title[0]), "min": _money(" ".join(sub)) or 0.0,
+                    "how": how, "label": " ".join(desc) or kind,
+                })
+            else:
+                text = " · ".join(title + sub + desc)
+                if text:
+                    out["other"].append(text)
+    out["tiers"].sort()
+    out["coupons"].sort(key=lambda c: (c["min"], -c["off"]))
+    return out
+
+
+def discount_for(d: Optional[dict], subtotal: float) -> tuple[float, str]:
+    """Best saving for a store subtotal: best store-discount tier + best single coupon."""
+    if not d:
+        return 0.0, ""
+    parts, save = [], 0.0
+    tier = max((t for t in d["tiers"] if t[0] <= subtotal), default=None, key=lambda t: t[1])
+    if tier:
+        save += tier[1]
+        parts.append(f"store discount {tier[1]:.2f}")
+    cp = max((c for c in d["coupons"] if c["min"] <= subtotal), default=None, key=lambda c: c["off"])
+    if cp:
+        save += cp["off"]
+        parts.append(f"coupon {cp['off']:.2f} ({cp['how']})")
+    return save, " + ".join(parts)
+
+
+def next_discount(d: Optional[dict], subtotal: float, currency: str, reach: float = 0.5) -> Optional[str]:
+    """'add 3.20 → 1.82 store discount' when the next tier/coupon is within `reach`·subtotal."""
+    if not d:
+        return None
+    now, _ = discount_for(d, subtotal)
+    best = None
+    for need in sorted({t[0] for t in d["tiers"]} | {c["min"] for c in d["coupons"]}):
+        if need <= subtotal or need - subtotal > reach * max(subtotal, 1):
+            continue
+        gain = discount_for(d, need)[0] - now
+        if gain > 0.01 and (not best or gain / (need - subtotal) > best[1] / (best[0] - subtotal)):
+            best = (need, gain)
+    if not best:
+        return None
+    return f"spend {best[0] - subtotal:.2f} {currency} more in this store → {best[1]:.2f} more off"
+
+
+def fmt_discounts(d: Optional[dict], currency: str) -> list[str]:
+    if not d:
+        return []
+    out = []
+    if d["tiers"]:
+        out.append("store discount (automatic): " + ", ".join(f"{o:.2f} off over {m:.2f}" for m, o in d["tiers"]))
+    for c in d["coupons"]:
+        out.append(f"coupon: {c['off']:.2f} off over {c['min']:.2f} — {c['label']}, {c['how']}")
+    if d["coins_pct"]:
+        have = f", you have {d['coins']} coins" if d["coins"] is not None else ""
+        out.append(f"coins: {d['coins_pct']:g}% off{have}")
+    out += [f"other: {t}" for t in d["other"]]
+    if not out:
+        return []
+    return [f"discounts ({currency}; one coupon per store and order):"] + [f"  {x}" for x in out]

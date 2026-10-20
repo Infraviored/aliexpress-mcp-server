@@ -1314,6 +1314,30 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
     }
 
 
+_DISC_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _discounts(item_id: str, sku_id: str = "") -> Optional[dict]:
+    """Store discount tiers, coupons and coins from the product's discount panel."""
+    hit = _DISC_CACHE.get(item_id)
+    if hit and time.time() - hit[0] < PDP_TTL:
+        return hit[1]
+    try:
+        resp = mtop_call("mtop.aliexpress.pdp.promotion.panel", "1.0", {
+            "productId": item_id, "skuId": sku_id, "quantity": "1", "targetPanel": "global",
+            "channel": "", "sourceType": "pc", "clientType": "pc", "recBizScene": "",
+            "discountExt": "", "__inline": "true", "_lang": f"en_{COUNTRY}", "_currency": CURRENCY,
+        }, referer=f"{BASE_URL}/item/{item_id}.html")
+    except Exception as e:
+        logger.debug("discount panel %s failed: %s", item_id, e)
+        return None
+    if not any("SUCCESS" in r for r in resp.get("ret") or []):
+        return None
+    d = deals.parse_discounts(resp)
+    _DISC_CACHE[item_id] = (time.time(), d)
+    return d
+
+
 def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
     """Shipping as A + B·(qty-1) for a non-Choice offer (None for Choice)."""
     if offer.get("choice"):
@@ -1438,7 +1462,8 @@ def get_variant_images(item_id: str, match: str = ""):
 def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_threshold: bool = True) -> str:
     """
     Cheapest way to get at least `pieces` pieces from one product: compares
-    pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping. Non-Choice
+    pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping and the
+    store's discounts/coupons (ranked by net price; lists every discount). Non-Choice
     shipping is measured as A + B per extra unit; Choice shipping counts as
     free when the Choice part of the order is over the threshold.
 
@@ -1459,10 +1484,22 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
         return f"No available variant matches '{match}'."
     quote = _freight(offer)
     ways = deals.best_ways(vs, max(1, pieces), quote, offer["choice"] and choice_order_over_threshold, limit=50)
+    disc = _discounts(item_id, vs[0]["sku_id"])
+    for w in ways:
+        w["save"], w["save_how"] = deals.discount_for(disc, w["goods"])
+        w["net"] = w["total"] - w["save"]
+    ways.sort(key=lambda w: (w["net"], -w["pieces"]))
     lines = [f"{offer['title'][:90]} ({item_id})",
              ("Choice" if offer["choice"] else deals.fmt_quote(quote, CURRENCY))]
-    lines += [f"{i}. " + deals.fmt_way(w, CURRENCY) + " · " + ", ".join(f"sku {v['sku_id']}×{q}" for v, q in w["lines"])
+    lines += [f"{i}. " + deals.fmt_way(w, CURRENCY)
+              + (f" − {w['save']:.2f} ({w['save_how']}) = {w['net']:.2f} net" if w["save"] else "")
+              + " · " + ", ".join(f"sku {v['sku_id']}×{q}" for v, q in w["lines"])
               for i, w in enumerate(ways[:3], 1)]
+    if ways:
+        more = deals.next_discount(disc, ways[0]["goods"], CURRENCY)
+        if more:
+            lines.append("discount tip: " + more)
+    lines += deals.fmt_discounts(disc, CURRENCY)
     tip = deals.upsell(ways, CURRENCY)
     if tip:
         lines.append(tip)
@@ -1470,6 +1507,31 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     if odd:
         lines.append(odd)
     lines += deals.ladder_lines(vs, CURRENCY)
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_discounts(item_id: str, subtotal: float = 0) -> str:
+    """
+    The product's "Discounts & coupon codes": automatic store discount tiers,
+    store coupons (collect / follow / code), coins. With `subtotal` (your
+    order total in this store) it says what applies and what the next tier
+    would give. best_offer and plan_basket already apply these.
+
+    Args:
+        item_id: AliExpress item ID.
+        subtotal: Goods total in this store, to compute the saving.
+    """
+    d = _discounts(item_id)
+    if d is None:
+        return f"No discount data for {item_id}." + blocked_msg()
+    lines = deals.fmt_discounts(d, CURRENCY) or ["No store discounts or coupons."]
+    if subtotal:
+        off, how = deals.discount_for(d, subtotal)
+        lines.append(f"at {subtotal:.2f}: −{off:.2f}" + (f" ({how})" if how else ""))
+        more = deals.next_discount(d, subtotal, CURRENCY)
+        if more:
+            lines.append(more)
     return "\n".join(lines)
 
 
@@ -1544,6 +1606,7 @@ def plan_basket(items: list[str]) -> str:
     other_sub = 0.0
     other_ship = 0.0
     problems = []
+    stores: dict[str, dict] = {}
     for raw in items:
         parts = [x.strip() for x in str(raw).split(":")]
         if len(parts) < 2:
@@ -1584,6 +1647,11 @@ def plan_basket(items: list[str]) -> str:
             line_ship = deals.shipping_for(quote, q) if quote else (sh.get("fee") or 0)
             other_ship += line_ship
             sh = dict(sh, fee=round(line_ship, 2))
+        disc = _discounts(iid, v["sku_id"])
+        key = str((disc or {}).get("seller_id") or offer.get("store") or iid)
+        st = stores.setdefault(key, {"name": offer.get("store") or key, "sub": 0.0, "disc": disc})
+        st["sub"] += line_total
+        st["disc"] = st["disc"] or disc
         pcs = v["pack"] * q
         lines_out.append(
             f"- {q} × {v['label']} — {line_total:.2f} {CURRENCY} [{tag}]"
@@ -1608,7 +1676,23 @@ def plan_basket(items: list[str]) -> str:
         out.append(f"Choice items: {choice_sub:.2f} {CURRENCY}, threshold {status}")
     if other_sub:
         out.append(f"Other sellers: {other_sub:.2f} {CURRENCY} + shipping {other_ship:.2f} (A + B·qty per line)")
-    out.append(f"Estimated total: {choice_sub + choice_ship + other_sub + other_ship:.2f} {CURRENCY} (before coins/coupons)")
+    gross = choice_sub + choice_ship + other_sub + other_ship
+    saved = 0.0
+    disc_lines = []
+    for st in stores.values():
+        s_off, how = deals.discount_for(st["disc"], st["sub"])
+        more = deals.next_discount(st["disc"], st["sub"], CURRENCY)
+        if s_off or more:
+            disc_lines.append(f"  {st['name']}: {st['sub']:.2f}"
+                              + (f" → −{s_off:.2f} ({how})" if s_off else "")
+                              + (f"; {more}" if more else ""))
+        saved += s_off
+    if disc_lines:
+        out.append("Store discounts/coupons:")
+        out += disc_lines
+    out.append(f"Estimated total: {gross:.2f} {CURRENCY}"
+               + (f", after store discounts/coupons {gross - saved:.2f}" if saved else "")
+               + " (coins not included)")
     if problems:
         out.append("Problems: " + "; ".join(problems))
     return "\n".join(out)

@@ -18,9 +18,14 @@ How to find the best deal (the tools do the arithmetic; keep calls few):
    numbered (#n matches get_product_variants).
 4. `get_product_reviews(item_id, only_low=True)` before buying parts that are
    often faked (ICS-43434, branded chips).
-5. `plan_basket([...])` on the final list: Choice items ship free above the
+5. Discounts: `best_offer` and `plan_basket` apply each store's automatic
+   discount tiers and the best store coupon, and say when spending a bit more
+   in a store unlocks the next tier. `get_discounts(item_id, subtotal)` lists
+   them all (coupon codes, "collect" / "follow & collect"). Always tell the
+   user which coupon to collect or which code to type.
+6. `plan_basket([...])` on the final list: Choice items ship free above the
    threshold (10 € in DE); non-Choice shipping is A + B per extra unit.
-6. `add_to_cart(item_id, sku_id, qty)` only when the user asked for it.
+7. `add_to_cart(item_id, sku_id, qty)` only when the user asked for it.
 
 Rules worth remembering:
 - The search price is the cheapest variant and often bait (an accessory, a
@@ -35,5 +40,6 @@ Rules worth remembering:
   (1 pc 0.32 €, 5 pcs 1.39 €). The tools print a "pack ladder" and "tip" line.
 - A bigger pack can also be dearer per piece (10 pcs 1.54/pc vs 5 pcs 1.44/pc);
   the ladder line flags it with "!".
-- Prices and shipping are for ALIEXPRESS_COUNTRY (default DE, EUR). Coins and
-  coupons are not included.
+- Prices and shipping are for ALIEXPRESS_COUNTRY (default DE, EUR). Coins are
+  not included (most accounts have none). A store welcome coupon may only
+  work for a first order in that store.
