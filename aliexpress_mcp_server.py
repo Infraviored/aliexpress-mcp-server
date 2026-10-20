@@ -266,8 +266,32 @@ def _walk_find(obj: Any, match_keys: set) -> Any:
 
 # ─── Parsing Helpers ────────────────────────────────────────────────────────
 
-PRICE_RE = re.compile(r"(?:C\$|CA\$|US\$|\$|CAD|USD)\s*([\d,]+\.\d{2}|[\d,]+)")
+PRICE_RE = re.compile(
+    r"(?:C\$|CA\$|US\$|\$|€|CAD|USD|EUR)\s*"
+    r"([\d.,]+)"
+    r"|([\d.,]+)\s*(?:€|EUR)",
+)
 ITEM_ID_RE = re.compile(r"/item/(\d+)\.html")
+
+
+def _norm_price(raw: str) -> Optional[float]:
+    """Normalise a captured price string to a float.
+
+    Handles both '1,234.56' (en) and '1.234,56' / '1234,56' (de/fr) by
+    checking whether the *last* separator is a comma (European) or a dot.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    # European: comma is the decimal separator, dots are thousands
+    if "," in raw and ("." not in raw or raw.rfind(",") > raw.rfind(".")):
+        raw = raw.replace(".", "").replace(",", ".")
+    else:
+        raw = raw.replace(",", "")
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def parse_price(text: str) -> Optional[float]:
@@ -276,17 +300,11 @@ def parse_price(text: str) -> Optional[float]:
         return None
     m = PRICE_RE.search(text)
     if m:
-        try:
-            return float(m.group(1).replace(",", ""))
-        except ValueError:
-            return None
-    # Fallback: bare number
+        return _norm_price(m.group(1) or m.group(2))
+    # Fallback: bare number (dot-decimal)
     m = re.search(r"([\d,]+\.\d{2})", text)
     if m:
-        try:
-            return float(m.group(1).replace(",", ""))
-        except ValueError:
-            return None
+        return _norm_price(m.group(1))
     return None
 
 
@@ -1201,7 +1219,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         image = next((img for _, img, _ in parts if img), None)
         hot = any(h for _, _, h in parts)
         info = prices.get(sid) or {}
-        price = parse_price((info.get("salePriceString") or "").replace("€", "$").replace(",", "."))
+        price = parse_price(info.get("salePriceString") or "")
         pack = _pack_size(label)
         variants.append({
             "sku_id": sid,
@@ -1231,7 +1249,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
             "free": free,
             "company": b.get("company") or b.get("deliveryProviderName"),
             "days": (b.get("deliveryDayMin"), b.get("deliveryDayMax")),
-            "choice_threshold": parse_price((b.get("logisticsComposeThreshold") or "").replace("€", "$").replace(",", ".")),
+            "choice_threshold": parse_price(b.get("logisticsComposeThreshold") or ""),
         }
 
     promos = []
