@@ -1,9 +1,31 @@
 Use this skill when the user mentions AliExpress, searching for products on
-AliExpress, checking prices from China, finding cheap alternatives, birthday
-shopping, or wants to browse AliExpress products. Also trigger when the user
-says "find on Ali," "search AliExpress," "how much on AliExpress," "shipping
-from China," or references a specific AliExpress item URL or item ID. This
-skill handles searching AliExpress, pulling clean product details (price,
-rating, sold count, seller), checking shipping estimates to Canada, and
-viewing the current cart (read-only). It does NOT handle checkout, payment,
-or order placement.
+AliExpress, checking prices from China, finding cheap alternatives, or
+references an AliExpress item URL or item ID. It searches, compares offers,
+reads reviews, and manages the cart (add, change quantity, remove). It does
+NOT check out or pay.
+
+How to find the best deal (the tools do the arithmetic; keep calls few):
+
+1. `search_products` (sort "orders") → candidates with price, orders, rating,
+   Choice, shipping line. `with_shipping=True` adds real shipping for
+   non-Choice hits.
+2. `best_offer(item_id, pieces)` per candidate → the cheapest way to N pieces
+   (pack sizes and mixes, shipping included) plus a "tip" line when a few cents
+   more buy many more pieces. Prefer it over reading raw variant lists.
+3. Variant names ("Color"/"Farbe") are often pack sizes, sometimes different
+   articles, and can be identical while the article differs. When names are
+   vague or repeat, call `get_variant_images` — one picture with every variant
+   numbered (#n matches get_product_variants).
+4. `get_product_reviews(item_id, only_low=True)` before buying parts that are
+   often faked (ICS-43434, branded chips).
+5. `plan_basket([...])` on the final list: Choice items ship free above the
+   threshold (10 € in DE); non-Choice shipping is A + B per extra unit.
+6. `add_to_cart(item_id, sku_id, qty)` only when the user asked for it.
+
+Rules worth remembering:
+- Always mention when a bigger pack is much cheaper per piece or nearly free
+  (1 pc 0.32 €, 5 pcs 1.39 €). The tools print a "pack ladder" and "tip" line.
+- A bigger pack can also be dearer per piece (10 pcs 1.54/pc vs 5 pcs 1.44/pc);
+  the ladder line flags it with "!".
+- Prices and shipping are for ALIEXPRESS_COUNTRY (default DE, EUR). Coins and
+  coupons are not included.

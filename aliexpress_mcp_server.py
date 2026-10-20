@@ -23,7 +23,9 @@ from urllib.parse import quote_plus, quote
 
 import httpx
 from bs4 import BeautifulSoup
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
+
+import deals
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -1171,17 +1173,7 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
     return "\n".join(lines)
 
 
-# Pack size from a variant name: "5PCS", "10 Stück", "3pcs X", "Pack of 4".
-# Deliberately strict — "8 bit", "16LEDs", "2m" are not pack sizes.
-_PACK_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:pcs|pc|pieces?|stück|stk|pack|lots?)\b|pack of\s*(\d{1,4})", re.I)
-
-
-def _pack_size(text: str) -> int:
-    m = _PACK_RE.search(text or "")
-    if not m:
-        return 1
-    n = int(m.group(1) or m.group(2))
-    return n if 0 < n <= 1000 else 1
+_pack_size = deals.pack_size
 
 
 def _pdp_offer(item_id: str) -> Optional[dict]:
@@ -1212,7 +1204,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
     qty = ((res.get("QUANTITY_PC") or {}).get("allSkuQuantityView")) or {}
 
     variants = []
-    for pth in paths:
+    for n, pth in enumerate(paths, 1):
         sid = str(pth.get("skuIdStr") or pth.get("skuId"))
         parts = [names.get(part, (part, None, False)) for part in (pth.get("path") or "").split(";") if part]
         label = " / ".join(n for n, _, _ in parts) or "default"
@@ -1231,6 +1223,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
             "salable": pth.get("salable", True),
             "image": image,
             "hot": hot,
+            "n": n,
         })
     counts: dict[str, int] = {}
     for v in variants:
@@ -1273,7 +1266,22 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         "store": shop.get("storeName"),
         "store_positive": shop.get("sellerPositiveRate"),
         "promos": promos,
+        "delivery_ext": (res.get("SHIPPING") or {}).get("deliveryExt"),
     }
+
+
+def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
+    """Shipping as A + B·(qty-1) for a non-Choice offer (None for Choice)."""
+    if offer.get("choice"):
+        return None
+    try:
+        return deals.freight_quote(
+            mtop_call, offer["item_id"], COUNTRY, CURRENCY, offer.get("delivery_ext"),
+            offer["url"], sku_id=sku_id,
+        )
+    except Exception as e:
+        logger.debug("freight quote %s failed: %s", offer["item_id"], e)
+        return None
 
 
 def _fmt_shipping(sh: dict) -> str:
@@ -1289,12 +1297,15 @@ def _fmt_shipping(sh: dict) -> str:
 
 
 @mcp.tool()
-def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
+def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     """
     List the variants (SKUs) of a product with price, price per piece,
     purchase limit and sku_id (cheapest per piece first), plus shipping to
     the configured country, Choice threshold, store and promotions.
-    Pack size is read from the variant name ("5PCS", "10 Stück").
+    Pack size is read from the variant name ("5PCS", "10 Stück"); the
+    "pack ladder" line compares pack sizes of the same variant — bigger packs
+    are often nearly free, sometimes dearer per piece. Variant names can be
+    identical while the article differs: look at get_variant_images (#n match).
 
     Args:
         item_id: AliExpress item ID (e.g., "1005007655628250")
@@ -1321,7 +1332,7 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
         lines.append("promotions: " + "; ".join(offer["promos"]))
     lines.append(f"{head}, cheapest per piece first:")
     for r in rows[:max(1, limit)]:
-        line = f"- {r['label']}"
+        line = f"- #{r['n']} {r['label']}"
         if r["price"] is not None:
             line += f" — {r['price']:.2f} {CURRENCY}"
             if r["pack"] > 1:
@@ -1333,11 +1344,85 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
         if not r["salable"]:
             line += " · NOT AVAILABLE"
         line += f"\n  sku_id: {r['sku_id']}"
-        if r.get("ambiguous") and r.get("image"):
-            line += f"\n  same name as another variant — tell apart by picture: {r['image']}"
+        if r.get("ambiguous"):
+            line += " · same name as another variant: compare pictures (get_variant_images)"
         lines.append(line)
     if len(rows) > limit:
         lines.append(f"… {len(rows) - limit} more (raise limit or narrow match)")
+    lines += deals.ladder_lines(rows, CURRENCY)
+    return "\n".join(lines)
+
+
+def _fetch_image(url: str) -> Optional[bytes]:
+    try:
+        r = httpx.get(url + "_220x220.jpg", timeout=15.0, headers={"User-Agent": USER_AGENT})
+        return r.content if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+@mcp.tool()
+def get_variant_images(item_id: str, match: str = ""):
+    """
+    Show every variant's picture in ONE image (numbered grid with name and
+    price) plus a short table. Use it when variant names are vague or repeat
+    ("N16R8 Pin Soldered" ×3 that differ only by antenna socket).
+
+    Args:
+        item_id: AliExpress item ID.
+        match: Only variants whose name contains all these words.
+    """
+    offer = _pdp_offer(item_id)
+    if not offer:
+        return f"No variant data for {item_id}."
+    words = [w.lower() for w in match.split()]
+    rows = [v for v in offer["variants"] if all(w in v["label"].lower() for w in words)]
+    table = [offer["title"][:100]] + [
+        f"#{v['n']} {v['label']} — {v['price']:.2f} {CURRENCY} · sku {v['sku_id']}"
+        + ("" if v["salable"] else " · NOT AVAILABLE")
+        for v in rows if v.get("price") is not None
+    ]
+    png = deals.contact_sheet(rows, _fetch_image, CURRENCY)
+    if not png:
+        return "\n".join(table + ["(no variant pictures)"])
+    if len(rows) > 16:
+        table.append("(picture shows the first 16; narrow with match)")
+    return ["\n".join(table), Image(data=png, format="jpeg")]
+
+
+@mcp.tool()
+def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_threshold: bool = True) -> str:
+    """
+    Cheapest way to get at least `pieces` pieces from one product: compares
+    pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping. Non-Choice
+    shipping is measured as A + B per extra unit; Choice shipping counts as
+    free when the Choice part of the order is over the threshold.
+
+    Args:
+        item_id: AliExpress item ID.
+        pieces: How many pieces you need.
+        match: Restrict to variants whose name contains all these words
+            (e.g. "5V" or "N16R8 soldered").
+        choice_order_over_threshold: For Choice items, whether the whole order's
+            Choice part already passes the free-shipping threshold.
+    """
+    offer = _pdp_offer(item_id)
+    if not offer:
+        return f"No variant data for {item_id}."
+    words = [w.lower() for w in match.split()]
+    vs = [v for v in offer["variants"] if v["salable"] and all(w in v["label"].lower() for w in words)]
+    if not vs:
+        return f"No available variant matches '{match}'."
+    quote = _freight(offer)
+    ways = deals.best_ways(vs, max(1, pieces), quote, offer["choice"] and choice_order_over_threshold, limit=50)
+    lines = [f"{offer['title'][:90]} ({item_id})",
+             ("Choice" if offer["choice"] else deals.fmt_quote(quote, CURRENCY))]
+    lines += [f"{i}. " + deals.fmt_way(w, CURRENCY) + " · " + ", ".join(f"sku {v['sku_id']}×{q}" for v, q in w["lines"])
+              for i, w in enumerate(ways[:3], 1)]
+    tip = deals.upsell(ways, CURRENCY)
+    if tip:
+        lines.append(tip)
+    lines += deals.ladder_lines(vs, CURRENCY)
     return "\n".join(lines)
 
 
@@ -1435,19 +1520,30 @@ def plan_basket(items: list[str]) -> str:
         line_total = v["price"] * q
         sh = offer["shipping"]
         tag = "Choice" if offer["choice"] else "seller"
+        tip = ""
+        same = [x for x in offer["variants"] if deals.base_name(x["label"]) == deals.base_name(v["label"])]
+        ways = deals.best_ways(same, v["pack"] * q, None, True, limit=50)
+        if ways and ways[0]["goods"] < line_total - 0.01:
+            tip = "\n  tip: same pieces cheaper as " + deals.fmt_way(ways[0], CURRENCY)
+        elif deals.upsell(ways, CURRENCY):
+            tip = "\n  " + deals.upsell(ways, CURRENCY)
         if offer["choice"]:
             choice_sub += line_total
             choice_threshold = max(choice_threshold or 0, sh.get("choice_threshold") or 0)
             choice_fee_if_below = max(choice_fee_if_below, sh.get("fee") or 0)
         else:
             other_sub += line_total
-            other_ship += sh.get("fee") or 0
+            quote = _freight(offer, v["sku_id"])
+            line_ship = deals.shipping_for(quote, q) if quote else (sh.get("fee") or 0)
+            other_ship += line_ship
+            sh = dict(sh, fee=round(line_ship, 2))
         pcs = v["pack"] * q
         lines_out.append(
             f"- {q} × {v['label']} — {line_total:.2f} {CURRENCY} [{tag}]"
             + (f" ({pcs} pcs, {line_total / pcs:.2f}/pc)" if pcs > 1 else "")
             + f"\n  {offer['title'][:90]} ({iid}, sku {v['sku_id']})"
-            + ("" if offer["choice"] else f"\n  {_fmt_shipping(sh)}")
+            + ("" if offer["choice"] else f"\n  {_fmt_shipping(sh)} for qty {q}")
+            + tip
         )
 
     choice_ship = 0.0
@@ -1464,7 +1560,7 @@ def plan_basket(items: list[str]) -> str:
         )
         out.append(f"Choice items: {choice_sub:.2f} {CURRENCY}, threshold {status}")
     if other_sub:
-        out.append(f"Other sellers: {other_sub:.2f} {CURRENCY} + shipping {other_ship:.2f} (per line, upper bound)")
+        out.append(f"Other sellers: {other_sub:.2f} {CURRENCY} + shipping {other_ship:.2f} (A + B·qty per line)")
     out.append(f"Estimated total: {choice_sub + choice_ship + other_sub + other_ship:.2f} {CURRENCY} (before coins/coupons)")
     if problems:
         out.append("Problems: " + "; ".join(problems))
