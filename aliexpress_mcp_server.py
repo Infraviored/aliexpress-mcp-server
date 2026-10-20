@@ -222,6 +222,20 @@ def mtop_call(
                     new_cookies[name] = val
             return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer)
 
+        # Bot check: solve the slider in real Chrome on a virtual display, retry once.
+        punish_url = (data.get("data") or {}).get("url") if isinstance(data.get("data"), dict) else None
+        # `action=deny` (after hammering past a solved slider) has no slider: wait it out.
+        if retries > 0 and punish_url and "action=captcha" in punish_url:
+            import slider
+            logger.info("MTOP bot check on %s, solving slider", api)
+            try:
+                solved = slider.solve(punish_url, CREDENTIALS_PATH)
+            except Exception as e:
+                logger.warning("slider solver failed: %s", e)
+                solved = False
+            if solved:
+                return mtop_call(api, version, payload, cookies=load_cookies(), retries=retries - 1, referer=referer)
+
         return data
 
 
@@ -1265,9 +1279,9 @@ def _extract_cart(render_response: dict) -> dict:
 
 CART_REFERER = f"{BASE_URL}/p/shoppingcart/index.html"
 CART_MAX_PAGES = 30
-# AliExpress answers FAIL_SYS_USER_VALIDATE (slider captcha) after ~35 rapid
-# cart calls; pace every cart call.
-CART_CALL_DELAY_S = float(os.environ.get("ALIEXPRESS_CART_DELAY", "4"))
+# AliExpress answers FAIL_SYS_USER_VALIDATE (slider captcha) after ~30 rapid
+# cart calls. mtop_call solves it (slider.py), but pacing keeps it rare.
+CART_CALL_DELAY_S = float(os.environ.get("ALIEXPRESS_CART_DELAY", "2"))
 _last_cart_call = 0.0
 
 
@@ -1292,10 +1306,17 @@ def _cart_base_payload() -> dict[str, Any]:
 def _cart_check(resp: dict) -> dict:
     ret = resp.get("ret", [])
     if not any("SUCCESS" in r for r in ret):
+        url = (resp.get("data") or {}).get("url", "") if isinstance(resp.get("data"), dict) else ""
+        if "action=deny" in url:
+            raise RuntimeError(
+                "AliExpress rate limit (RGV587 deny): blocked for a while after too many "
+                "calls. Try again in 10-30 minutes."
+            )
         if any("USER_VALIDATE" in r for r in ret):
             raise RuntimeError(
-                "AliExpress bot check (FAIL_SYS_USER_VALIDATE): too many cart calls. "
-                "Wait a few minutes, or open the cart in the browser and solve the slider."
+                "AliExpress bot check (FAIL_SYS_USER_VALIDATE) and the automatic slider "
+                "solver did not pass. Wait a few minutes, or open the cart in the browser "
+                "and solve the slider."
             )
         raise RuntimeError(f"Cart API returned: {ret[0] if ret else ret}")
     return resp.get("data") or {}
