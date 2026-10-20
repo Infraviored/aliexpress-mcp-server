@@ -25,6 +25,7 @@ import httpx
 from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP, Image
 
+import cart as cartlib
 import deals
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -715,66 +716,6 @@ def parse_product_detail(html: str, item_id: str) -> dict:
         details["sold_count"] = sold_match.group(0)
 
     return details
-
-
-def parse_cart(html: str) -> dict:
-    """Parse cart page HTML for item list and totals."""
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text("\n", strip=True)
-
-    result: dict = {
-        "items": [],
-        "subtotal": None,
-        "shipping_total": None,
-        "grand_total": None,
-        "raw_snippet": None,
-    }
-
-    # Extract item links
-    items_by_id: dict[str, dict] = {}
-    for link in soup.select("a[href*='/item/']"):
-        href = link.get("href", "")
-        m = ITEM_ID_RE.search(href)
-        if not m:
-            continue
-        pid = m.group(1)
-        if pid in items_by_id:
-            continue
-        title = link.get("title") or link.get_text(strip=True)
-        if not title or len(title) < 4:
-            continue
-
-        card = link.find_parent(["div", "li", "article"]) or link
-        card_text = card.get_text(" ", strip=True)
-        all_prices = [parse_price(t) for t in re.findall(r"[A-Z]{0,2}\$\s*[\d,]+\.\d{2}", card_text)]
-        all_prices = [p for p in all_prices if p is not None]
-        sale_price = min(all_prices) if all_prices else None
-
-        qty_match = re.search(r"(?:Qty|Quantity|x)\s*[:\s]\s*(\d+)", card_text, re.IGNORECASE)
-        qty = int(qty_match.group(1)) if qty_match else 1
-
-        items_by_id[pid] = {
-            "item_id": pid,
-            "title": title[:200],
-            "price": sale_price,
-            "quantity": qty,
-            "url": f"{BASE_URL}/item/{pid}.html",
-        }
-
-    result["items"] = list(items_by_id.values())
-
-    # Totals — search body text
-    for label, key in [
-        (r"Subtotal", "subtotal"),
-        (r"Shipping", "shipping_total"),
-        (r"(?:Grand\s*)?Total", "grand_total"),
-    ]:
-        m = re.search(label + r"[^\n$]*?([A-Z]{0,2}\$\s*[\d,]+\.\d{2})", text, re.IGNORECASE)
-        if m:
-            result[key] = parse_price(m.group(1))
-
-    result["raw_snippet"] = text[:500]
-    return result
 
 
 # ─── MCP Server ─────────────────────────────────────────────────────────────
@@ -1741,199 +1682,19 @@ def get_shipping_estimate(item_id: str) -> str:
     return "\n".join(lines)
 
 
-def _cents_to_float(amt_dict: Any) -> tuple[Optional[float], Optional[str]]:
-    """AliExpress cart prices are nested dicts: {amount: {cent: 804, currencyCode: 'USD'}}."""
-    if not isinstance(amt_dict, dict):
-        return None, None
-    amount = amt_dict.get("amount") if "amount" in amt_dict else amt_dict
-    if isinstance(amount, dict):
-        cent = amount.get("cent")
-        code = amount.get("currencyCode")
-        if isinstance(cent, (int, float)):
-            return round(cent / 100.0, 2), code
-    fmt = amt_dict.get("formattedAmount")
-    if isinstance(fmt, str):
-        return parse_price(fmt), None
-    return None, None
-
-
-def _extract_cart(render_response: dict) -> dict:
-    """
-    Pull structured cart content from a `mtop.aliexpress.trade.cart.render` v1.0
-    response. The response's `data.data` is a flat block-map keyed by block ID.
-    We recognize these tags:
-
-        product_item_component  → a cart line
-        store_title_component   → seller/shop heading
-        summary_component       → totals / checkout summary
-        cart_header_component   → the top bar (contains `count`)
-
-    Each item block's `itemId` is the real product ID; prices live in
-    `prices.children.retailPrice.amount.{cent,currencyCode}`; quantity is
-    `quantity.current`; variant text is `sku.skuInfo`.
-    """
-    result: dict[str, Any] = {
-        "items": [],
-        "shops": {},              # sellerId -> shop dict
-        "count": None,
-        "currency": None,
-        "subtotal": None,
-        "shipping_fee": None,
-        "total": None,
-    }
-
-    data = render_response.get("data", {})
-    blocks = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
-
-    for bid, b in blocks.items():
-        if not isinstance(b, dict):
-            continue
-        tag = b.get("tag") or ""
-        fields = b.get("fields") or {}
-        if not isinstance(fields, dict):
-            continue
-
-        if tag.startswith("cart_header_component"):
-            c = fields.get("count")
-            if c is not None:
-                try:
-                    result["count"] = int(c)
-                except (TypeError, ValueError):
-                    pass
-
-        elif tag.startswith("store_title_component"):
-            sid = fields.get("sellerId") or fields.get("shopId")
-            url = fields.get("url") or ""
-            if isinstance(url, str) and url.startswith("//"):
-                url = "https:" + url
-            result["shops"][str(sid)] = {
-                "name": fields.get("title"),
-                "url": url,
-                "shop_id": fields.get("shopId"),
-                "seller_id": sid,
-            }
-
-        elif tag.startswith("product_item_component"):
-            item_id = fields.get("itemId") or fields.get("productId")
-            title = fields.get("title")
-            if not item_id or not title:
-                continue
-
-            item: dict[str, Any] = {
-                "item_id": str(item_id),
-                "title": str(title)[:200],
-                "sku_info": (fields.get("sku") or {}).get("skuInfo") if isinstance(fields.get("sku"), dict) else None,
-                "sku_id": fields.get("skuId"),
-                "image_url": fields.get("img"),
-                "url": f"{BASE_URL}/item/{item_id}.html",
-                "valid": fields.get("valid", True),
-                "status": fields.get("status"),
-                "cart_id": fields.get("cartId"),
-                "checked": bool((fields.get("checkbox") or {}).get("selected") or fields.get("checkBoxSelected")),
-            }
-
-            # Quantity
-            q = fields.get("quantity") or {}
-            if isinstance(q, dict):
-                item["quantity"] = q.get("current") or q.get("origin") or 1
-            else:
-                try:
-                    item["quantity"] = int(q)
-                except (TypeError, ValueError):
-                    item["quantity"] = 1
-
-            # Prices: current sale price
-            prices_node = fields.get("prices") or {}
-            children = prices_node.get("children") if isinstance(prices_node, dict) else None
-            if isinstance(children, dict):
-                retail = children.get("retailPrice") or children.get("salePrice")
-                if isinstance(retail, dict):
-                    p, c = _cents_to_float(retail)
-                    item["price"] = p
-                    if c and not item.get("currency"):
-                        item["currency"] = c
-
-            # Original (strike) price
-            orig = fields.get("originalPrice")
-            if isinstance(orig, dict):
-                fmt = orig.get("formattedAmount")
-                if fmt:
-                    item["original_price"] = parse_price(fmt)
-
-            # Freight
-            freight = fields.get("freightInfo") or {}
-            svc_list = freight.get("availableFreightServices") if isinstance(freight, dict) else None
-            if isinstance(svc_list, list) and svc_list:
-                chosen = next((s for s in svc_list if s.get("chosen")), svc_list[0])
-                if isinstance(chosen, dict):
-                    fcost = chosen.get("freightCost") or ""
-                    # Format: "Shipping: $1.99" or "Free shipping"
-                    if isinstance(fcost, str):
-                        if "free" in fcost.lower():
-                            item["shipping_cost"] = 0.0
-                        else:
-                            item["shipping_cost"] = parse_price(fcost)
-                    item["delivery_date"] = chosen.get("deliveryDate")
-
-            result["items"].append(item)
-
-        elif tag.startswith("summary_component"):
-            # Real structure:
-            #   fields.summary.priceMap.total
-            #   fields.summary.priceDetail[*].priceMap.{subTotal, total, shippingFee}
-            # Also fallback: fields.checkout.orderDetail[*].priceMap.*
-            summary = fields.get("summary") or {}
-            pm = summary.get("priceMap") if isinstance(summary, dict) else None
-            if isinstance(pm, dict):
-                t = pm.get("total")
-                if isinstance(t, dict):
-                    v, c = _cents_to_float(t)
-                    result["total"] = v
-                    if c:
-                        result["currency"] = c
-
-            # Walk priceDetail groups — they have subTotal/shippingFee per order group
-            pd = summary.get("priceDetail") if isinstance(summary, dict) else None
-            if isinstance(pd, list):
-                for grp in pd:
-                    grp_pm = grp.get("priceMap") if isinstance(grp, dict) else None
-                    if not isinstance(grp_pm, dict):
-                        continue
-                    if result["subtotal"] is None and "subTotal" in grp_pm:
-                        result["subtotal"] = _cents_to_float(grp_pm["subTotal"])[0]
-                    if result["shipping_fee"] is None and "shippingFee" in grp_pm:
-                        result["shipping_fee"] = _cents_to_float(grp_pm["shippingFee"])[0]
-                    if result["total"] is None and "total" in grp_pm:
-                        v, c = _cents_to_float(grp_pm["total"])
-                        result["total"] = v
-                        if c and not result.get("currency"):
-                            result["currency"] = c
-
-            # Last-ditch: checkout.orderDetail
-            checkout = fields.get("checkout") or {}
-            if isinstance(checkout, dict):
-                for grp in checkout.get("orderDetail") or []:
-                    grp_pm = grp.get("priceMap") if isinstance(grp, dict) else None
-                    if not isinstance(grp_pm, dict):
-                        continue
-                    if result["total"] is None and "total" in grp_pm:
-                        v, c = _cents_to_float(grp_pm["total"])
-                        result["total"] = v
-                        if c and not result.get("currency"):
-                            result["currency"] = c
-
-    return result
-
-
-# ─── Cart protocol (Ultron) ─────────────────────────────────────────────────
+# ─── Cart protocol (droplet) ────────────────────────────────────────────────
 #
-# The cart page is an Ultron container. `cart.render` returns page 1 as a
-# snapshot {endpoint, linkage, hierarchy, data}. Every further action (next
-# page, delete, ...) goes to `cart.async` with
-#   params = base64(gzip(json({endpoint, operator, linkage, hierarchy,
-#                              data: {operator: block, *linkage.input: block}})))
-# where `operator` is the id of the block that "fired". The response is the
-# next snapshot (for pagination: the next page, not an accumulation).
+# The cart page (pcChoiceNewCart=1) is a "droplet" container. `cart.render`
+# returns page 1 as a snapshot {asyncHandler, config, page, data, global}.
+# Every further action (next page, checkbox, quantity, delete) goes to
+# `cart.async` with
+#   params = base64(gzip(json({config, operator, asyncHandler, page,
+#                              data: {operator: block, root: rootBlock}})))
+# where `operator` is the id of the block that "fired" and the block carries
+# `fields.operationType` (checkbox / update_quantity / delete). The response
+# is the next snapshot; for pagination it holds the next page only. Parsing
+# and the shipping analysis live in cart.py. Learned by recording the real
+# page with tools/capture_mtop.py; notes in docs/mtop-notes.md.
 
 CART_REFERER = f"{BASE_URL}/p/shoppingcart/index.html"
 CART_MAX_PAGES = 30
@@ -1972,19 +1733,19 @@ def _cart_check(resp: dict) -> dict:
             )
         if any("USER_VALIDATE" in r for r in ret):
             raise RuntimeError(
-                "AliExpress bot check (FAIL_SYS_USER_VALIDATE) and the automatic slider "
-                "solver did not pass. Wait a few minutes, or open the cart in the browser "
-                "and solve the slider."
+                "AliExpress bot check (FAIL_SYS_USER_VALIDATE) and the automatic solver "
+                "did not pass. Wait a few minutes, or open the cart in the browser once."
             )
         raise RuntimeError(f"Cart API returned: {ret[0] if ret else ret}")
     return resp.get("data") or {}
 
 
 def _cart_render(cookies: dict[str, str]) -> dict:
-    """Page 1 of the cart as an Ultron snapshot."""
+    """Page 1 of the cart as a droplet snapshot (the web page's format, in CURRENCY)."""
     _cart_pace()
     return _cart_check(mtop_call(
-        "mtop.aliexpress.trade.cart.render", "1.0", {"platformType": "DESKTOP"},
+        "mtop.aliexpress.trade.cart.render", "1.0",
+        {"platformType": "DESKTOP", **_cart_base_payload()},
         cookies=cookies, referer=CART_REFERER,
     ))
 
@@ -1992,17 +1753,16 @@ def _cart_render(cookies: dict[str, str]) -> dict:
 def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str], next_page: bool = False) -> dict:
     """Fire `operator` (with its possibly modified `block`) against snapshot `state`."""
     blocks = state.get("data") or {}
-    linkage = state.get("linkage") or {}
+    root = (state.get("page") or {}).get("root")
     data = {operator: block}
-    for k in linkage.get("input") or []:
-        if k in blocks and k not in data:
-            data[k] = blocks[k]
+    if root in blocks and root != operator:
+        data[root] = blocks[root]
     upstream = {
-        "endpoint": state.get("endpoint"),
+        "config": state.get("config"),
         "operator": operator,
-        "linkage": linkage,
+        "asyncHandler": state.get("asyncHandler"),
         "data": data,
-        "hierarchy": state.get("hierarchy"),
+        "page": state.get("page"),
     }
     params = base64.b64encode(
         gzip.compress(json.dumps(upstream, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
@@ -2011,140 +1771,191 @@ def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str]
     _cart_pace()
     return _cart_check(mtop_call(
         "mtop.aliexpress.trade.cart.async", "1.0", payload,
-        cookies=cookies, referer=CART_REFERER,
+        cookies=cookies, referer=CART_REFERER, method="POST",
     ))
 
 
-def _cart_has_more(state: dict) -> bool:
-    pg = (state.get("data") or {}).get("pagination_page") or {}
-    return bool((pg.get("fields") or {}).get("hasMore"))
+def _cart_session(cookies: dict[str, str]) -> tuple[dict, list[dict]]:
+    """All pages, plus one snapshot merged over them that actions are sent against."""
+    pages, merged = [], None
+    for state in _cart_render_all(cookies):
+        pages.append(state)
+        merged = cartlib.merge(merged, state)
+    return merged, pages
 
 
-def _cart_next_page(state: dict, cookies: dict[str, str]) -> dict:
-    return _cart_async(state, "pagination_page", state["data"]["pagination_page"], cookies, next_page=True)
-
-
-def _cart_pages(cookies: dict[str, str]):
-    """Yield every cart page snapshot, starting with page 1."""
+def _cart_render_all(cookies: dict[str, str]):
+    # Next pages must be requested from the merged snapshot as well.
+    merged = None
     state = _cart_render(cookies)
-    yield state
-    for _ in range(CART_MAX_PAGES):
-        if not _cart_has_more(state):
-            return
-        state = _cart_next_page(state, cookies)
+    for _ in range(CART_MAX_PAGES + 1):
         yield state
+        merged = cartlib.merge(merged, state)
+        pg = cartlib.pagination(state)
+        if not pg or not pg[1].get("hasMore"):
+            return
+        state = _cart_async(merged, pg[0], pg[1], cookies, next_page=True)
 
 
-def _cart_item_blocks(state: dict) -> dict[str, dict]:
-    """cartId (str) -> product block id, for the items on this snapshot."""
-    out = {}
-    for bid, b in (state.get("data") or {}).items():
-        if isinstance(b, dict) and (b.get("tag") or "").startswith("product_item_component"):
-            cid = (b.get("fields") or {}).get("cartId")
-            if cid is not None:
-                out[str(cid)] = bid
-    return out
-
-
-@mcp.tool()
-def view_cart() -> str:
+def _cart_line_action(cookies: dict[str, str], cart_ids: list[str], edit) -> tuple[list[str], dict[str, str]]:
     """
-    List the whole AliExpress cart (all pages; read-only).
-
-    Each line shows [x] when the item is checked for checkout, plus its cart_id,
-    which remove_from_cart takes. Subtotal/total cover the checked items only.
+    Fire one action per cart line against the merged snapshot. `edit(fields)`
+    sets operationType and the changed field on a copy of the line's block.
+    Each response is folded back in, as the web page does.
     """
-    cookies = load_cookies()
-    if not cookies:
-        return AUTH_EXPIRED_MSG
-
-    try:
-        pages = list(_cart_pages(cookies))
-    except Exception as e:
-        return f"Cart MTOP call failed: {e}"
-
-    cart = _extract_cart({"data": pages[0]})
-    seen = {it["cart_id"] for it in cart["items"]}
-    for page in pages[1:]:
-        more = _extract_cart({"data": page})
-        cart["shops"].update(more["shops"])
-        for it in more["items"]:
-            if it["cart_id"] not in seen:
-                seen.add(it["cart_id"])
-                cart["items"].append(it)
-    items = cart["items"]
-    count = cart["count"]
-
-    if not items:
-        if count == 0:
-            return (
-                "Your AliExpress cart is empty (server count: 0). "
-                "If you just added items, re-save AliExpress cookies via the "
-                "MCP Auth Bridge extension to refresh the session, then retry."
-            )
-        return (
-            f"Cart render succeeded but no item blocks matched. Server count: {count}. "
-            "The cart-line block shape may have changed."
-        )
-
-    currency = cart.get("currency") or CURRENCY
-    n_checked = sum(1 for it in items if it.get("checked"))
-    lines = [f"Cart ({len(items)} item(s), {n_checked} checked, server count: {count}):"]
-    lines.append("")
-    for it in items:
-        line = f"- [{'x' if it.get('checked') else ' '}] {it['title']}"
-        if it.get("price") is not None:
-            line += f" — {it['price']:.2f} {it.get('currency') or currency}"
-        if it.get("original_price") and it["original_price"] > (it.get("price") or 0):
-            line += f" (was {it['original_price']:.2f})"
-        qty = it.get("quantity") or 1
+    merged, _ = _cart_session(cookies)
+    done: list[str] = []
+    failed: dict[str, str] = {}
+    for cid in [str(c).strip() for c in cart_ids if str(c).strip()]:
+        bid = cartlib.item_blocks(merged).get(cid)
+        if bid is None:
+            failed[cid] = "not found in cart"
+            continue
+        block = json.loads(json.dumps(merged["data"][bid]))
+        edit(block.setdefault("fields", {}))
         try:
-            if int(qty) != 1:
-                line += f" × {qty}"
-        except (TypeError, ValueError):
-            pass
-        if it.get("sku_info"):
-            line += f"\n  variant: {it['sku_info']}"
-        if it.get("shipping_cost") is not None:
-            ship_str = "Free" if it["shipping_cost"] == 0 else f"{it['shipping_cost']:.2f}"
-            line += f"\n  shipping: {ship_str}"
-        if it.get("delivery_date"):
-            line += f"\n  delivery: {it['delivery_date']}"
-        if not it.get("valid", True):
-            line += "\n  ⚠️ invalid (sold out or removed)"
-        line += f"\n  item_id: {it['item_id']}  cart_id: {it['cart_id']}"
-        lines.append(line)
+            resp = _cart_async(merged, bid, block, cookies)
+        except Exception as e:
+            failed[cid] = str(e)
+            continue
+        response = (resp.get("global") or {}).get("response") or {}
+        if response.get("success") is False:
+            failed[cid] = response.get("tip") or "rejected"
+            continue
+        merged = cartlib.merge(merged, resp)
+        if (block["fields"].get("operationType")) == "delete":
+            merged["data"].pop(bid, None)
+            for children in (merged.get("page") or {}).get("structure", {}).values():
+                if bid in children:
+                    children.remove(bid)
+        done.append(cid)
+    return done, failed
 
-    # Totals
-    if cart.get("subtotal") is not None or cart.get("shipping_fee") is not None or cart.get("total") is not None:
-        lines.append("")
-        lines.append("Totals (checked items only):")
-        if cart.get("subtotal") is not None:
-            lines.append(f"Subtotal: {cart['subtotal']:.2f} {currency}")
-        if cart.get("shipping_fee") is not None:
-            lines.append(f"Shipping: {cart['shipping_fee']:.2f} {currency}")
-        if cart.get("total") is not None:
-            lines.append(f"Estimated total: {cart['total']:.2f} {currency}")
 
-    return "\n".join(lines)
+def _read_cart(cookies: dict[str, str]) -> dict:
+    return cartlib.parse(list(_cart_render_all(cookies)))
 
 
 @mcp.tool()
-def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
+def view_cart(checked_only: bool = False) -> str:
     """
-    Add a product variant to the AliExpress cart. This changes the real cart
-    (it does not buy anything).
+    The whole AliExpress cart, as the web page shows it (read-only).
+
+    Grouped into "Shipped by AliExpress" (Choice: one shipment, free above a
+    threshold) and "Shipped by global sellers" (shipping per cart line). Each
+    line: [x] when checked, quantity, variant, price, shipping, delivery
+    window, store, cart_id. Then what checkout would charge for the checked
+    lines, and a shipping analysis: every paid shipping line with the reason,
+    the slowest line, and other channel carts (e.g. Combo Blast) that are not
+    part of this cart.
 
     Args:
-        item_id: AliExpress item ID.
-        sku_id: Variant from get_product_variants (required; picks pack size/color).
-        quantity: How many of that variant.
+        checked_only: list only the checked lines.
     """
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
-    if quantity < 1:
-        return "quantity must be at least 1."
+    try:
+        c = _read_cart(cookies)
+    except Exception as e:
+        return f"Cart MTOP call failed: {e}"
+    if not c["lines"]:
+        return f"The cart is empty (server count: {c['header'].get('count')})."
+    return cartlib.format_cart(c, show_unchecked=not checked_only)
+
+
+@mcp.tool()
+def select_cart_items(cart_ids: list[str], only: bool = False, selected: bool = True) -> str:
+    """
+    Check (or uncheck) cart lines for checkout, and return the checkout link
+    for exactly these lines. This changes the real cart's selection, not its
+    content.
+
+    AliExpress remembers at most 10 checked lines (an 11th silently unchecks
+    the oldest). The returned checkout link holds every given line, however
+    many: it opens the order confirmation with exactly those lines, where the
+    user decides to pay.
+
+    Args:
+        cart_ids: cart_id values from view_cart, most important first (when
+            more than 10, the first 10 stay checked).
+        only: uncheck every other line first, so the cart shows exactly these.
+        selected: False unchecks the given lines instead.
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        report = _select(cookies, [str(c).strip() for c in cart_ids], only=only, selected=selected)
+    except Exception as e:
+        return f"Cart call failed: {e}"
+    return report
+
+
+def _select(cookies: dict[str, str], want: list[str], only: bool = False, selected: bool = True) -> str:
+    before = _read_cart(cookies)
+    titles = {ln["cart_id"]: f"{ln['title'][:40]} ({ln['variant']})" for ln in before["lines"]}
+    state_of = {ln["cart_id"]: ln["checked"] for ln in before["lines"]}
+    unknown = [c for c in want if c not in state_of]
+    want = [c for c in want if c in state_of]
+    out = []
+    failed: dict[str, str] = {}
+    if not selected:
+        done, failed = _check_lines(cookies, [c for c in want if state_of[c]], on=False)
+        out.append(f"Unchecked {len(done)} line(s).")
+    else:
+        if only:
+            off = [c for c, on in state_of.items() if on and c not in want]
+            done_off, f = _check_lines(cookies, off, on=False) if off else ([], {})
+            failed.update(f)
+            if done_off:
+                out.append("Unchecked (not in the list): " + "; ".join(titles[c] for c in done_off))
+        keep = want[:cartlib.MAX_CHECKED]
+        on = [c for c in keep if not state_of[c]]
+        done_on, f = _check_lines(cookies, on, on=True) if on else ([], {})
+        failed.update(f)
+        out.insert(0, f"Checked {len(done_on)} line(s); {len(keep) - len(on)} were already checked.")
+        if len(want) > cartlib.MAX_CHECKED:
+            out.append(f"AliExpress keeps only {cartlib.MAX_CHECKED} lines checked; the other "
+                       f"{len(want) - cartlib.MAX_CHECKED} are in the checkout link below.")
+    for c, why in failed.items():
+        out.append(f"Failed {titles.get(c, c)}: {why}")
+    if unknown:
+        out.append("Not in cart: " + ", ".join(unknown))
+    after = _read_cart(cookies)
+    s = after["summary"]
+    if s.get("total") is not None:
+        out.append(f"Cart page now: {sum(1 for ln in after['lines'] if ln['checked'])} line(s) checked, "
+                   f"goods {s.get('subtotal', 0):.2f} + shipping {s.get('shipping', 0):.2f} = "
+                   f"{s['total']:.2f} {s.get('currency') or CURRENCY}")
+    if selected and want:
+        out.append(f"Checkout link ({len(want)} line(s)): {cartlib.checkout_url(want)}")
+    return "\n".join(out)
+
+
+# Lines this MCP put into the cart. Only these may be removed without asking:
+# the user's own lines are never deleted by a plan.
+MCP_LINES_FILE = Path(os.environ.get(
+    "ALIEXPRESS_MCP_LINES", str(CREDENTIALS_PATH.parent / "aliexpress-mcp-lines.json")))
+
+
+def _mcp_lines() -> dict[str, dict]:
+    try:
+        return json.loads(MCP_LINES_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None = None) -> None:
+    lines = _mcp_lines()
+    lines.update(add or {})
+    for cid in drop or []:
+        lines.pop(str(cid), None)
+    MCP_LINES_FILE.write_text(json.dumps(lines, indent=1))
+
+
+def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int) -> str:
+    """Add one variant; returns the new cart_id. Raises on refusal."""
     payload = {
         "locale": "en_US",
         "shipToCountry": COUNTRY,
@@ -2161,20 +1972,65 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
         }]),
     }
     _cart_pace()
-    try:
-        resp = mtop_call(
-            "mtop.aliexpress.trade.cart.add", "1.0", payload,
-            cookies=cookies, referer=f"{BASE_URL}/item/{item_id}.html", method="POST",
-        )
-        _cart_check(resp)
-    except Exception as e:
-        return f"Add to cart failed: {e}"
+    resp = mtop_call(
+        "mtop.aliexpress.trade.cart.add", "1.0", payload,
+        cookies=cookies, referer=f"{BASE_URL}/item/{item_id}.html", method="POST",
+    )
+    _cart_check(resp)
     data = resp.get("data") or {}
     if data.get("addFailed"):
-        return f"Add to cart refused: {data.get('errorMessage') or data.get('failReason') or 'addFailed'}"
+        raise RuntimeError(data.get("errorMessage") or data.get("failReason") or "addFailed")
+    cid = str(data.get("cartId"))
+    _remember_lines({cid: {"item_id": str(item_id), "sku_id": str(sku_id), "added": time.strftime("%Y-%m-%d")}})
+    return cid
+
+
+def _check_lines(cookies: dict[str, str], cart_ids: list[str], on: bool = True):
+    def edit(fields):
+        fields["operationType"] = "checkbox"
+        fields.setdefault("checkbox", {})["selected"] = on
+    return _cart_line_action(cookies, cart_ids, edit)
+
+
+@mcp.tool()
+def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
+    """
+    Add a product variant to the AliExpress cart and check it for checkout.
+    This changes the real cart (it does not buy anything). Adding a variant
+    that is already in the cart raises that line's quantity instead.
+
+    Args:
+        item_id: AliExpress item ID.
+        sku_id: Variant from get_product_variants (required; picks pack size/color).
+        quantity: How many of that variant.
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    if quantity < 1:
+        return "quantity must be at least 1."
+    try:
+        cid = _cart_add(cookies, item_id, sku_id, quantity)
+    except Exception as e:
+        return f"Add to cart failed: {e}"
+    try:
+        c = _read_cart(cookies)
+        line = next((ln for ln in c["lines"] if ln["cart_id"] == cid), None)
+        if line and not line["checked"]:
+            _check_lines(cookies, [cid])
+            c = _read_cart(cookies)
+            line = next((ln for ln in c["lines"] if ln["cart_id"] == cid), None)
+    except Exception as e:
+        return f"Added {quantity} × item {item_id} (sku {sku_id}), cart_id {cid}, but checking it failed: {e}"
+    if not line:
+        return (f"Added item {item_id} (sku {sku_id}), cart_id {cid}, but it is not in the main cart — "
+                "AliExpress may have put it in a channel cart (see view_cart).")
+    ship = "free" if line["ship"] == 0 else (f"{line['ship']:.2f}" if line["ship"] is not None else "?")
+    group = cartlib.GROUP_NAMES.get(line["group"], line["group"])
     return (
-        f"Added {quantity} × item {item_id} (sku {sku_id}) to the cart. "
-        f"cart_id: {data.get('cartId')}, cart now holds {data.get('cartNum')} line(s)."
+        f"Added and checked: {line['qty']} × {line['title'][:50]} ({line['variant']}), "
+        f"{line['price']:.2f} each, shipping {ship}, delivery {line['delivery'][0]}…{line['delivery'][1]}, "
+        f"{group}. cart_id {cid}."
     )
 
 
@@ -2192,30 +2048,18 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
         return AUTH_EXPIRED_MSG
     if quantity < 1:
         return "quantity must be at least 1 (use remove_from_cart to delete a line)."
-    cid = str(cart_id).strip()
+
+    def edit(fields):
+        fields["operationType"] = "update_quantity"
+        fields["quantityView"] = {"current": int(quantity)}
+
     try:
-        for state in _cart_pages(cookies):
-            bid = _cart_item_blocks(state).get(cid)
-            if not bid:
-                continue
-            block = json.loads(json.dumps(state["data"][bid]))
-            fields = block.setdefault("fields", {})
-            q = fields.get("quantity")
-            if isinstance(q, dict):
-                q["current"] = int(quantity)
-            else:
-                fields["quantity"] = {"current": int(quantity)}
-            fields["operationType"] = "update_quantity"
-            new_state = _cart_async(state, bid, block, cookies)
-            response = (new_state.get("global") or {}).get("response") or {}
-            if response.get("success") is False:
-                return f"Refused: {response.get('tip') or 'update_quantity failed'}"
-            nb = (new_state.get("data") or {}).get(bid) or {}
-            nq = ((nb.get("fields") or {}).get("quantity") or {}).get("current")
-            return f"cart_id {cid}: quantity now {nq if nq is not None else quantity}."
+        done, failed = _cart_line_action(cookies, [cart_id], edit)
     except Exception as e:
         return f"Cart call failed: {e}"
-    return f"cart_id {cid} not found in cart."
+    if failed:
+        return f"cart_id {cart_id}: {next(iter(failed.values()))}"
+    return f"cart_id {cart_id}: quantity now {quantity}."
 
 
 @mcp.tool()
@@ -2225,63 +2069,24 @@ def remove_from_cart(cart_ids: list[str]) -> str:
 
     Args:
         cart_ids: cart_id values from view_cart (not item_ids). Confirm the exact
-            list with the user before calling.
+            list with the user before calling, unless they are lines this MCP
+            added itself that a plan replaced.
     """
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
 
-    todo = {str(c).strip() for c in cart_ids if str(c).strip()}
-    removed: list[str] = []
-    failed: dict[str, str] = {}
+    def edit(fields):
+        fields["operationType"] = "delete"
 
-    # Each item can only be deleted from the snapshot of the page it is on.
-    # Walk the pages; on the first page holding targets, delete them one by one
-    # (each response is the new snapshot). When a target is no longer in the
-    # newest snapshot, start over from page 1 because the pages have shifted.
-    # A pass that attempted anything (deleted or rejected) counts as progress,
-    # so a rejected item never stops the walk to later pages.
-    for _ in range(len(todo) + CART_MAX_PAGES):
-        if not todo:
-            break
-        progressed = False
-        try:
-            for state in _cart_pages(cookies):
-                targets = [c for c in _cart_item_blocks(state) if c in todo]
-                if not targets:
-                    continue
-                for cid in targets:
-                    bid = _cart_item_blocks(state).get(cid)
-                    if bid is None:
-                        break  # snapshot moved on; re-walk from page 1
-                    progressed = True
-                    block = json.loads(json.dumps(state["data"][bid]))
-                    block.setdefault("fields", {})["operationType"] = "delete"
-                    try:
-                        state = _cart_async(state, bid, block, cookies)
-                    except Exception as e:
-                        failed[cid] = str(e)
-                        todo.discard(cid)
-                        continue
-                    todo.discard(cid)
-                    response = (state.get("global") or {}).get("response") or {}
-                    if response.get("success") is False:
-                        failed[cid] = response.get("tip") or "rejected"
-                        continue
-                    removed.append(cid)
-                break
-            else:
-                break  # walked every page, nothing left to find
-        except Exception as e:
-            return f"Cart call failed after removing {len(removed)} item(s): {e}"
-        if not progressed:
-            break
-
-    lines = [f"Removed {len(removed)} item(s)."]
+    try:
+        done, failed = _cart_line_action(cookies, cart_ids, edit)
+    except Exception as e:
+        return f"Cart call failed: {e}"
+    _remember_lines(drop=done)
+    lines = [f"Removed {len(done)} item(s)."]
     if failed:
         lines.append("Failed: " + "; ".join(f"{c}: {m}" for c, m in failed.items()))
-    if todo:
-        lines.append("Not found in cart: " + ", ".join(sorted(todo)))
     return "\n".join(lines)
 
 
