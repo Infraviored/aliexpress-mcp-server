@@ -1139,14 +1139,17 @@ def _pack_size(text: str) -> int:
 
 
 @mcp.tool()
-def get_product_variants(item_id: str) -> str:
+def get_product_variants(item_id: str, match: str = "", limit: int = 20) -> str:
     """
-    List every variant (SKU) of a product with price, stock and sku_id,
+    List the variants (SKUs) of a product with price, purchase limit and sku_id,
     cheapest price per piece first. Pack size is read from the variant name
     ("5PCS", "10 Stück"); check it against the name before trusting it.
 
     Args:
         item_id: AliExpress item ID (e.g., "1005007655628250")
+        match: Only variants whose name contains all these words (case-insensitive),
+            e.g. "5V 10pcs". Empty = all.
+        limit: Max variants to show (some items have 100+).
     """
     resp = _fetch_pdp_mtop(item_id)
     res = ((resp or {}).get("data") or {}).get("result") or {}
@@ -1188,21 +1191,28 @@ def get_product_variants(item_id: str) -> str:
             "stock": (qty.get(sid) or {}).get("maxBuyCount", pth.get("skuStock")),
             "salable": pth.get("salable", True),
         })
+    total = len(rows)
+    words = [w.lower() for w in match.split()]
+    if words:
+        rows = [r for r in rows if all(w in r["label"].lower() for w in words)]
     rows.sort(key=lambda r: (not r["salable"], r["unit"] if r["unit"] is not None else 1e9))
 
-    lines = [f"{title}", f"{BASE_URL}/item/{item_id}.html", f"{len(rows)} variant(s), cheapest per piece first:"]
-    for r in rows:
+    head = f"{len(rows)} of {total} variant(s)" + (f" matching '{match}'" if words else "")
+    lines = [f"{title}", f"{BASE_URL}/item/{item_id}.html", f"{head}, cheapest per piece first:"]
+    for r in rows[:max(1, limit)]:
         line = f"- {r['label']}"
         if r["price"] is not None:
             line += f" — {r['price']:.2f} {CURRENCY}"
             if r["pack"] > 1:
                 line += f" ({r['unit']:.2f}/pc for {r['pack']})"
         if r["stock"] is not None:
-            line += f" · stock {r['stock']}"
+            line += f" · max {r['stock']}/order"
         if not r["salable"]:
             line += " · NOT AVAILABLE"
         line += f"\n  sku_id: {r['sku_id']}"
         lines.append(line)
+    if len(rows) > limit:
+        lines.append(f"… {len(rows) - limit} more (raise limit or narrow match)")
     return "\n".join(lines)
 
 
