@@ -150,6 +150,7 @@ def mtop_call(
     retries: int = 1,
     referer: Optional[str] = None,
     method: str = "GET",
+    captcha: bool = True,
 ) -> dict:
     """
     Make a signed MTOP request (`method` POST sends `data` as a form body). Returns the parsed JSON response dict on success.
@@ -230,7 +231,7 @@ def mtop_call(
                 val = resp.cookies.get(name)
                 if val is not None:
                     new_cookies[name] = val
-            return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer, method=method)
+            return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer, method=method, captcha=captcha)
 
         # Bot check: solve the slider (or click the reCAPTCHA box) in real Chrome
         # on a virtual display, retry once.
@@ -238,7 +239,7 @@ def mtop_call(
         if "FAIL_SYS_USER_VALIDATE" in ret_str:
             BOT_CHECK["since"] = BOT_CHECK.get("since") or time.time()
         # `action=deny` (after hammering past a solved slider) has no slider: wait it out.
-        if retries > 0 and punish_url and "action=captcha" in punish_url:
+        if captcha and punish_url and "action=captcha" in punish_url:
             import slider
             logger.info("MTOP bot check on %s, solving slider", api)
             try:
@@ -248,7 +249,8 @@ def mtop_call(
                 solved = False
             if solved:
                 BOT_CHECK.clear()
-                return mtop_call(api, version, payload, cookies=load_cookies(), retries=retries - 1, referer=referer, method=method)
+                # Passing the check sets a new token: allow one token refresh, no second captcha.
+                return mtop_call(api, version, payload, cookies=load_cookies(), retries=1, referer=referer, method=method, captcha=False)
         elif ret_str.startswith("SUCCESS"):
             BOT_CHECK.clear()
 
