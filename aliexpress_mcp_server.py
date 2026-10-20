@@ -1363,11 +1363,23 @@ def _discounts(item_id: str, sku_id: str = "") -> Optional[dict]:
 COUPONS_FILE = CREDENTIALS_PATH.parent / "aliexpress-coupons.json"
 
 
+COUPON_MEMORY_DAYS = 14
+
+
 def _collected_coupons() -> set[str]:
+    """
+    Public code coupons this MCP collected within COUPON_MEMORY_DAYS. An order
+    may have used one up meanwhile; forgetting it after a while means it is
+    shown as collectable again rather than counted forever.
+    """
     try:
-        return set(json.loads(COUPONS_FILE.read_text()))
+        raw = json.loads(COUPONS_FILE.read_text())
     except (OSError, ValueError):
         return set()
+    if isinstance(raw, list):  # older format: ids without dates
+        return set(raw)
+    cutoff = time.time() - COUPON_MEMORY_DAYS * 86400
+    return {cid for cid, ts in raw.items() if ts >= cutoff}
 
 
 def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
@@ -1571,7 +1583,16 @@ def _collect(item_id: str, coupons: list[dict]) -> dict[str, str]:
     res = browser_actions.collect_coupons(item_id, [c["campaign_id"] for c in coupons], CREDENTIALS_PATH)
     got = {cid for cid, r in res.items() if r == "collected"}
     if got:
-        COUPONS_FILE.write_text(json.dumps(sorted(_collected_coupons() | got)))
+        now = time.time()
+        keep = {cid: now for cid in _collected_coupons()}
+        try:
+            old = json.loads(COUPONS_FILE.read_text())
+            if isinstance(old, dict):
+                keep.update({k: v for k, v in old.items() if k in keep})
+        except (OSError, ValueError):
+            pass
+        keep.update({cid: now for cid in got})
+        COUPONS_FILE.write_text(json.dumps(keep))
         os.chmod(COUPONS_FILE, 0o600)
     _DISC_CACHE.pop(item_id, None)
     return res
@@ -1724,7 +1745,8 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
 
     vs = [v for v in ok if fits(v)]
     if spec.get("sku_id"):
-        vs = [v for v in offer["variants"] if v["sku_id"] == str(spec["sku_id"])]
+        vs = [v for v in offer["variants"] if v["sku_id"] == str(spec["sku_id"])
+              and v["salable"] and v["price"] is not None]
     if not vs:
         return [], [f"{item_id}: no available variant matches '{spec.get('match', '')}'"]
     quote = _freight(offer, vs[0]["sku_id"])
@@ -1763,8 +1785,23 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
     return ways, notes
 
 
-def _plan(specs: list[dict], day_cost: float = DAY_COST) -> dict:
-    """Best offer per list item, then the basket: Choice threshold, store discounts, delivery."""
+def _choice_basket(picks: list[dict], extra_choice: float = 0.0) -> tuple[float, float, float]:
+    """(Choice goods of the picks, threshold, fee to pay) — `extra_choice` = other Choice goods in the same order."""
+    choice = [p for p in picks if p["way"]["offer"]["choice"]]
+    goods = sum(p["way"]["goods"] for p in choice)
+    threshold = max((p["way"]["offer"]["shipping"].get("choice_threshold") or 0 for p in choice), default=0)
+    fee = 0.0
+    if choice and threshold and goods + extra_choice < threshold:
+        fee = max((p["way"]["offer"]["shipping"].get("fee") or 0) for p in choice)
+    return goods, threshold, fee
+
+
+def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0.0) -> dict:
+    """
+    Best offer per list item, then the basket: Choice threshold, store
+    discounts, delivery. `extra_choice`: Choice goods of other lines that go
+    into the same order (checked cart lines that stay checked).
+    """
     picks, notes, candidates = [], [], set()
     for spec in specs:
         need = spec.get("need") or spec.get("query") or ", ".join(map(str, spec.get("item_ids") or [])) or "?"
@@ -1788,10 +1825,12 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST) -> dict:
         picks.append({"need": need, "spec": spec, "options": options})
 
     # The parcel is complete when its slowest part arrives: a faster offer is
-    # only worth more where it would otherwise be the slowest part.
-    for p in picks:
-        others = [q["options"][0]["days"] or UNKNOWN_DAYS for q in picks if q is not p]
-        floor = max(others, default=0)
+    # only worth more where it would otherwise be the slowest part. Floors come
+    # from every part's own best before any re-scoring (order-independent);
+    # unknown delivery times do not set a floor.
+    first_days = [p["options"][0]["days"] for p in picks]
+    for i, p in enumerate(picks):
+        floor = max((d for j, d in enumerate(first_days) if j != i and d), default=0)
         for w in p["options"]:
             w["score"] = w["net"] + day_cost * max(w["days"] or UNKNOWN_DAYS, floor)
         p["options"].sort(key=lambda w: (w["score"], w["days"] or UNKNOWN_DAYS, len(w["lines"])))
@@ -1804,12 +1843,19 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST) -> dict:
                 p["others"].append(w)
         p["way"] = best
 
-    choice = [p for p in picks if p["way"]["offer"]["choice"]]
-    choice_goods = sum(p["way"]["goods"] for p in choice)
-    threshold = max((p["way"]["offer"]["shipping"].get("choice_threshold") or 0 for p in choice), default=0)
-    choice_fee = 0.0
-    if choice and threshold and choice_goods < threshold:
-        choice_fee = max((p["way"]["offer"]["shipping"].get("fee") or 0) for p in choice)
+    choice_goods, threshold, choice_fee = _choice_basket(picks, extra_choice)
+    if choice_fee:
+        # Below the threshold, Choice is not free: charge each Choice pick its
+        # share of the fee and let a global offer win where it now is cheaper.
+        share = choice_fee / max(1, sum(1 for p in picks if p["way"]["offer"]["choice"]))
+        for p in picks:
+            if not p["way"]["offer"]["choice"]:
+                continue
+            alt = next((w for w in p["options"] if not w["offer"]["choice"]), None)
+            if alt and alt["score"] < p["way"]["score"] + share:
+                p["others"] = [p["way"]] + [w for w in p["others"] if w is not alt][:1]
+                p["way"] = alt
+        choice_goods, threshold, choice_fee = _choice_basket(picks, extra_choice)
     stores: dict[str, dict] = {}
     for p in picks:
         w = p["way"]
@@ -1832,29 +1878,21 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST) -> dict:
     return {
         "picks": picks, "notes": notes, "candidates": candidates,
         "choice_goods": choice_goods, "threshold": threshold, "choice_fee": choice_fee,
+        "cart_choice": extra_choice,
         "stores": stores, "goods": goods, "ship": ship, "saved": saved, "coupons": coupons,
         "total": goods + ship - saved, "slowest": slowest,
     }
 
 
-def _count_cart_choice(cookies: dict[str, str], plan: dict) -> None:
+def _cart_choice_goods(cookies: dict[str, str], exclude: set[str] = frozenset()) -> float:
     """
-    Choice ships free per order: checked Choice lines already in the cart
-    (other products) count towards the threshold together with the plan.
+    Choice goods of the checked cart lines (other products than `exclude`).
+    Choice ships free per order, so they count towards the threshold when
+    they are ordered together with the plan.
     """
-    try:
-        cart = _read_cart(cookies)
-    except Exception as e:
-        plan["notes"].append(f"could not read the cart for the Choice threshold: {e}")
-        return
-    other = sum((ln["price"] or 0) * ln["qty"] for ln in cart["lines"]
-                if ln["checked"] and ln["group"] == "group_choice" and ln["item_id"] not in plan["candidates"])
-    plan["cart_choice"] = round(other, 2)
-    if other + plan["choice_goods"] >= plan["threshold"]:
-        plan["ship"] -= plan["choice_fee"]
-        plan["total"] -= plan["choice_fee"]
-        plan["choice_fee_waived"] = plan["choice_fee"]
-        plan["choice_fee"] = 0.0
+    cart = _read_cart(cookies)
+    return round(sum((ln["price"] or 0) * ln["qty"] for ln in cart["lines"]
+                     if ln["checked"] and ln["group"] == "group_choice" and ln["item_id"] not in exclude), 2)
 
 
 def _fmt_plan(plan: dict) -> str:
@@ -1878,9 +1916,9 @@ def _fmt_plan(plan: dict) -> str:
                        f" → {alt['score'] - w['score']:+.2f} incl. delivery time")
     out.append("")
     if plan["threshold"]:
-        if plan.get("choice_fee_waived"):
-            st = (f"free shipping together with the checked Choice lines already in the cart "
-                  f"({plan['cart_choice']:.2f}); alone it would cost {plan['choice_fee_waived']:.2f}")
+        if not plan["choice_fee"] and plan["cart_choice"] and plan["choice_goods"] < plan["threshold"]:
+            st = (f"free shipping only together with the checked Choice lines already in the cart "
+                  f"({plan['cart_choice']:.2f}) — order them in the same checkout")
         elif plan["choice_fee"]:
             short = plan["threshold"] - plan["choice_goods"] - plan.get("cart_choice", 0)
             st = f"{plan['choice_fee']:.2f} shipping — add {short:.2f} Choice goods to make it free"
@@ -1917,31 +1955,44 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     """Put the plan into the cart, drop the MCP's own replaced lines, check exactly the plan, verify."""
     cart = _read_cart(cookies)
     by_key = {(ln["item_id"], ln["sku_id"]): ln for ln in cart["lines"]}
+    known = {ln["cart_id"] for ln in cart["lines"]}
+    mine = _mcp_lines()
+    # One cart line per item+sku: add up what several picks want of it.
+    wanted: dict[tuple, dict] = {}
+    for p in plan["picks"]:
+        w = p["way"]
+        for (v, q), ship in zip(w["lines"], w["line_ship"]):
+            key = (w["offer"]["item_id"], v["sku_id"])
+            e = wanted.setdefault(key, {"need": p["need"], "label": v["label"], "qty": 0, "ship": 0.0,
+                                        "days": w["days"], "choice": w["offer"]["choice"], "price": v["price"]})
+            e["qty"] += q
+            e["ship"] += ship
     want: list[str] = []
     expect: dict[str, dict] = {}
     log = []
-    for p in plan["picks"]:
-        w = p["way"]
-        iid = w["offer"]["item_id"]
-        for (v, q), ship in zip(w["lines"], w["line_ship"]):
-            ln = by_key.get((iid, v["sku_id"]))
-            if ln:
-                cid = ln["cart_id"]
-                if ln["qty"] != q:
-                    done, failed = _set_qty(cookies, cid, q)
-                    log.append(f"quantity {ln['qty']}→{q}: {p['need']} ({v['label']})" if done
-                               else f"FAILED quantity for {p['need']}: {failed}")
-            else:
-                try:
-                    cid = _cart_add(cookies, iid, v["sku_id"], q)
-                    log.append(f"added {q}× {v['label']}: {p['need']}")
-                except Exception as e:
-                    log.append(f"FAILED to add {p['need']} ({v['label']}): {e}")
-                    continue
-            want.append(cid)
-            expect[cid] = {"need": p["need"], "ship": ship, "days": w["days"], "choice": w["offer"]["choice"],
-                           "price": v["price"]}
-    mine = _mcp_lines()
+    for (iid, sku), e in wanted.items():
+        ln = by_key.get((iid, sku))
+        if ln and ln["cart_id"] in mine:
+            cid = ln["cart_id"]
+            if ln["qty"] != e["qty"]:
+                done, failed = _set_qty(cookies, cid, e["qty"])
+                log.append(f"quantity {ln['qty']}→{e['qty']}: {e['need']} ({e['label']})" if done
+                           else f"FAILED quantity for {e['need']}: {failed}")
+        elif ln:
+            # The user's own line of this variant: never resized by a plan.
+            cid = ln["cart_id"]
+            if ln["qty"] < e["qty"]:
+                log.append(f"NOTE {e['need']}: your own line has {ln['qty']}× {e['label']}, the plan needs "
+                           f"{e['qty']} — not changed; raise it yourself or update_cart_quantity")
+        else:
+            try:
+                cid = _cart_add(cookies, iid, sku, e["qty"], known=known)
+                log.append(f"added {e['qty']}× {e['label']}: {e['need']}")
+            except Exception as ex:
+                log.append(f"FAILED to add {e['need']} ({e['label']}): {ex}")
+                continue
+        want.append(cid)
+        expect[cid] = e
     drop = [ln for ln in cart["lines"]
             if ln["cart_id"] in mine and ln["item_id"] in plan["candidates"] and ln["cart_id"] not in want]
     if drop:
@@ -1972,6 +2023,8 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
             continue
         if ln["price"] is not None and e["price"] and abs(ln["price"] - e["price"]) > 0.05:
             diffs.append(f"{e['need']}: {ln['price']:.2f} each in the cart, {e['price']:.2f} on the product page")
+        if ln["qty"] < e["qty"]:
+            diffs.append(f"{e['need']}: {ln['qty']} in the cart, the plan needs {e['qty']}")
         if ln["ship"] is not None and not e["choice"] and abs(ln["ship"] - e["ship"]) > 0.5:
             diffs.append(f"{e['need']}: shipping {ln['ship']:.2f} in the cart, planned {e['ship']:.2f}")
         days = ln["days"][1]
@@ -2040,13 +2093,18 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     """
     if choice_only:
         items = [{**it, "seller": "choice"} for it in items]
+    cookies = load_cookies()
+    extra = 0.0
+    if cookies and not apply:
+        # Without apply the plan joins whatever is checked; apply unchecks it.
+        try:
+            extra = _cart_choice_goods(cookies, {str(i) for it in items for i in it.get("item_ids") or []})
+        except Exception as e:
+            logger.debug("cart read for the Choice threshold failed: %s", e)
     try:
-        plan = _plan(items, day_cost)
+        plan = _plan(items, day_cost, extra_choice=extra)
     except PermissionError:
         return AUTH_EXPIRED_MSG
-    cookies = load_cookies()
-    if plan["choice_fee"] and cookies:
-        _count_cart_choice(cookies, plan)
     text = _fmt_plan(plan)
     if not apply or not plan["picks"]:
         return text
@@ -2233,11 +2291,14 @@ def _cart_render_all(cookies: dict[str, str]):
     # Next pages must be requested from the merged snapshot as well.
     merged = None
     state = _cart_render(cookies)
-    for _ in range(CART_MAX_PAGES + 1):
+    for n in range(CART_MAX_PAGES):
         yield state
         merged = cartlib.merge(merged, state)
         pg = cartlib.pagination(state)
         if not pg or not pg[1].get("hasMore"):
+            return
+        if n == CART_MAX_PAGES - 1:
+            logger.warning("cart has more than %d pages; the rest is not read", CART_MAX_PAGES)
             return
         state = _cart_async(merged, pg[0], pg[1], cookies, next_page=True)
 
@@ -2371,7 +2432,7 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False, select
     s = after["summary"]
     if s.get("total") is not None:
         out.append(f"Cart page now: {sum(1 for ln in after['lines'] if ln['checked'])} line(s) checked, "
-                   f"goods {s.get('subtotal', 0):.2f} + shipping {s.get('shipping', 0):.2f} = "
+                   f"goods {s.get('subtotal') or 0:.2f} + shipping {s.get('shipping') or 0:.2f} = "
                    f"{s['total']:.2f} {s.get('currency') or CURRENCY}")
     if selected and want:
         out.append(f"Checkout link ({len(want)} line(s)): {cartlib.checkout_url(want)}")
@@ -2399,8 +2460,16 @@ def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None =
     MCP_LINES_FILE.write_text(json.dumps(lines, indent=1))
 
 
-def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int) -> str:
-    """Add one variant; returns the new cart_id. Raises on refusal."""
+def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
+              known: Optional[set[str]] = None) -> str:
+    """
+    Add one variant; returns its cart_id. Raises on refusal. Adding a variant
+    that is already in the cart raises that line's quantity and returns its
+    id: such a line stays the user's and is not remembered as the MCP's.
+    `known`: cart ids before the add (read from the cart when not given).
+    """
+    if known is None:
+        known = {ln["cart_id"] for ln in _read_cart(cookies)["lines"]}
     payload = {
         "locale": "en_US",
         "shipToCountry": COUNTRY,
@@ -2425,8 +2494,11 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int)
     data = resp.get("data") or {}
     if data.get("addFailed"):
         raise RuntimeError(data.get("errorMessage") or data.get("failReason") or "addFailed")
-    cid = str(data.get("cartId"))
-    _remember_lines({cid: {"item_id": str(item_id), "sku_id": str(sku_id), "added": time.strftime("%Y-%m-%d")}})
+    if not data.get("cartId"):
+        raise RuntimeError("AliExpress returned no cart id")
+    cid = str(data["cartId"])
+    if cid not in known:
+        _remember_lines({cid: {"item_id": str(item_id), "sku_id": str(sku_id), "added": time.strftime("%Y-%m-%d")}})
     return cid
 
 
@@ -2458,25 +2530,35 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
         cid = _cart_add(cookies, item_id, sku_id, quantity)
     except Exception as e:
         return f"Add to cart failed: {e}"
+    dropped = []
     try:
         c = _read_cart(cookies)
         line = next((ln for ln in c["lines"] if ln["cart_id"] == cid), None)
         if line and not line["checked"]:
+            before = {ln["cart_id"]: ln for ln in c["lines"] if ln["checked"]}
             _check_lines(cookies, [cid])
             c = _read_cart(cookies)
             line = next((ln for ln in c["lines"] if ln["cart_id"] == cid), None)
+            now = {ln["cart_id"] for ln in c["lines"] if ln["checked"]}
+            dropped = [ln for k, ln in before.items() if k not in now]
     except Exception as e:
         return f"Added {quantity} × item {item_id} (sku {sku_id}), cart_id {cid}, but checking it failed: {e}"
     if not line:
         return (f"Added item {item_id} (sku {sku_id}), cart_id {cid}, but it is not in the main cart — "
                 "AliExpress may have put it in a channel cart (see view_cart).")
     ship = "free" if line["ship"] == 0 else (f"{line['ship']:.2f}" if line["ship"] is not None else "?")
+    price = f"{line['price']:.2f}" if line["price"] is not None else "?"
     group = cartlib.GROUP_NAMES.get(line["group"], line["group"])
-    return (
+    out = (
         f"Added and checked: {line['qty']} × {line['title'][:50]} ({line['variant']}), "
-        f"{line['price']:.2f} each, shipping {ship}, delivery {line['delivery'][0]}…{line['delivery'][1]}, "
+        f"{price} each, shipping {ship}, delivery {line['delivery'][0]}…{line['delivery'][1]}, "
         f"{group}. cart_id {cid}."
     )
+    if dropped:
+        out += (f" AliExpress keeps {cartlib.MAX_CHECKED} lines checked, so it unchecked: "
+                + "; ".join(f"{ln['title'][:40]} ({ln['variant']})" for ln in dropped)
+                + ". The checkout link from select_cart_items covers any number of lines.")
+    return out
 
 
 @mcp.tool()

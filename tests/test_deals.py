@@ -44,3 +44,26 @@ def test_coupon_to_collect():
     assert deals.coupon_to_collect(DISC, 23.35) is None          # the collected one is as good
     assert deals.coupon_to_collect(DISC, 85)["campaign_id"] == "c"
     assert deals.coupon_to_collect({"tiers": [], "coupons": [DISC["coupons"][1]]}, 20) is None  # never follow
+
+
+def _panel(*promos):
+    import json
+    return {"data": {"result": {"panelPageGroupResultStr": json.dumps(
+        {"panelPageGroupInfoList": [{"panelPagePromotionList": list(promos)}]})}}}
+
+
+def _coupon(**kw):
+    p = {"displayType": "shopCoupon", "campaignId": 1, "sellerId": 9,
+         "resourcePositions": [{"key": "title", "tipList": ["0,91€ off"]},
+                               {"key": "sub_title", "tipList": ["orders over 13,69€"]}]}
+    p.update(kw)
+    return p
+
+
+def test_follow_coupons_are_recognised_in_any_language():
+    d = deals.parse_discounts(_panel(_coupon(collectText="Folgen & sammeln", bizType=121)))
+    assert d["coupons"][0]["how"] == "follow & collect"
+    d = deals.parse_discounts(_panel(_coupon(collectText="Suivre", couponAssignParam={"sellerCouponActivityType": 21})))
+    assert d["coupons"][0]["how"] == "follow & collect"
+    d = deals.parse_discounts(_panel(_coupon(collectText="Sammeln", bizType=100)))
+    assert d["coupons"][0]["how"] == "collect"

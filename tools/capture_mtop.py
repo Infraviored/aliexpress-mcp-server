@@ -5,7 +5,9 @@ calling it directly.
 Opens `url` in real Chrome (on Xvfb, like slider.py) with the credential
 cookies, runs a list of steps, and writes every acs.aliexpress.com request
 (api, method, data) and its response to a JSON file. Cookies and signatures
-are not logged.
+are not logged — but response bodies are, whole: recording checkout, address
+or account pages puts the address and buyer id into the file. Keep such
+recordings out of the repository.
 
     python tools/capture_mtop.py URL OUT.json [STEP ...]
 

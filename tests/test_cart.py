@@ -72,3 +72,10 @@ def test_merge_appends_structure_and_unions_triggers():
 def test_item_blocks_and_pagination():
     assert len(cart.item_blocks(PAGES[0])) == 10
     assert cart.has_more(PAGES[0]) and not cart.has_more(PAGES[1])
+
+
+def test_merge_moves_a_line_instead_of_listing_it_twice():
+    a = {"data": {}, "page": {"structure": {"global": ["p1", "p2"], "choice": ["p3"]}}, "asyncHandler": {}}
+    b = {"data": {}, "page": {"structure": {"choice": ["p2"]}}, "asyncHandler": {}}
+    m = cart.merge(cart.merge(None, a), b)
+    assert m["page"]["structure"] == {"global": ["p1"], "choice": ["p3", "p2"]}

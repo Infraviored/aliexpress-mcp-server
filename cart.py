@@ -124,6 +124,10 @@ def merge(base: Optional[dict], new: dict) -> dict:
     out["asyncHandler"] = {**oh, **nh, "triggers": triggers}
     struct = out.setdefault("page", {}).setdefault("structure", {})
     for k, children in ((new.get("page") or {}).get("structure") or {}).items():
+        # A line that moved (e.g. after a delete) lives under its new parent only.
+        for other, kids in struct.items():
+            if other != k:
+                kids[:] = [c for c in kids if c not in children]
         have = struct.setdefault(k, [])
         have.extend(c for c in children if c not in have)
     for k in ("global", "config"):
@@ -346,7 +350,7 @@ def format_cart(cart: dict, show_unchecked: bool = True) -> str:
     if s.get("total") is not None:
         out.append("")
         out.append("## Checkout would charge (checked lines)")
-        out.append(f"Subtotal {s.get('subtotal', 0):.2f}{cur} + shipping {s.get('shipping', 0):.2f}{cur}"
+        out.append(f"Subtotal {s.get('subtotal') or 0:.2f}{cur} + shipping {s.get('shipping') or 0:.2f}{cur}"
                    + (f" ({s['shipping_note']})" if s.get("shipping_note") else ""))
         for title, amt in s.get("discounts") or []:
             if amt:

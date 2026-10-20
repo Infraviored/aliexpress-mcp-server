@@ -338,9 +338,15 @@ def parse_discounts(resp: dict) -> dict:
                         out["tiers"].append((float(m.group(2).replace(",", ".")), float(m.group(1).replace(",", "."))))
             elif title and _money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
                 collect = (p.get("collectText") or "").lower()
+                assign = p.get("couponAssignParam") or {}
+                # "Follow & collect" would follow the store. Seen as bizType 121 /
+                # sellerCouponActivityType 21; the text is only the fallback,
+                # since it follows the page language.
+                follows = (p.get("bizType") == 121 or assign.get("sellerCouponActivityType") == 21
+                           or "follow" in collect or "folgen" in collect)
                 if p.get("collected"):
                     how = "collected"
-                elif "follow" in collect:
+                elif follows:
                     how = "follow & collect"
                 elif collect:
                     how = "collect"
