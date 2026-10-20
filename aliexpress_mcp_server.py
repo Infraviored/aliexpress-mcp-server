@@ -31,8 +31,9 @@ CREDENTIALS_PATH = Path(
     os.environ.get("ALIEXPRESS_CREDENTIALS", "~/.mcp-credentials/aliexpress.json")
 ).expanduser()
 
-COUNTRY = os.environ.get("ALIEXPRESS_COUNTRY", "CA")
-CURRENCY = os.environ.get("ALIEXPRESS_CURRENCY", "CAD")
+COUNTRY = os.environ.get("ALIEXPRESS_COUNTRY", "DE")
+CURRENCY = os.environ.get("ALIEXPRESS_CURRENCY", "EUR")
+ACCEPT_LANGUAGE = os.environ.get("ALIEXPRESS_ACCEPT_LANGUAGE", "de-DE,de;q=0.9,en;q=0.8")
 
 BASE_URL = "https://www.aliexpress.com"
 USER_AGENT = (
@@ -72,7 +73,7 @@ def get_client(require_auth: bool = False, referer: str = BASE_URL) -> httpx.Cli
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-CA,en;q=0.9",
+        "Accept-Language": ACCEPT_LANGUAGE,
         "Accept-Encoding": "gzip, deflate, br",
         "Referer": referer,
         "Upgrade-Insecure-Requests": "1",
@@ -185,7 +186,7 @@ def mtop_call(
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-CA,en;q=0.9",
+        "Accept-Language": ACCEPT_LANGUAGE,
         "Referer": referer or f"{BASE_URL}/",
         "Origin": BASE_URL,
         "Cookie": cookie_str,
@@ -313,8 +314,82 @@ def _extract_embedded_json(html: str, var_names: list[str]) -> Optional[dict]:
     return None
 
 
+def _parse_search_cards(html: str) -> list[dict]:
+    """
+    Parse the server-rendered result cards (`a.search-card-item`).
+
+    The card link carries the hard numbers:
+      pdp_npi   = "6@dis!EUR!<original>!<sale>!..."  (prices of the default SKU)
+      pdp_ext_f = {"order": "<orders>", ...}
+    and the card text the rest: "+10 Tsd. verkauft | 4.9 | ... | Kostenloser Versand ab 10,00€".
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    soup = BeautifulSoup(html, "html.parser")
+    products: list[dict] = []
+    seen: set[str] = set()
+    for card in soup.select("a.search-card-item"):
+        href = card.get("href", "")
+        m = ITEM_ID_RE.search(href)
+        if not m or m.group(1) in seen:
+            continue
+        pid = m.group(1)
+        q = parse_qs(urlparse(href if href.startswith("http") else "https:" + href).query)
+
+        sale = original = None
+        currency = None
+        npi = (q.get("pdp_npi") or [""])[0].split("!")
+        if len(npi) >= 4:
+            currency = npi[1] or None
+            try:
+                original = float(npi[2]) if npi[2] else None
+                sale = float(npi[3]) if npi[3] else None
+            except ValueError:
+                pass
+
+        orders = None
+        try:
+            orders = int(json.loads((q.get("pdp_ext_f") or ["{}"])[0]).get("order"))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+        title_el = card.select_one("[title]")
+        title = (title_el.get("title") if title_el else None) or card.get_text(" ", strip=True)[:120]
+
+        parts = [t.strip() for t in card.get_text("|", strip=True).split("|") if t.strip()]
+        rating = None
+        for t in parts:
+            if re.fullmatch(r"[0-5]\.\d", t):
+                rating = float(t)
+                break
+        sold = next((t for t in parts if re.search(r"verkauft|sold", t, re.I)), None)
+        shipping = next((t for t in parts if re.search(r"versand|shipping|delivery", t, re.I)), None)
+        choice = bool(card.select_one("img[src*='S135d2af8d57840b28092ceba069bdb6c4']")) or "Choice" in parts
+
+        seen.add(pid)
+        products.append({
+            "item_id": pid,
+            "title": title.strip()[:200],
+            "price": sale,
+            "original_price": original if original and sale and original > sale else None,
+            "currency": currency,
+            "discount_pct": round(100 * (1 - sale / original)) if sale and original and original > sale else None,
+            "rating": rating,
+            "orders": orders,
+            "sold_count": sold,
+            "shipping": shipping,
+            "choice": choice,
+            "url": f"{BASE_URL}/item/{pid}.html",
+        })
+    return products
+
+
 def parse_search_results(html: str) -> list[dict]:
     """Parse product cards from an AliExpress search results page."""
+    cards = _parse_search_cards(html)
+    if cards:
+        return cards
+
     products: list[dict] = []
     seen_ids: set[str] = set()
 
@@ -655,15 +730,22 @@ def search_products(
     min_rating: float = 0,
     max_price: float = 0,
     sort_by: str = "best_match",
+    page: int = 1,
 ) -> str:
     """
-    Search AliExpress for products.
+    Search AliExpress for products (12 results per page).
+
+    Each hit shows the price of its default variant, orders, rating and the
+    shipping line ("Kostenloser Versand ab 10,00€" = free above that cart value).
+    Pack sizes (1/5/10 pcs) are variants with their own prices:
+    use get_product_variants before comparing deals.
 
     Args:
         query: Search term (e.g., "groudon plush", "usb c cable")
         min_rating: Minimum rating (0-5, e.g., 4.5). 0 disables filter.
-        max_price: Maximum price in CAD. 0 disables filter.
+        max_price: Maximum price in the account currency. 0 disables filter.
         sort_by: One of "best_match", "orders", "price_asc", "price_desc"
+        page: Result page, starting at 1.
     """
     # AliExpress URL slug pattern
     slug = quote_plus(query.strip()).replace("+", "-")
@@ -678,6 +760,8 @@ def search_products(
     params = {}
     if sort_map.get(sort_by):
         params["SortType"] = sort_map[sort_by]
+    if page > 1:
+        params["page"] = page
 
     client = get_client()
     try:
@@ -703,19 +787,23 @@ def search_products(
             suffix = f" with {', '.join(filters)}" if filters else ""
             return f"No products found for '{query}'{suffix}."
 
-        lines = [f"Found {len(products)} result(s) for '{query}' (sort: {sort_by}):"]
+        lines = [f"Found {len(products)} result(s) for '{query}' (sort: {sort_by}, page {page}):"]
         for p in products[:25]:
             line = f"- {p['title']}"
             if p["price"] is not None:
-                line += f" — ${p['price']:.2f} {CURRENCY}"
+                line += f" — {p['price']:.2f} {p.get('currency') or CURRENCY}"
             if p["original_price"] is not None and p["original_price"] > (p["price"] or 0):
-                line += f" (was ${p['original_price']:.2f})"
-            if p["discount_pct"]:
-                line += f" [-{p['discount_pct']}%]"
+                line += f" (was {p['original_price']:.2f})"
             if p["rating"]:
                 line += f" ★{p['rating']}"
-            if p["sold_count"]:
+            if p.get("orders") is not None:
+                line += f" · {p['orders']} orders"
+            elif p["sold_count"]:
                 line += f" · {p['sold_count']}"
+            if p.get("choice"):
+                line += " · Choice"
+            if p.get("shipping"):
+                line += f"\n  shipping: {p['shipping']}"
             line += f"\n  item_id: {p['item_id']}"
             lines.append(line)
         return "\n".join(lines)
@@ -1042,11 +1130,87 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
     return "\n".join(lines)
 
 
+_PACK_RE = re.compile(r"(\d+)\s*(?:pcs|pc|pieces?|stück|stk|st\b|x\b|er\b|set|pack)", re.I)
+
+
+def _pack_size(text: str) -> int:
+    m = _PACK_RE.search(text or "")
+    return int(m.group(1)) if m and 0 < int(m.group(1)) <= 1000 else 1
+
+
+@mcp.tool()
+def get_product_variants(item_id: str) -> str:
+    """
+    List every variant (SKU) of a product with price, stock and sku_id,
+    cheapest price per piece first. Pack size is read from the variant name
+    ("5PCS", "10 Stück"); check it against the name before trusting it.
+
+    Args:
+        item_id: AliExpress item ID (e.g., "1005007655628250")
+    """
+    resp = _fetch_pdp_mtop(item_id)
+    res = ((resp or {}).get("data") or {}).get("result") or {}
+    sku = res.get("SKU") or {}
+    paths = sku.get("skuPaths") or []
+    if not paths:
+        return f"No variant data for {item_id} (session expired or product gone)."
+
+    # propertyId:valueId -> display name
+    names: dict[str, str] = {}
+    for prop in sku.get("skuProperties") or []:
+        pid = prop.get("skuPropertyId")
+        for v in prop.get("skuPropertyValues") or []:
+            names[f"{pid}:{v.get('propertyValueIdLong')}"] = (
+                v.get("propertyValueDisplayName") or v.get("propertyValueDefinitionName") or v.get("propertyValueName") or ""
+            )
+
+    prices = (res.get("PRICE") or {}).get("skuIdStrPriceInfoMap") or {}
+    qty = ((res.get("QUANTITY_PC") or {}).get("allSkuQuantityView")) or {}
+    title = ((res.get("PRODUCT_TITLE") or {}).get("text")) or item_id
+
+    rows = []
+    for pth in paths:
+        sid = str(pth.get("skuIdStr") or pth.get("skuId"))
+        label = " / ".join(
+            names.get(part, part) for part in (pth.get("path") or "").split(";") if part
+        ) or (pth.get("skuAttr") or "default")
+        info = prices.get(sid) or {}
+        price = parse_price((info.get("salePriceString") or "").replace("€", "$").replace(",", "."))
+        orig = parse_price((info.get("originalPrice", {}) or {}).get("formatedAmount", "") if isinstance(info.get("originalPrice"), dict) else "")
+        pack = _pack_size(label)
+        rows.append({
+            "sku_id": sid,
+            "label": label,
+            "price": price,
+            "original": orig,
+            "pack": pack,
+            "unit": (price / pack) if price else None,
+            "stock": (qty.get(sid) or {}).get("maxBuyCount", pth.get("skuStock")),
+            "salable": pth.get("salable", True),
+        })
+    rows.sort(key=lambda r: (not r["salable"], r["unit"] if r["unit"] is not None else 1e9))
+
+    lines = [f"{title}", f"{BASE_URL}/item/{item_id}.html", f"{len(rows)} variant(s), cheapest per piece first:"]
+    for r in rows:
+        line = f"- {r['label']}"
+        if r["price"] is not None:
+            line += f" — {r['price']:.2f} {CURRENCY}"
+            if r["pack"] > 1:
+                line += f" ({r['unit']:.2f}/pc for {r['pack']})"
+        if r["stock"] is not None:
+            line += f" · stock {r['stock']}"
+        if not r["salable"]:
+            line += " · NOT AVAILABLE"
+        line += f"\n  sku_id: {r['sku_id']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def get_shipping_estimate(item_id: str) -> str:
     """
     Check shipping time and cost for a product to the configured country
-    (default: Canada/Vancouver, BC).
+    (ALIEXPRESS_COUNTRY, default DE).
 
     Args:
         item_id: AliExpress item ID (e.g., "1005007655628250")
