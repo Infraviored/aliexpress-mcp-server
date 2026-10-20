@@ -1265,6 +1265,18 @@ def _extract_cart(render_response: dict) -> dict:
 
 CART_REFERER = f"{BASE_URL}/p/shoppingcart/index.html"
 CART_MAX_PAGES = 30
+# AliExpress answers FAIL_SYS_USER_VALIDATE (slider captcha) after ~35 rapid
+# cart calls; pace every cart call.
+CART_CALL_DELAY_S = float(os.environ.get("ALIEXPRESS_CART_DELAY", "4"))
+_last_cart_call = 0.0
+
+
+def _cart_pace() -> None:
+    global _last_cart_call
+    wait = _last_cart_call + CART_CALL_DELAY_S - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    _last_cart_call = time.time()
 
 
 def _cart_base_payload() -> dict[str, Any]:
@@ -1280,12 +1292,18 @@ def _cart_base_payload() -> dict[str, Any]:
 def _cart_check(resp: dict) -> dict:
     ret = resp.get("ret", [])
     if not any("SUCCESS" in r for r in ret):
+        if any("USER_VALIDATE" in r for r in ret):
+            raise RuntimeError(
+                "AliExpress bot check (FAIL_SYS_USER_VALIDATE): too many cart calls. "
+                "Wait a few minutes, or open the cart in the browser and solve the slider."
+            )
         raise RuntimeError(f"Cart API returned: {ret[0] if ret else ret}")
     return resp.get("data") or {}
 
 
 def _cart_render(cookies: dict[str, str]) -> dict:
     """Page 1 of the cart as an Ultron snapshot."""
+    _cart_pace()
     return _cart_check(mtop_call(
         "mtop.aliexpress.trade.cart.render", "1.0", {"platformType": "DESKTOP"},
         cookies=cookies, referer=CART_REFERER,
@@ -1311,6 +1329,7 @@ def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str]
         gzip.compress(json.dumps(upstream, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     ).decode("ascii")
     payload = {"compress": True, "params": params, "nextPage": next_page, **_cart_base_payload()}
+    _cart_pace()
     return _cart_check(mtop_call(
         "mtop.aliexpress.trade.cart.async", "1.0", payload,
         cookies=cookies, referer=CART_REFERER,
