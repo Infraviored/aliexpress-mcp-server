@@ -10,7 +10,9 @@ Three facts this encodes (learned the hard way):
    (1 pc 0.32 €, 5 pcs 1.39 €).
 2. Shipping for non-Choice offers grows with quantity, roughly A + B·qty
    (ESP32 board: 3.28, 3.49, 4.13, 5.21 € for 1, 2, 5, 10). Measured with
-   the shipping-panel API at qty 1 and 2.
+   the shipping-panel API at qty 1 and 2. It is charged per cart line:
+   two pack sizes of one product are two lines and pay shipping twice
+   (cart 2026-10-20: 2×1PCS 3.67 € + 1×3PCS 3.66 €).
 3. Choice items ship free once the Choice part of the order passes a
    threshold (10 € in DE); below it a flat fee applies.
 """
@@ -141,8 +143,9 @@ def best_ways(
 ) -> list[dict]:
     """
     All ways to get >= `need` pieces from one ladder, using up to two pack
-    sizes, ranked by total (goods + shipping). Each way:
-    {"lines": [(variant, qty)], "pieces", "goods", "ship", "total"}.
+    sizes, ranked by total (goods + shipping per cart line), then by fewer
+    lines. Each way: {"lines": [(variant, qty)], "line_ship": [fee per line],
+    "pieces", "goods", "ship", "total"}.
     `choice_free`: shipping counts as 0 (Choice item in an order above threshold).
     """
     ways = []
@@ -167,13 +170,15 @@ def best_ways(
                 seen.add(lines)
                 pieces = qa * a["pack"] + qb * b["pack"]
                 goods = qa * a["price"] + qb * b["price"]
-                units = qa + qb
-                ship = 0.0 if choice_free else shipping_for(quote, units)
+                used = [(v, q) for v, q in ((a, qa), (b, qb)) if q]
+                # one cart line per variant, each with its own shipping
+                line_ship = [0.0 if choice_free else shipping_for(quote, q) for _, q in used]
+                ship = sum(line_ship)
                 ways.append({
-                    "lines": [(v, q) for v, q in ((a, qa), (b, qb)) if q],
+                    "lines": used, "line_ship": line_ship,
                     "pieces": pieces, "goods": goods, "ship": ship, "total": goods + ship,
                 })
-    ways.sort(key=lambda w: (w["total"], -w["pieces"]))
+    ways.sort(key=lambda w: (w["total"], len(w["lines"]), -w["pieces"]))
     return ways[:limit]
 
 
@@ -303,8 +308,9 @@ def parse_discounts(resp: dict) -> dict:
     """
     The "Discounts & coupon codes" panel as data:
     {"seller_id", "tiers": [(min, off)] store discount (automatic, best tier
-    applies), "coupons": [{off, min, how, code, label}] (one per order per
-    store, must be collected or typed), "coins_pct", "coins", "other": [text]}.
+    applies), "coupons": [{off, min, how, code, campaign_id, label}] (one per
+    order per store; how = collected / collect / follow & collect / code /
+    automatic), "coins_pct", "coins", "other": [text]}.
     """
     out = {"seller_id": None, "tiers": [], "coupons": [], "coins_pct": 0.0, "coins": None, "other": []}
     raw = ((resp.get("data") or {}).get("result") or {}).get("panelPageGroupResultStr")
@@ -331,10 +337,21 @@ def parse_discounts(resp: dict) -> dict:
                     if m:
                         out["tiers"].append((float(m.group(2).replace(",", ".")), float(m.group(1).replace(",", "."))))
             elif title and _money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
-                how = p.get("couponCode") and f"code {p['couponCode']}" or (p.get("collectText") or "automatic").lower()
+                collect = (p.get("collectText") or "").lower()
+                if p.get("collected"):
+                    how = "collected"
+                elif "follow" in collect:
+                    how = "follow & collect"
+                elif collect:
+                    how = "collect"
+                elif p.get("couponCode"):
+                    how = "code"
+                else:
+                    how = "automatic"
                 out["coupons"].append({
                     "off": _money(title[0]), "min": _money(" ".join(sub)) or 0.0,
                     "how": how, "label": " ".join(desc) or kind,
+                    "code": p.get("couponCode"), "campaign_id": str(p.get("campaignId") or ""),
                 })
             else:
                 text = " · ".join(title + sub + desc)
@@ -345,8 +362,12 @@ def parse_discounts(resp: dict) -> dict:
     return out
 
 
-def discount_for(d: Optional[dict], subtotal: float) -> tuple[float, str]:
-    """Best saving for a store subtotal: best store-discount tier + best single coupon."""
+def discount_for(d: Optional[dict], subtotal: float, coupons: bool = True) -> tuple[float, str]:
+    """
+    Best saving for a store subtotal: best store-discount tier (automatic) +
+    best single coupon. `coupons=False`: only what applies without anyone
+    collecting or typing anything (automatic, or already collected).
+    """
     if not d:
         return 0.0, ""
     parts, save = [], 0.0
@@ -354,11 +375,26 @@ def discount_for(d: Optional[dict], subtotal: float) -> tuple[float, str]:
     if tier:
         save += tier[1]
         parts.append(f"store discount {tier[1]:.2f}")
-    cp = max((c for c in d["coupons"] if c["min"] <= subtotal), default=None, key=lambda c: c["off"])
+    usable = [c for c in d["coupons"] if c["min"] <= subtotal and (coupons or c["how"] in ("automatic", "collected"))]
+    cp = max(usable, default=None, key=lambda c: c["off"])
     if cp:
         save += cp["off"]
         parts.append(f"coupon {cp['off']:.2f} ({cp['how']})")
     return save, " + ".join(parts)
+
+
+def coupon_to_collect(d: Optional[dict], subtotal: float) -> Optional[dict]:
+    """
+    The plain "Collect" coupon worth collecting for this store subtotal: it
+    applies, and it beats the best coupon already usable (one per order).
+    """
+    if not d:
+        return None
+    have = max((c["off"] for c in d["coupons"]
+                if c["min"] <= subtotal and c["how"] in ("automatic", "collected")), default=0.0)
+    best = max((c for c in d["coupons"] if c["how"] == "collect" and c["min"] <= subtotal and c["off"] > have),
+               default=None, key=lambda c: c["off"])
+    return best
 
 
 def next_discount(d: Optional[dict], subtotal: float, currency: str, reach: float = 0.5) -> Optional[str]:
@@ -385,7 +421,8 @@ def fmt_discounts(d: Optional[dict], currency: str) -> list[str]:
     if d["tiers"]:
         out.append("store discount (automatic): " + ", ".join(f"{o:.2f} off over {m:.2f}" for m, o in d["tiers"]))
     for c in d["coupons"]:
-        out.append(f"coupon: {c['off']:.2f} off over {c['min']:.2f} — {c['label']}, {c['how']}")
+        code = f", code {c['code']}" if c.get("code") and c["how"] != "collected" else ""
+        out.append(f"coupon: {c['off']:.2f} off over {c['min']:.2f} — {c['label']}, {c['how']}{code}")
     if d["coins_pct"]:
         have = f", you have {d['coins']} coins" if d["coins"] is not None else ""
         out.append(f"coins: {d['coins_pct']:g}% off{have}")

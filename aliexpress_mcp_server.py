@@ -25,6 +25,7 @@ import httpx
 from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP, Image
 
+import browser_actions
 import cart as cartlib
 import deals
 
@@ -752,10 +753,60 @@ def search_products(
         with_shipping: Also fetch real shipping to the configured country for the
             first 8 non-Choice hits (one product-page call each, slower).
     """
-    # AliExpress URL slug pattern
+    try:
+        products = _search(query, sort_by, page)
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
+    if min_rating > 0:
+        products = [p for p in products if p.get("rating") and p["rating"] >= min_rating]
+    if max_price > 0:
+        products = [p for p in products if p.get("price") is not None and p["price"] <= max_price]
+
+    if not products:
+        filters = []
+        if min_rating > 0:
+            filters.append(f"rating ≥ {min_rating}")
+        if max_price > 0:
+            filters.append(f"price ≤ {max_price:.2f}")
+        suffix = f" with {', '.join(filters)}" if filters else ""
+        return f"No products found for '{query}'{suffix}."
+
+    if with_shipping:
+        for p in [x for x in products if not x.get("choice")][:8]:
+            try:
+                offer = _pdp_offer(p["item_id"])
+                if offer:
+                    p["shipping"] = _fmt_shipping(offer["shipping"]).replace("shipping to ", "to ")
+            except Exception as e:
+                logger.debug("shipping lookup %s failed: %s", p["item_id"], e)
+            time.sleep(1.0)
+
+    lines = [f"Found {len(products)} result(s) for '{query}' (sort: {sort_by}, page {page}):"]
+    for p in products[:25]:
+        line = f"- {p['title']}"
+        if p["price"] is not None:
+            line += f" — {p['price']:.2f} {p.get('currency') or CURRENCY}"
+        if p["original_price"] is not None and p["original_price"] > (p["price"] or 0):
+            line += f" (was {p['original_price']:.2f})"
+        if p["rating"]:
+            line += f" ★{p['rating']}"
+        if p.get("orders") is not None:
+            line += f" · {p['orders']} orders"
+        elif p["sold_count"]:
+            line += f" · {p['sold_count']}"
+        if p.get("choice"):
+            line += " · Choice"
+        if p.get("shipping"):
+            line += f"\n  shipping: {p['shipping']}"
+        line += f"\n  item_id: {p['item_id']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _search(query: str, sort_by: str = "best_match", page: int = 1) -> list[dict]:
+    """Search results as dicts (item_id, title, price, rating, orders, choice, ...)."""
     slug = quote_plus(query.strip()).replace("+", "-")
     url_path = f"/w/wholesale-{slug}.html"
-
     sort_map = {
         "best_match": None,
         "orders": "total_tranpro_desc",
@@ -767,61 +818,13 @@ def search_products(
         params["SortType"] = sort_map[sort_by]
     if page > 1:
         params["page"] = page
-
     client = get_client()
     try:
         resp = client.get(url_path, params=params)
         if check_auth_redirect(resp):
-            return AUTH_EXPIRED_MSG
+            raise PermissionError("auth expired")
         resp.raise_for_status()
-
-        products = parse_search_results(resp.text)
-
-        # Apply filters
-        if min_rating > 0:
-            products = [p for p in products if p.get("rating") and p["rating"] >= min_rating]
-        if max_price > 0:
-            products = [p for p in products if p.get("price") is not None and p["price"] <= max_price]
-
-        if not products:
-            filters = []
-            if min_rating > 0:
-                filters.append(f"rating ≥ {min_rating}")
-            if max_price > 0:
-                filters.append(f"price ≤ ${max_price:.2f}")
-            suffix = f" with {', '.join(filters)}" if filters else ""
-            return f"No products found for '{query}'{suffix}."
-
-        if with_shipping:
-            for p in [x for x in products if not x.get("choice")][:8]:
-                try:
-                    offer = _pdp_offer(p["item_id"])
-                    if offer:
-                        p["shipping"] = _fmt_shipping(offer["shipping"]).replace("shipping to ", "to ")
-                except Exception as e:
-                    logger.debug("shipping lookup %s failed: %s", p["item_id"], e)
-                time.sleep(1.0)
-
-        lines = [f"Found {len(products)} result(s) for '{query}' (sort: {sort_by}, page {page}):"]
-        for p in products[:25]:
-            line = f"- {p['title']}"
-            if p["price"] is not None:
-                line += f" — {p['price']:.2f} {p.get('currency') or CURRENCY}"
-            if p["original_price"] is not None and p["original_price"] > (p["price"] or 0):
-                line += f" (was {p['original_price']:.2f})"
-            if p["rating"]:
-                line += f" ★{p['rating']}"
-            if p.get("orders") is not None:
-                line += f" · {p['orders']} orders"
-            elif p["sold_count"]:
-                line += f" · {p['sold_count']}"
-            if p.get("choice"):
-                line += " · Choice"
-            if p.get("shipping"):
-                line += f"\n  shipping: {p['shipping']}"
-            line += f"\n  item_id: {p['item_id']}"
-            lines.append(line)
-        return "\n".join(lines)
+        return parse_search_results(resp.text)
     finally:
         client.close()
 
@@ -1277,8 +1280,23 @@ def _discounts(item_id: str, sku_id: str = "") -> Optional[dict]:
     if not any("SUCCESS" in r for r in resp.get("ret") or []):
         return None
     d = deals.parse_discounts(resp)
+    # The panel never marks public code coupons as collected; remember ours.
+    mine = _collected_coupons()
+    for c in d["coupons"]:
+        if c["how"] == "collect" and c.get("campaign_id") in mine:
+            c["how"] = "collected"
     _DISC_CACHE[item_id] = (time.time(), d)
     return d
+
+
+COUPONS_FILE = CREDENTIALS_PATH.parent / "aliexpress-coupons.json"
+
+
+def _collected_coupons() -> set[str]:
+    try:
+        return set(json.loads(COUPONS_FILE.read_text()))
+    except (OSError, ValueError):
+        return set()
 
 
 def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
@@ -1478,6 +1496,44 @@ def get_discounts(item_id: str, subtotal: float = 0) -> str:
     return "\n".join(lines)
 
 
+def _collect(item_id: str, coupons: list[dict]) -> dict[str, str]:
+    res = browser_actions.collect_coupons(item_id, [c["campaign_id"] for c in coupons], CREDENTIALS_PATH)
+    got = {cid for cid, r in res.items() if r == "collected"}
+    if got:
+        COUPONS_FILE.write_text(json.dumps(sorted(_collected_coupons() | got)))
+        os.chmod(COUPONS_FILE, 0o600)
+    _DISC_CACHE.pop(item_id, None)
+    return res
+
+
+@mcp.tool()
+def collect_coupon(item_id: str, subtotal: float) -> str:
+    """
+    Collect the store coupon worth having for an order of `subtotal` in this
+    product's store (only plain "Collect" coupons; never "Follow & collect").
+    Runs the product page in a browser, because AliExpress accepts coupon
+    collection only from its own page. Costs nothing; one coupon applies per
+    store and order.
+
+    Args:
+        item_id: Any product of the store.
+        subtotal: The goods total you will order in this store.
+    """
+    d = _discounts(item_id)
+    if d is None:
+        return f"No discount data for {item_id}." + blocked_msg()
+    c = deals.coupon_to_collect(d, subtotal)
+    if not c:
+        off, how = deals.discount_for(d, subtotal, coupons=False)
+        return f"Nothing to collect: at {subtotal:.2f} the best usable discount is −{off:.2f} ({how or 'none'})."
+    try:
+        res = _collect(item_id, [c])
+    except Exception as e:
+        return f"Collecting failed: {e}"
+    code = f" (code {c['code']}; the checkout page shows whether it applies)" if c.get("code") else ""
+    return f"Coupon {c['off']:.2f} off over {c['min']:.2f}: {res.get(c['campaign_id'])}{code}."
+
+
 @mcp.tool()
 def get_product_reviews(item_id: str, pages: int = 2, only_low: bool = False, keyword: str = "") -> str:
     """
@@ -1531,114 +1587,348 @@ def get_product_reviews(item_id: str, pages: int = 2, only_low: bool = False, ke
     return "\n".join(lines)
 
 
+# ─── Shopping list → plan → cart ─────────────────────────────────────────────
+
+# A day of delivery is worth this much (EUR) when comparing offers, so a
+# Choice offer arriving in 8 days beats a global seller's 22 days unless the
+# latter is clearly cheaper.
+DAY_COST = float(os.environ.get("ALIEXPRESS_DAY_COST", "0.15"))
+UNKNOWN_DAYS = 30
+
+
+def _words(text: str) -> list[str]:
+    return [w.lower() for w in (text or "").split()]
+
+
+def _candidate_ids(spec: dict) -> list[str]:
+    """Given item_ids plus the top search hits for `query` (both compete)."""
+    ids = [str(x) for x in spec.get("item_ids") or []]
+    if not spec.get("query"):
+        return ids
+    avoid = _words(spec.get("avoid", ""))
+    hits = [h for h in _search(spec["query"], spec.get("sort_by", "best_match"))
+            if not any(w in (h.get("title") or "").lower() for w in avoid)]
+    for h in hits[: int(spec.get("candidates", 3))]:
+        if h["item_id"] not in ids:
+            ids.append(h["item_id"])
+    return ids
+
+
+def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], list[str]]:
+    """Ranked ways to cover `spec` from one product, and notes about it."""
+    offer = _pdp_offer(item_id)
+    if not offer:
+        return [], [f"{item_id}: no product data" + blocked_msg()]
+    pieces = max(1, int(spec.get("pieces", 1)))
+    match, avoid = _words(spec.get("match", "")), _words(spec.get("avoid", ""))
+    vs = [v for v in offer["variants"] if v["salable"] and v["price"] is not None
+          and all(w in v["label"].lower() for w in match)
+          and not any(w in v["label"].lower() for w in avoid)]
+    if spec.get("sku_id"):
+        vs = [v for v in offer["variants"] if v["sku_id"] == str(spec["sku_id"])]
+    if not vs:
+        return [], [f"{item_id}: no available variant matches '{spec.get('match', '')}'"]
+    quote = _freight(offer, vs[0]["sku_id"])
+    if spec.get("sku_id") and spec.get("qty"):
+        q = int(spec["qty"])
+        ship = 0.0 if offer["choice"] else deals.shipping_for(quote, q)
+        ways = [{"lines": [(vs[0], q)], "line_ship": [ship], "pieces": vs[0]["pack"] * q,
+                 "goods": vs[0]["price"] * q, "ship": ship, "total": vs[0]["price"] * q + ship}]
+    else:
+        ways = deals.best_ways(vs, pieces, quote, offer["choice"], limit=10)
+    days = (quote or {}).get("days") or offer["shipping"].get("days") or (None, None)
+    dmax = days[1] if days and days[1] else None
+    disc = _discounts(item_id, vs[0]["sku_id"])
+    for w in ways:
+        # Rank on what applies by itself; coupons someone must collect are shown apart.
+        w["save"], w["save_how"] = deals.discount_for(disc, w["goods"], coupons=False)
+        full, full_how = deals.discount_for(disc, w["goods"])
+        w["coupon"] = (round(full - w["save"], 2), full_how) if full > w["save"] + 0.005 else None
+        w["net"] = w["total"] - w["save"]
+        w["days"] = dmax
+        w["score"] = w["net"] + day_cost * (dmax if dmax is not None else UNKNOWN_DAYS)
+        w.update(offer=offer, quote=quote, disc=disc)
+    ways.sort(key=lambda w: (w["score"], len(w["lines"])))
+    notes = []
+    odd = deals.odd_one_out(ways, vs)
+    if odd:
+        notes.append(odd)
+    if ways and any(v.get("ambiguous") for v, _ in ways[0]["lines"]):
+        notes.append(f"! variant names repeat — look at get_variant_images({item_id}) before trusting the pick")
+    return ways, notes
+
+
+def _plan(specs: list[dict], day_cost: float = DAY_COST) -> dict:
+    """Best offer per list item, then the basket: Choice threshold, store discounts, delivery."""
+    picks, notes, candidates = [], [], set()
+    for spec in specs:
+        need = spec.get("need") or spec.get("query") or ", ".join(map(str, spec.get("item_ids") or [])) or "?"
+        try:
+            ids = _candidate_ids(spec)
+        except PermissionError:
+            raise
+        except Exception as e:
+            notes.append(f"{need}: search failed: {e}")
+            continue
+        candidates.update(ids)
+        options = []
+        for iid in ids:
+            ways, n = _ways_for(iid, spec, day_cost)
+            notes += [f"{need}: {x}" for x in n]
+            options += ways[:3]
+        options.sort(key=lambda w: w["score"])
+        if not options:
+            notes.append(f"{need}: nothing usable found")
+            continue
+        picks.append({"need": need, "spec": spec, "options": options})
+
+    # The parcel is complete when its slowest part arrives: a faster offer is
+    # only worth more where it would otherwise be the slowest part.
+    for p in picks:
+        others = [q["options"][0]["days"] or UNKNOWN_DAYS for q in picks if q is not p]
+        floor = max(others, default=0)
+        for w in p["options"]:
+            w["score"] = w["net"] + day_cost * max(w["days"] or UNKNOWN_DAYS, floor)
+        p["options"].sort(key=lambda w: (w["score"], w["days"] or UNKNOWN_DAYS, len(w["lines"])))
+        best = p["options"][0]
+        seen = {best["offer"]["item_id"]}
+        p["others"] = []
+        for w in p["options"][1:]:
+            if w["offer"]["item_id"] not in seen and len(p["others"]) < 2:
+                seen.add(w["offer"]["item_id"])
+                p["others"].append(w)
+        p["way"] = best
+
+    choice = [p for p in picks if p["way"]["offer"]["choice"]]
+    choice_goods = sum(p["way"]["goods"] for p in choice)
+    threshold = max((p["way"]["offer"]["shipping"].get("choice_threshold") or 0 for p in choice), default=0)
+    choice_fee = 0.0
+    if choice and threshold and choice_goods < threshold:
+        choice_fee = max((p["way"]["offer"]["shipping"].get("fee") or 0) for p in choice)
+    stores: dict[str, dict] = {}
+    for p in picks:
+        w = p["way"]
+        key = str((w["disc"] or {}).get("seller_id") or w["offer"].get("store") or w["offer"]["item_id"])
+        st = stores.setdefault(key, {"name": w["offer"].get("store") or key, "sub": 0.0, "disc": w["disc"],
+                                     "item_id": w["offer"]["item_id"]})
+        st["sub"] += w["goods"]
+    saved = coupons = 0.0
+    for st in stores.values():
+        st["save"], st["how"] = deals.discount_for(st["disc"], st["sub"], coupons=False)
+        full, st["coupon_how"] = deals.discount_for(st["disc"], st["sub"])
+        st["coupon"] = round(full - st["save"], 2)
+        st["more"] = deals.next_discount(st["disc"], st["sub"], CURRENCY)
+        saved += st["save"]
+        coupons += st["coupon"]
+    goods = sum(p["way"]["goods"] for p in picks)
+    ship = sum(p["way"]["ship"] for p in picks) + choice_fee
+    dated = [p for p in picks if p["way"]["days"]]
+    slowest = max(dated, key=lambda p: p["way"]["days"]) if dated else None
+    return {
+        "picks": picks, "notes": notes, "candidates": candidates,
+        "choice_goods": choice_goods, "threshold": threshold, "choice_fee": choice_fee,
+        "stores": stores, "goods": goods, "ship": ship, "saved": saved, "coupons": coupons,
+        "total": goods + ship - saved, "slowest": slowest,
+    }
+
+
+def _fmt_plan(plan: dict) -> str:
+    cur = CURRENCY
+    out = [f"Plan: {len(plan['picks'])} item(s), "
+           f"{sum(len(p['way']['lines']) for p in plan['picks'])} cart line(s)"]
+    for i, p in enumerate(plan["picks"], 1):
+        w, o = p["way"], p["way"]["offer"]
+        kind = "Choice" if o["choice"] else f"global seller, {len(w['lines'])} line(s) × own shipping"
+        parts = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
+        ship = "free" if o["choice"] else f"{w['ship']:.2f}"
+        out.append(f"{i}. {p['need']}: {parts} = {w['pieces']} pcs — {o['title'][:60]} ({o['item_id']})")
+        out.append(f"   goods {w['goods']:.2f} + shipping {ship}"
+                   + (f" − {w['save']:.2f} ({w['save_how']})" if w["save"] else "")
+                   + f" = {w['net']:.2f} {cur} · {w['days'] or '?'} days · {kind} · {o.get('store') or ''}"
+                   + (f"\n   coupon to collect: −{w['coupon'][0]:.2f} ({w['coupon'][1]})" if w.get("coupon") else ""))
+        for alt in p["others"]:
+            ao = alt["offer"]
+            out.append(f"   vs {ao['title'][:45]} ({ao['item_id']}): {alt['net']:.2f} {cur}, "
+                       f"{alt['days'] or '?'} days{' Choice' if ao['choice'] else ''}"
+                       f" → {alt['score'] - w['score']:+.2f} incl. delivery time")
+    out.append("")
+    if plan["threshold"]:
+        st = ("free shipping" if not plan["choice_fee"] else
+              f"{plan['choice_fee']:.2f} shipping — add {plan['threshold'] - plan['choice_goods']:.2f} Choice goods to make it free")
+        out.append(f"Choice goods {plan['choice_goods']:.2f} {cur} (threshold {plan['threshold']:.2f}): {st}")
+    for st in plan["stores"].values():
+        if st["save"] or st["coupon"] or st["more"]:
+            out.append(f"Store {st['name']}: {st['sub']:.2f}"
+                       + (f" → −{st['save']:.2f} ({st['how']})" if st["save"] else "")
+                       + (f"; coupon to collect −{st['coupon']:.2f} ({st['coupon_how']})" if st["coupon"] else "")
+                       + (f"; {st['more']}" if st["more"] else ""))
+    out.append(f"Total ≈ {plan['goods']:.2f} goods + {plan['ship']:.2f} shipping"
+               + (f" − {plan['saved']:.2f} automatic discounts" if plan["saved"] else "")
+               + f" = {plan['total']:.2f} {cur}"
+               + (f"; {plan['total'] - plan['coupons']:.2f} with the coupons collected" if plan["coupons"] else "")
+               + " (coins not included)")
+    if plan["slowest"]:
+        sl = plan["slowest"]
+        out.append(f"Slowest: {sl['need']} — up to {sl['way']['days']} days")
+    for n in plan["notes"]:
+        out.append(f"note: {n}")
+    return "\n".join(out)
+
+
+def _set_qty(cookies: dict[str, str], cid: str, qty: int):
+    def edit(fields):
+        fields["operationType"] = "update_quantity"
+        fields["quantityView"] = {"current": int(qty)}
+    return _cart_line_action(cookies, [cid], edit)
+
+
+def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
+    """Put the plan into the cart, drop the MCP's own replaced lines, check exactly the plan, verify."""
+    cart = _read_cart(cookies)
+    by_key = {(ln["item_id"], ln["sku_id"]): ln for ln in cart["lines"]}
+    want: list[str] = []
+    expect: dict[str, dict] = {}
+    log = []
+    for p in plan["picks"]:
+        w = p["way"]
+        iid = w["offer"]["item_id"]
+        for (v, q), ship in zip(w["lines"], w["line_ship"]):
+            ln = by_key.get((iid, v["sku_id"]))
+            if ln:
+                cid = ln["cart_id"]
+                if ln["qty"] != q:
+                    done, failed = _set_qty(cookies, cid, q)
+                    log.append(f"quantity {ln['qty']}→{q}: {p['need']} ({v['label']})" if done
+                               else f"FAILED quantity for {p['need']}: {failed}")
+            else:
+                try:
+                    cid = _cart_add(cookies, iid, v["sku_id"], q)
+                    log.append(f"added {q}× {v['label']}: {p['need']}")
+                except Exception as e:
+                    log.append(f"FAILED to add {p['need']} ({v['label']}): {e}")
+                    continue
+            want.append(cid)
+            expect[cid] = {"need": p["need"], "ship": ship, "days": w["days"], "choice": w["offer"]["choice"]}
+    mine = _mcp_lines()
+    drop = [ln for ln in cart["lines"]
+            if ln["cart_id"] in mine and ln["item_id"] in plan["candidates"] and ln["cart_id"] not in want]
+    if drop:
+        def edit(fields):
+            fields["operationType"] = "delete"
+        done, failed = _cart_line_action(cookies, [ln["cart_id"] for ln in drop], edit)
+        _remember_lines(drop=done)
+        for ln in drop:
+            log.append(("removed (replaced by the plan): " if ln["cart_id"] in done else "FAILED to remove: ")
+                       + f"{ln['title'][:40]} ({ln['variant']})")
+    for st in plan["stores"].values():
+        c = deals.coupon_to_collect(st["disc"], st["sub"])
+        if not c:
+            continue
+        try:
+            res = _collect(st["item_id"], [c]).get(c["campaign_id"])
+        except Exception as e:
+            res = f"failed: {e}"
+        log.append(f"coupon {c['off']:.2f} off over {c['min']:.2f} at {st['name']}: {res}")
+    sel = _select(cookies, want, only=True)
+    after = _read_cart(cookies)
+    lines = {ln["cart_id"]: ln for ln in after["lines"]}
+    diffs = []
+    for cid, e in expect.items():
+        ln = lines.get(cid)
+        if not ln:
+            diffs.append(f"{e['need']}: line {cid} not in the cart")
+            continue
+        if ln["ship"] is not None and not e["choice"] and abs(ln["ship"] - e["ship"]) > 0.5:
+            diffs.append(f"{e['need']}: shipping {ln['ship']:.2f} in the cart, planned {e['ship']:.2f}")
+        days = ln["days"][1]
+        if days and e["days"] and abs(int(days) - int(e["days"])) > 3:
+            diffs.append(f"{e['need']}: {days} days in the cart, planned {e['days']}")
+    out = ["Applied:"] + [f"- {x}" for x in log] + ["", sel, ""]
+    out.append("Plan vs cart: " + ("matches (shipping within 0.50, delivery within 3 days)." if not diffs
+                                   else "differs:\n" + "\n".join(f"- {d}" for d in diffs)))
+    r = cartlib.shipping_report({**after, "lines": [ln for ln in after["lines"] if ln["cart_id"] in want]})
+    for ln, why in r["paid"]:
+        out.append(f"- paid shipping {ln['ship']:.2f}: {ln['title'][:40]} — {why}")
+    if r["slowest"]:
+        out.append(f"Slowest line: {r['slowest']['title'][:40]}, arrives by {r['latest']}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST) -> str:
+    """
+    From a shopping list to a checked cart: finds the best offer for every
+    item, prices the basket as checkout will (shipping per cart line for
+    global sellers, Choice free-shipping threshold, store discounts and
+    coupons, delivery time), and with apply=True puts exactly that into the
+    cart. Never buys: the result ends with the checkout link for the user.
+
+    Each item is a dict:
+        need:      what it is, for the report ("ESP32-S3 N16R8 dev board")
+        pieces:    how many pieces are needed (packs are counted in pieces)
+        query:     search term — the top `candidates` hits (default 3) compete
+        item_ids:  candidate products (compete with the search hits, if any)
+        match:     words every chosen variant name must contain ("N16R8 Module")
+        avoid:     words that rule out a variant or search hit ("chip shell")
+        sku_id + qty: take exactly this variant and quantity (no optimizing)
+
+    Ranking: net price (goods + shipping − store discount) + day_cost per day
+    of delivery. When the report says variant names repeat or a variant is
+    suspiciously cheap, look at get_variant_images and set `match`.
+
+    apply=True: adds or re-sizes the planned lines, removes lines this MCP
+    added earlier for these products that the plan no longer uses (never the
+    user's own lines), unchecks everything else, checks the plan (AliExpress
+    keeps at most 10 checked) and returns the checkout link with all plan
+    lines, then compares plan and cart (shipping, delivery).
+
+    Args:
+        items: The shopping list (see above).
+        apply: Put the plan into the cart.
+        day_cost: EUR per delivery day when ranking (default 0.15).
+    """
+    try:
+        plan = _plan(items, day_cost)
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
+    text = _fmt_plan(plan)
+    if not apply or not plan["picks"]:
+        return text
+    cookies = load_cookies()
+    if not cookies:
+        return text + "\n\n" + AUTH_EXPIRED_MSG
+    try:
+        return text + "\n\n" + _apply_plan(cookies, plan)
+    except Exception as e:
+        return text + f"\n\nApplying failed: {e}"
+
+
 @mcp.tool()
 def plan_basket(items: list[str]) -> str:
     """
-    Price a shopping list before it goes into the cart: per line price,
-    Choice items vs. others, whether the Choice free-shipping threshold is
-    reached, shipping for non-Choice lines, and the total.
+    Price fixed cart lines before they go into the cart (shop_list without
+    searching or optimizing): shipping per line, Choice threshold, store
+    discounts, delivery.
 
     Args:
-        items: Lines "item_id:sku_id:quantity" (sku_id from get_product_variants;
-            "item_id::qty" takes the cheapest-per-piece variant).
+        items: Lines "item_id:sku_id:quantity" (sku_id from get_product_variants).
     """
-    lines_out = []
-    choice_sub = 0.0
-    choice_threshold = None
-    choice_fee_if_below = 0.0
-    other_sub = 0.0
-    other_ship = 0.0
-    problems = []
-    stores: dict[str, dict] = {}
+    specs = []
     for raw in items:
         parts = [x.strip() for x in str(raw).split(":")]
         if len(parts) < 2:
-            problems.append(f"{raw}: expected item_id:sku_id:quantity")
-            continue
-        iid, sid = parts[0], parts[1]
+            return f"{raw}: expected item_id:sku_id:quantity"
         q = int(parts[2]) if len(parts) > 2 and parts[2] else 1
-        offer = _pdp_offer(iid)
-        time.sleep(1.0)
-        if not offer:
-            problems.append(f"{iid}: no data")
-            continue
-        vs = [v for v in offer["variants"] if v["salable"]]
-        v = next((x for x in vs if x["sku_id"] == sid), None) if sid else min(
-            (x for x in vs if x["unit"] is not None), key=lambda x: x["unit"], default=None)
-        if not v or v["price"] is None:
-            problems.append(f"{iid}: variant {sid or '(cheapest)'} not found or unavailable")
-            continue
-        if v["max_per_order"] and q > int(v["max_per_order"]):
-            problems.append(f"{iid}: {q} > max {v['max_per_order']} per order")
-        line_total = v["price"] * q
-        sh = offer["shipping"]
-        tag = "Choice" if offer["choice"] else "seller"
-        tip = ""
-        same = [x for x in offer["variants"] if deals.base_name(x["label"]) == deals.base_name(v["label"])]
-        ways = deals.best_ways(same, v["pack"] * q, None, True, limit=50)
-        if ways and ways[0]["goods"] < line_total - 0.01:
-            tip = "\n  tip: same pieces cheaper as " + deals.fmt_way(ways[0], CURRENCY)
-        elif deals.upsell(ways, CURRENCY):
-            tip = "\n  " + deals.upsell(ways, CURRENCY)
-        if offer["choice"]:
-            choice_sub += line_total
-            choice_threshold = max(choice_threshold or 0, sh.get("choice_threshold") or 0)
-            choice_fee_if_below = max(choice_fee_if_below, sh.get("fee") or 0)
+        spec = {"need": parts[0], "item_ids": [parts[0]], "qty": q}
+        if parts[1]:
+            spec["sku_id"] = parts[1]
         else:
-            other_sub += line_total
-            quote = _freight(offer, v["sku_id"])
-            line_ship = deals.shipping_for(quote, q) if quote else (sh.get("fee") or 0)
-            other_ship += line_ship
-            sh = dict(sh, fee=round(line_ship, 2))
-        disc = _discounts(iid, v["sku_id"])
-        key = str((disc or {}).get("seller_id") or offer.get("store") or iid)
-        st = stores.setdefault(key, {"name": offer.get("store") or key, "sub": 0.0, "disc": disc})
-        st["sub"] += line_total
-        st["disc"] = st["disc"] or disc
-        pcs = v["pack"] * q
-        lines_out.append(
-            f"- {q} × {v['label']} — {line_total:.2f} {CURRENCY} [{tag}]"
-            + (f" ({pcs} pcs, {line_total / pcs:.2f}/pc)" if pcs > 1 else "")
-            + f"\n  {offer['title'][:90]} ({iid}, sku {v['sku_id']})"
-            + ("" if offer["choice"] else f"\n  {_fmt_shipping(sh)} for qty {q}")
-            + tip
-        )
-
-    choice_ship = 0.0
-    if choice_sub and choice_threshold and choice_sub < choice_threshold:
-        choice_ship = choice_fee_if_below
-    out = ["Basket:"] + lines_out + [""]
-    if choice_sub and not choice_threshold:
-        out.append(f"Choice items: {choice_sub:.2f} {CURRENCY} (no threshold advertised; shipping as shown per item)")
-    elif choice_sub:
-        status = (
-            f"reached ({choice_sub:.2f} ≥ {choice_threshold:.2f}) → free shipping"
-            if choice_ship == 0 else
-            f"NOT reached ({choice_sub:.2f} < {choice_threshold:.2f}) → about {choice_ship:.2f} shipping; add {choice_threshold - choice_sub:.2f} to make it free"
-        )
-        out.append(f"Choice items: {choice_sub:.2f} {CURRENCY}, threshold {status}")
-    if other_sub:
-        out.append(f"Other sellers: {other_sub:.2f} {CURRENCY} + shipping {other_ship:.2f} (A + B·qty per line)")
-    gross = choice_sub + choice_ship + other_sub + other_ship
-    saved = 0.0
-    disc_lines = []
-    for st in stores.values():
-        s_off, how = deals.discount_for(st["disc"], st["sub"])
-        more = deals.next_discount(st["disc"], st["sub"], CURRENCY)
-        if s_off or more:
-            disc_lines.append(f"  {st['name']}: {st['sub']:.2f}"
-                              + (f" → −{s_off:.2f} ({how})" if s_off else "")
-                              + (f"; {more}" if more else ""))
-        saved += s_off
-    if disc_lines:
-        out.append("Store discounts/coupons:")
-        out += disc_lines
-    out.append(f"Estimated total: {gross:.2f} {CURRENCY}"
-               + (f", after store discounts/coupons {gross - saved:.2f}" if saved else "")
-               + " (coins not included)")
-    if problems:
-        out.append("Problems: " + "; ".join(problems))
-    return "\n".join(out)
+            spec["pieces"] = q
+        specs.append(spec)
+    try:
+        return _fmt_plan(_plan(specs))
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
 
 
 @mcp.tool()
