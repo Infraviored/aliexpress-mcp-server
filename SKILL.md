@@ -14,12 +14,13 @@ and without choice_only and say what the speed costs.
 
 The usual job — a shopping list into a ready cart — is one tool:
 
-1. `shop_list(items)` with one dict per part: `need`, `pieces`, and `query`
+1. `shop_list(items, list_name="…")` with one dict per part: `need`, `pieces`, and `query`
    (search) and/or `item_ids` (known candidates), optionally `match` / `avoid`
    words for the variant, or `sku_id` + `qty` to take an exact variant. It
    prices every candidate as checkout will (shipping per cart line for global
-   sellers, Choice free-shipping threshold, store discounts, delivery days)
-   and prints the plan with the runner-up per part.
+   sellers, Choice free-shipping threshold, import charges per cart line,
+   store discounts, delivery days) and prints the plan with the runner-up per
+   part.
 2. Read the notes. "variant names repeat" or "!" (suspiciously cheap
    variant): call `get_variant_images` and look; then set `match`. For parts
    that are often faked (ICS-43434, branded chips) read
@@ -33,21 +34,37 @@ The usual job — a shopping list into a ready cart — is one tool:
    Note: deletions are scoped to this list's candidate products. Lines the MCP
    added for other, unrelated lists are left alone; remove them with
    `remove_from_cart` if they are no longer needed.
-4. Give the user the checkout link and the totals. Paying is their click.
+   Every plan line is tagged with `list_name` and its need.
+4. Give the user the checkout link and the totals from the checkout preview
+   apply prints (the real checkout page: goods, shipping, import charges,
+   total). Paying is their click.
+
+"What is in my cart / what is ticked / what does it cost": `view_cart()`.
+It shows each shopping list apart from the rest of the cart, every line with
+its need and why it is or is not ticked, flags leftovers (same part, not on
+the list), and prices each list at checkout. Lines already in the cart that
+belong to a list: `set_cart_list(cart_ids, list_name, need)`.
 
 Single questions: `best_offer(item_id, pieces)` (cheapest way to N pieces from
-one product), `get_discounts(item_id, subtotal)`, `collect_coupon(item_id,
-subtotal)`, `view_cart()` (grouped cart with a shipping analysis),
-`select_cart_items(cart_ids, only=True)`.
+one product), `checkout_preview(cart_ids | list_name)` (real checkout total for
+any lines), `get_discounts(item_id, subtotal)`, `collect_coupon(item_id,
+subtotal)`, `select_cart_items(cart_ids, only=True)`.
 
 Rules worth remembering:
 - Choice ("Shipped by AliExpress") ships free once the checked Choice lines
   together pass about 10 €, in 4–10 days. Global sellers charge shipping per
   cart line and often take 2–4 weeks. Two variants of one product are two
   lines and pay shipping twice; `shop_list` prefers one line.
-- AliExpress remembers at most 10 checked cart lines (an 11th unchecks the
-  oldest, on the web page too). The checkout link has no such limit — always
-  hand it out.
+- Import charges (EU, ship to DE, measured 2026-10-21): 3.57 € per cart line
+  (3 € duty + VAT), whatever its price or quantity. AliExpress pays them
+  beyond the 9th Choice line; every global seller line pays. A 1.39 € part
+  from a global seller costs 1.39 + ~3.30 shipping + 3.57 import. So: one
+  bigger pack instead of two lines, Choice instead of global once the list
+  has 9 Choice lines, and say so when "to compare" items cost duty.
+- AliExpress remembers at most 10 ticked cart lines, on its server (an 11th
+  unticks the oldest, also via the group or "All" boxes). It only matters for
+  the cart page: the checkout link and checkout_preview take any number of
+  lines — always hand out the list's link, never "the ticked lines".
 - The search price is the cheapest variant and often bait (an accessory, a
   bare chip). Never compare offers by it.
 - Generic variant names hide different articles: "Chip" was the bare

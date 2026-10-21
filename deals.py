@@ -140,13 +140,15 @@ def best_ways(
     quote: Optional[dict],
     choice_free: bool,
     limit: int = 3,
+    duty: float = 0.0,
 ) -> list[dict]:
     """
     All ways to get >= `need` pieces from one ladder, using up to two pack
-    sizes, ranked by total (goods + shipping per cart line), then by fewer
-    lines. Each way: {"lines": [(variant, qty)], "line_ship": [fee per line],
-    "pieces", "goods", "ship", "total"}.
+    sizes, ranked by total (goods + shipping and import charges per cart
+    line), then by fewer lines. Each way: {"lines": [(variant, qty)],
+    "line_ship": [fee per line], "pieces", "goods", "ship", "duty", "total"}.
     `choice_free`: shipping counts as 0 (Choice item in an order above threshold).
+    `duty`: import charges per cart line (EU: flat per line, not per piece).
     """
     ways = []
     groups = ladders(variants) or {}
@@ -174,9 +176,11 @@ def best_ways(
                 # one cart line per variant, each with its own shipping
                 line_ship = [0.0 if choice_free else shipping_for(quote, q) for _, q in used]
                 ship = sum(line_ship)
+                tax = duty * len(used)
                 ways.append({
                     "lines": used, "line_ship": line_ship,
-                    "pieces": pieces, "goods": goods, "ship": ship, "total": goods + ship,
+                    "pieces": pieces, "goods": goods, "ship": ship, "duty": tax,
+                    "total": goods + ship + tax,
                 })
     ways.sort(key=lambda w: (w["total"], len(w["lines"]), -w["pieces"]))
     return ways[:limit]
@@ -206,7 +210,8 @@ def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.75) -> 
 def fmt_way(w: dict, currency: str) -> str:
     parts = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
     ship = f" + {w['ship']:.2f} ship" if w["ship"] else ""
-    return f"{parts} = {w['pieces']} pcs, {w['goods']:.2f}{ship} = {w['total']:.2f} {currency} ({w['total'] / w['pieces']:.2f}/pc)"
+    tax = f" + {w['duty']:.2f} import" if w.get("duty") else ""
+    return f"{parts} = {w['pieces']} pcs, {w['goods']:.2f}{ship}{tax} = {w['total']:.2f} {currency} ({w['total'] / w['pieces']:.2f}/pc)"
 
 
 def ladder_lines(variants: list[dict], currency: str) -> list[str]:

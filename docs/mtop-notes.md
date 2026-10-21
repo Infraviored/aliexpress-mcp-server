@@ -43,7 +43,11 @@ cannot see. `cart.merge` does what the page does.
 
 **At most 10 checked lines are remembered.** Checking an 11th silently
 unchecks the oldest one — the web page does the same; it shows 11 until the
-next reload. Checkout is not limited: the checkout button opens
+next reload. Retested 2026-10-21 with the group checkbox
+(`app_cart_group_title_component_ahe_global`, `checkbox.selected=true`,
+`operationType: "checkbox"`): the response showed 13 checked, the next
+render 10 — the three oldest were dropped. The limit is the server's, not a
+paging artefact. Checkout is not limited: the checkout button opens
 
     https://www.aliexpress.com/p/trade/confirm.html?availableProductShopcartIds=<id>,<id>,…
         &aeOrderFrom=main_shopcart&intentionalPayMethod=&curPageLogUid=<ms>_<rand>&spm=a2g0o.cart.0.0
@@ -87,3 +91,36 @@ coupon entry `[class*=coupon-block--wrap]`, then the button
 
 **Product page extras seen, not used yet:** quantity price tiers ("3,15€ ≥10
 Stücke") and an express shipping option.
+
+
+## Checkout preview (renderOrder)
+
+`mtop.aliexpress.checkout.renderOrder` v1.0, POST, works with the plain MTOP
+signing (no browser, no umidToken needed). Data:
+
+    {"ultronVersion": "3.0", "_saasRegion": "aeg", "pageType": "Shipping",
+     "_currency": "EUR", "locale": "en_US",
+     "extraParam": "{\"locale\":\"en_US\",\"intentional_currency\":\"EUR\",\"buyerCountry\":\"DE\",\"platformType\":\"PC\",…}",
+     "shippingAddressId": "0",
+     "buyParams": "{\"orderFrom\":\"SELECTIVE_CARTS\",\"items\":[{\"cartId\":\"…\"}]}",
+     "contextID": "PlaceOrder_<uuid>"}
+
+It renders the confirm page; nothing is ordered until "Pay now". The answer
+is an ultron tree (`data.data`); `checkout.py` documents the blocks it reads.
+The response holds the shipping address and the buyer id — never log it
+whole (the test fixture is stripped of both).
+
+`checkout_order_summary_TOTAL_SUMMARY.summaryLines[].type`: PRICE (goods),
+DISCOUNTS, COUPON_CODE, SHIPPING_FEE, **DUTY_TAX_FEE** ("Estimated import
+charges"), **TAX_DISCOUNT_FEE** ("AliExpress duty reduction"), DUTY_REMINDER.
+
+**Import charges, measured 2026-10-21 (DE):**
+
+- One line alone: 3.56–3.58 € whatever the goods (1.39 € Dupont set, 24.95 €
+  of ESP boards) — the EU's flat 3 € per item plus 19 % VAT.
+- Two Choice lines of the same kind (two microphones, two amplifiers): 7.14.
+  Per line, not per tariff class, not per piece.
+- Growing one Choice order line by line: 3.57 per line up to 9 lines
+  (32.13); from the 10th line on the duty grows but the "duty reduction"
+  grows by the same amount — net stays 32.13. Global seller lines added on
+  top pay 3.57 each again (two global lines: 39.29).

@@ -319,13 +319,84 @@ def _when(ln: dict) -> str:
     return f"{(a or b)[5:]}…{b[5:]}" if a and a != b else b[5:]
 
 
-def format_cart(cart: dict, show_unchecked: bool = True) -> str:
+# Model numbers in a title ("PCM5102A", "MP1584EN", "ICS-43434"): letters
+# and digits mixed, at least 4 long. Two lines sharing one are the same part.
+_MODEL = re.compile(r"\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9][A-Z0-9-]{3,}\b")
+
+
+def _models(title: str) -> set[str]:
+    return {m.replace("-", "") for m in _MODEL.findall(title or "")} - {"USB", "RGB"}
+
+
+def _ship_s(ln: dict) -> str:
+    if ln["ship"] == 0:
+        return "free"
+    if ln["ship"] is not None:
+        return f"ship {ln['ship']:.2f}"
+    return "Choice shipping" if ln["group"] == "group_choice" else "ship ?"
+
+
+def _line_text(ln: dict, cur: str, prefix: str = "") -> str:
+    qty = f"{ln['qty']}× " if ln["qty"] != 1 else ""
+    bad = "" if ln["valid"] else " ⚠️ not available"
+    kind = "Choice" if ln["group"] == "group_choice" else "global"
+    return (f"- [{'x' if ln['checked'] else ' '}] {prefix}{qty}{ln['title'][:50]} | {ln['variant'] or '-'} | "
+            f"{(ln['price'] or 0):.2f}{cur} | {_ship_s(ln)} | {kind} | {_when(ln)}{bad}\n"
+            f"      cart_id {ln['cart_id']}")
+
+
+def format_lists(cart: dict, tags: dict[str, dict]) -> tuple[list[str], set[str]]:
+    """
+    The lines on shopping lists (`tags`: cart_id → {list, need, own}), one
+    section per list, each line with its need; a line not ticked on the cart
+    page says why. Returns the text and the cart ids shown.
+    """
+    cur = (cart["summary"].get("currency") or "EUR").replace("EUR", "€")
+    by_list: dict[str, list] = {}
+    for ln in cart["lines"]:
+        name = (tags.get(ln["cart_id"]) or {}).get("list")
+        if name:
+            by_list.setdefault(name, []).append(ln)
+    out, shown = [], set()
+    others = [ln for ln in cart["lines"] if not (tags.get(ln["cart_id"]) or {}).get("list")]
+    for name, lines in by_list.items():
+        ticked = sum(1 for ln in lines if ln["checked"])
+        goods = sum(_goods(ln) for ln in lines)
+        out.append(f"## List '{name}' — {len(lines)} line(s), goods {goods:.2f}{cur}; "
+                   f"{ticked} ticked on the cart page")
+        for ln in lines:
+            t = tags[ln["cart_id"]]
+            need = f"{t['need']}: " if t.get("need") else ""
+            out.append(_line_text(ln, cur, need) + ("  (your own line)" if t.get("own") else ""))
+            shown.add(ln["cart_id"])
+        if ticked < len(lines):
+            out.append(f"   [ ] lines are on the list all the same: the cart page keeps only {MAX_CHECKED} "
+                       f"ticked, the checkout link and checkout_preview take all {len(lines)}.")
+        mine = {m: ln for ln in lines for m in _models(ln["title"])}
+        for ln in others:
+            twin = next((mine[m] for m in _models(ln["title"]) if m in mine), None)
+            if twin:
+                out.append(f"   ! not on the list but the same part as '{tags[twin['cart_id']].get('need') or twin['title'][:30]}': "
+                           f"{ln['title'][:45]} (cart_id {ln['cart_id']}) — a leftover?")
+        out.append(f"   Checkout link for the whole list: {checkout_url([ln['cart_id'] for ln in lines])}")
+        out.append("")
+    return out, shown
+
+
+def format_cart(cart: dict, show_unchecked: bool = True, tags: Optional[dict[str, dict]] = None) -> str:
     cur = (cart["summary"].get("currency") or "EUR").replace("EUR", "€")
     h = cart["header"]
     n_checked = sum(1 for ln in cart["lines"] if ln["checked"])
-    out = [f"Cart: {len(cart['lines'])} line(s), {n_checked} checked."]
+    out = [f"Cart: {len(cart['lines'])} line(s), {n_checked} ticked on the cart page "
+           f"(AliExpress keeps at most {MAX_CHECKED} ticked)."]
+    listed, shown = format_lists(cart, tags or {}) if tags else ([], set())
+    if listed:
+        out += [""] + listed
+        out.append("## Other lines (not on a list)" if len(shown) < len(cart["lines"]) else "")
     grouped: dict[str, list] = {}
     for ln in cart["lines"]:
+        if ln["cart_id"] in shown:
+            continue
         grouped.setdefault(ln["group"] or "other", []).append(ln)
     order = [g for g in ("group_choice", "global") if g in grouped] + [g for g in grouped if g not in ("group_choice", "global")]
     for gid in order:
@@ -335,29 +406,19 @@ def format_cart(cart: dict, show_unchecked: bool = True) -> str:
         goods = sum(_goods(ln) for ln in ch)
         ship = sum(ln["ship"] or 0 for ln in ch)
         out.append("")
-        out.append(f"## {g['name']} — {len(ch)}/{len(lines)} checked, goods {goods:.2f}{cur}, shipping {ship:.2f}{cur}")
+        out.append(f"{'###' if listed else '##'} {g['name']} — {len(ch)}/{len(lines)} ticked, "
+                   f"goods {goods:.2f}{cur}, shipping {ship:.2f}{cur}")
         for p in g.get("promo") or []:
             out.append(f"   ({p})")
         for ln in sorted(lines, key=lambda x: not x["checked"]):
             if not ln["checked"] and not show_unchecked:
                 continue
-            if ln["ship"] == 0:
-                ship_s = "free"
-            elif ln["ship"] is not None:
-                ship_s = f"ship {ln['ship']:.2f}"
-            else:
-                ship_s = "Choice shipping" if gid == "group_choice" else "ship ?"
-            qty = f"{ln['qty']}× " if ln["qty"] != 1 else ""
-            bad = "" if ln["valid"] else " ⚠️ not available"
-            out.append(
-                f"- [{'x' if ln['checked'] else ' '}] {qty}{ln['title'][:55]} | {ln['variant'] or '-'} | "
-                f"{(ln['price'] or 0):.2f}{cur} | {ship_s} | {_when(ln)} | {ln['store'][:25]}{bad}\n"
-                f"      cart_id {ln['cart_id']}  item {ln['item_id']}  sku {ln['sku_id']}"
-            )
+            out.append(_line_text(ln, cur) + f"  item {ln['item_id']}  sku {ln['sku_id']}  {ln['store'][:25]}")
     s = cart["summary"]
     if s.get("total") is not None:
         out.append("")
-        out.append("## Checkout would charge (checked lines)")
+        out.append(f"## Cart page total (only the {n_checked} ticked lines; no import charges — "
+                   "checkout_preview shows what checkout really charges)")
         out.append(f"Subtotal {s.get('subtotal') or 0:.2f}{cur} + shipping {s.get('shipping') or 0:.2f}{cur}"
                    + (f" ({s['shipping_note']})" if s.get("shipping_note") else ""))
         for title, amt in s.get("discounts") or []:
@@ -382,5 +443,5 @@ def format_cart(cart: dict, show_unchecked: bool = True) -> str:
     ids = [ln["cart_id"] for ln in cart["lines"] if ln["checked"]]
     if ids:
         out.append("")
-        out.append(f"Checkout link for the {len(ids)} checked line(s): {checkout_url(ids)}")
+        out.append(f"Checkout link for the {len(ids)} ticked line(s): {checkout_url(ids)}")
     return "\n".join(out)

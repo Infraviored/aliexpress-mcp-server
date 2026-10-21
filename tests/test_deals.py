@@ -24,6 +24,15 @@ def test_choice_ships_free_per_line():
     assert all(w["ship"] == 0 for w in ways)
 
 
+def test_import_charges_count_per_line_not_per_piece():
+    # Choice, free shipping: 1×3PCS + 2×1PCS (two lines) vs 5×1PCS (one line)
+    ways = deals.best_ways([ONE, THREE], 5, QUOTE, choice_free=True, limit=50, duty=3.57)
+    for w in ways:
+        assert abs(w["duty"] - 3.57 * len(w["lines"])) < 1e-9
+        assert abs(w["total"] - (w["goods"] + w["ship"] + w["duty"])) < 1e-9
+    assert len(ways[0]["lines"]) == 1
+
+
 DISC = {
     "tiers": [(18.25, 0.91), (31.94, 1.82)],
     "coupons": [

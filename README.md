@@ -11,18 +11,25 @@ user's click.
 
 ## Tools
 
-- `shop_list(items, apply)` — a shopping list to a ready cart. Finds the best
-  offer per part (shipping per cart line for global sellers, Choice
+- `shop_list(items, apply, list_name)` — a shopping list to a ready cart. Finds the best
+  offer per part (shipping and import charges per cart line, Choice
   free-shipping threshold, store discounts, delivery time), and with
   `apply=True` adds/resizes the lines, removes its own replaced lines,
   collects the store coupon worth having, checks exactly the plan, returns
   the checkout link and compares plan and cart.
-- `view_cart(checked_only)` — the cart as the web page shows it, grouped into
-  "Shipped by AliExpress" (Choice) and global sellers, with what checkout
-  would charge, a shipping analysis (every paid shipping line and why, the
-  slowest line) and the other channel carts.
-- `select_cart_items(cart_ids, only)` — check lines for checkout; returns the
-  checkout link (AliExpress itself keeps at most 10 lines checked).
+- `view_cart(checked_only, checkout)` — the cart sorted by shopping list:
+  each list's lines with their need and tick state, leftovers flagged, and
+  what checkout really charges for the list; then the other lines grouped
+  into "Shipped by AliExpress" (Choice) and global sellers, a shipping
+  analysis and the other channel carts.
+- `checkout_preview(cart_ids | list_name)` — the real checkout page for any
+  lines, nothing bought: goods, discounts, shipping per store, import
+  charges, total, slowest line, checkout link.
+- `set_cart_list(cart_ids, list_name, need)` — put existing cart lines (also
+  the user's own) on a shopping list.
+- `select_cart_items(cart_ids, only)` — tick lines on the cart page; returns
+  the checkout link (AliExpress keeps at most 10 lines ticked; the link and
+  checkout_preview have no limit).
 - `add_to_cart`, `update_cart_quantity`, `remove_from_cart` — cart lines.
 - `best_offer(item_id, pieces)`, `plan_basket(lines)` — pricing without
   touching the cart.
@@ -34,8 +41,14 @@ user's click.
 The cart and coupon protocols were learned by recording the real pages with
 `tools/capture_mtop.py`; see `docs/mtop-notes.md`. A bot check (slider or
 reCAPTCHA box) is passed automatically in Chrome on a virtual display
-(`slider.py`); cart lines this MCP added are remembered in
-`~/.mcp-credentials/aliexpress-mcp-lines.json`.
+(`slider.py`); cart lines this MCP added, and which shopping list each line
+belongs to, are remembered in `~/.mcp-credentials/aliexpress-mcp-lines.json`.
+
+Import charges: since July 2026 the EU charges a flat 3 € duty per item in
+small parcels; AliExpress collects it at checkout as 3.57 € (with VAT) per
+cart line, and pays it itself beyond the 9th Choice line. For a list of cheap
+parts this is often the biggest cost after the goods, so the planner counts
+it per line.
 
 ## How it works
 

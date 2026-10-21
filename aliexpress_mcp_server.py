@@ -15,6 +15,7 @@ import json
 import os
 import re
 import time
+import uuid
 import hashlib
 import logging
 from pathlib import Path
@@ -27,6 +28,7 @@ from mcp.server.fastmcp import FastMCP, Image
 
 import browser_actions
 import cart as cartlib
+import checkout as checkoutlib
 import deals
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -1509,7 +1511,9 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping and the
     store's discounts/coupons (ranked by net price; lists every discount). Non-Choice
     shipping is measured as A + B per extra unit; Choice shipping counts as
-    free when the Choice part of the order is over the threshold.
+    free when the Choice part of the order is over the threshold. Every cart
+    line also pays import charges (EU, ship to DE: about 3.57 per line, not
+    per piece), so one bigger pack beats two lines.
 
     Args:
         item_id: AliExpress item ID.
@@ -1527,7 +1531,8 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     if not vs:
         return f"No available variant matches '{match}'."
     quote = _freight(offer)
-    ways = deals.best_ways(vs, max(1, pieces), quote, offer["choice"] and choice_order_over_threshold, limit=50)
+    ways = deals.best_ways(vs, max(1, pieces), quote, offer["choice"] and choice_order_over_threshold,
+                           limit=50, duty=DUTY_PER_LINE)
     disc = _discounts(item_id, vs[0]["sku_id"])
     for w in ways:
         w["save"], w["save_how"] = deals.discount_for(disc, w["goods"])
@@ -1686,6 +1691,10 @@ def get_product_reviews(item_id: str, pages: int = 2, only_low: bool = False, ke
 # latter is clearly cheaper.
 DAY_COST = float(os.environ.get("ALIEXPRESS_DAY_COST", "0.15"))
 UNKNOWN_DAYS = 30
+# Import charges per cart line (EU flat duty + VAT, measured at checkout for
+# DE). Every extra line costs this, whatever its price — the biggest reason a
+# list of cheap parts gets expensive.
+DUTY_PER_LINE = float(os.environ.get("ALIEXPRESS_DUTY_PER_LINE", str(checkoutlib.DUTY_PER_LINE)))
 
 
 def _words(text: str) -> list[str]:
@@ -1754,9 +1763,10 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
         q = int(spec["qty"])
         ship = 0.0 if offer["choice"] else deals.shipping_for(quote, q)
         ways = [{"lines": [(vs[0], q)], "line_ship": [ship], "pieces": vs[0]["pack"] * q,
-                 "goods": vs[0]["price"] * q, "ship": ship, "total": vs[0]["price"] * q + ship}]
+                 "goods": vs[0]["price"] * q, "ship": ship, "duty": DUTY_PER_LINE,
+                 "total": vs[0]["price"] * q + ship + DUTY_PER_LINE}]
     else:
-        ways = deals.best_ways(vs, pieces, quote, offer["choice"], limit=10)
+        ways = deals.best_ways(vs, pieces, quote, offer["choice"], limit=10, duty=DUTY_PER_LINE)
     days = (quote or {}).get("days") or offer["shipping"].get("days") or (None, None)
     dmax = days[1] if days and days[1] else None
     disc = _discounts(item_id, vs[0]["sku_id"])
@@ -1856,6 +1866,22 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
                 p["others"] = [p["way"]] + [w for w in p["others"] if w is not alt][:1]
                 p["way"] = alt
         choice_goods, threshold, choice_fee = _choice_basket(picks, extra_choice)
+    # Import charges: AliExpress pays them beyond the 9th Choice line. Once
+    # the basket has that many, another Choice line costs no duty, while a
+    # global line still pays its own: switch a global pick to its best Choice
+    # offer where that is cheaper once the duty is left out.
+    def n_lines(choice):
+        return sum(len(p["way"]["lines"]) for p in picks if bool(p["way"]["offer"]["choice"]) == choice)
+    if n_lines(True) >= checkoutlib.CHOICE_DUTY_LINES:
+        for p in picks:
+            if p["way"]["offer"]["choice"]:
+                continue
+            alt = next((w for w in p["options"] if w["offer"]["choice"]), None)
+            if alt and alt["score"] - alt.get("duty", 0.0) < p["way"]["score"]:
+                p["others"] = [p["way"]] + [w for w in p["others"] if w is not alt][:1]
+                p["way"] = alt
+                p["why"] = (f"Choice: the basket has {checkoutlib.CHOICE_DUTY_LINES}+ Choice lines, "
+                            "so this one carries no import charges and no own shipping")
     stores: dict[str, dict] = {}
     for p in picks:
         w = p["way"]
@@ -1873,14 +1899,15 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
         coupons += st["coupon"]
     goods = sum(p["way"]["goods"] for p in picks)
     ship = sum(p["way"]["ship"] for p in picks) + choice_fee
+    duty = checkoutlib.duty_for(n_lines(True), n_lines(False), DUTY_PER_LINE)
     dated = [p for p in picks if p["way"]["days"]]
     slowest = max(dated, key=lambda p: p["way"]["days"]) if dated else None
     return {
         "picks": picks, "notes": notes, "candidates": candidates,
         "choice_goods": choice_goods, "threshold": threshold, "choice_fee": choice_fee,
         "cart_choice": extra_choice,
-        "stores": stores, "goods": goods, "ship": ship, "saved": saved, "coupons": coupons,
-        "total": goods + ship - saved, "slowest": slowest,
+        "stores": stores, "goods": goods, "ship": ship, "duty": duty, "saved": saved, "coupons": coupons,
+        "total": goods + ship + duty - saved, "slowest": slowest,
     }
 
 
@@ -1905,7 +1932,10 @@ def _fmt_plan(plan: dict) -> str:
         parts = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
         ship = "free" if o["choice"] else f"{w['ship']:.2f}"
         out.append(f"{i}. {p['need']}: {parts} = {w['pieces']} pcs — {o['title'][:60]} ({o['item_id']})")
+        if p.get("why"):
+            out.append(f"   why: {p['why']}")
         out.append(f"   goods {w['goods']:.2f} + shipping {ship}"
+                   + (f" + import {w['duty']:.2f}" if w.get("duty") else "")
                    + (f" − {w['save']:.2f} ({w['save_how']})" if w["save"] else "")
                    + f" = {w['net']:.2f} {cur} · {w['days'] or '?'} days · {kind} · {o.get('store') or ''}"
                    + (f"\n   coupon to collect: −{w['coupon'][0]:.2f} ({w['coupon'][1]})" if w.get("coupon") else ""))
@@ -1932,6 +1962,8 @@ def _fmt_plan(plan: dict) -> str:
                        + (f"; coupon to collect −{st['coupon']:.2f} ({st['coupon_how']})" if st["coupon"] else "")
                        + (f"; {st['more']}" if st["more"] else ""))
     out.append(f"Total ≈ {plan['goods']:.2f} goods + {plan['ship']:.2f} shipping"
+               + (f" + {plan['duty']:.2f} import charges ({DUTY_PER_LINE:.2f} per cart line, "
+                  f"Choice lines beyond {checkoutlib.CHOICE_DUTY_LINES} free)" if plan.get("duty") else "")
                + (f" − {plan['saved']:.2f} automatic discounts" if plan["saved"] else "")
                + f" = {plan['total']:.2f} {cur}"
                + (f"; {plan['total'] - plan['coupons']:.2f} with the coupons collected" if plan["coupons"] else "")
@@ -1994,8 +2026,28 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
                 continue
         want.append(cid)
         expect[cid] = e
+    # Tag every plan line with its list and need; the user's own lines too
+    # (marked `own`, so no plan ever deletes them).
+    name = plan.get("list") or ""
+    store = _line_store()
+    if name:
+        tags = {}
+        for (iid, sku), e in wanted.items():
+            ln = by_key.get((iid, sku))
+            cid = next((c for c in want if expect.get(c) is e), None)
+            if not cid:
+                continue
+            tag = {"list": name, "need": e["need"]}
+            if ln and ln["cart_id"] not in mine:
+                tag.update(item_id=iid, sku_id=sku, own=True)
+            tags[cid] = tag
+        _remember_lines(tags)
+        # The user's own lines that were on this list and are no longer: untag.
+        _remember_lines(drop=[c for c, v in store.items()
+                              if v.get("own") and v.get("list") == name and c not in want])
     drop = [ln for ln in cart["lines"]
-            if ln["cart_id"] in mine and ln["item_id"] in plan["candidates"] and ln["cart_id"] not in want]
+            if ln["cart_id"] in mine and ln["cart_id"] not in want
+            and (ln["item_id"] in plan["candidates"] or (name and store.get(ln["cart_id"], {}).get("list") == name))]
     if drop:
         def edit(fields):
             fields["operationType"] = "delete"
@@ -2035,7 +2087,12 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     out.append("Plan vs cart: " + ("matches (price, shipping within 0.50, delivery within 3 days)." if not diffs
                                    else "differs:\n" + "\n".join(f"- {d}" for d in diffs)))
     # The checkout link holds every plan line, also those beyond the 10 the
-    # cart page keeps checked: report on all of them.
+    # cart page keeps checked: price exactly those at checkout.
+    try:
+        out += ["", _checkout_preview_text(cookies, [c for c in want if c in lines])]
+        return "\n".join(out)
+    except Exception as ex:
+        out.append(f"(checkout preview failed: {ex}; estimate from the cart instead)")
     sub = [dict(lines[c], checked=True) for c in want if c in lines]
     goods = sum((ln["price"] or 0) * ln["qty"] for ln in sub)
     ship = sum(ln["ship"] or 0 for ln in sub)
@@ -2051,7 +2108,8 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
 
 
 @mcp.tool()
-def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST, choice_only: bool = False) -> str:
+def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST, choice_only: bool = False,
+              list_name: str = "") -> str:
     """
     From a shopping list to a checked cart: finds the best offer for every
     item, prices the basket as checkout will (shipping per cart line for
@@ -2086,15 +2144,23 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     keeps at most 10 checked) and returns the checkout link with all plan
     lines, then compares plan and cart (shipping, delivery).
 
-    Deletions are scoped to candidate products of this shopping list. Lines
-    the MCP added for other, unrelated shopping lists are left untouched —
-    remove them yourself with remove_from_cart if they are no longer needed.
+    Deletions are scoped to candidate products of this shopping list and to
+    lines the MCP added earlier under the same `list_name`. Lines the MCP
+    added for other lists are left untouched.
+
+    Every cart line costs import charges at checkout (EU, ship to DE: about
+    3.57 per line, whatever its price or quantity). The plan counts them, so
+    it prefers one bigger pack over two lines; tell the user when an item
+    on the list is only "to compare" — each such line costs the duty too.
 
     Args:
         items: The shopping list (see above).
         apply: Put the plan into the cart.
         day_cost: EUR per delivery day when ranking (default 0.15).
         choice_only: `seller: "choice"` for every item.
+        list_name: Name of the shopping list ("voice satellite"). With apply,
+            every plan line is tagged with it and its need, so view_cart and
+            checkout_preview show the list apart from the rest of the cart.
     """
     if choice_only:
         items = [{**it, "seller": "choice"} for it in items]
@@ -2110,6 +2176,7 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
         plan = _plan(items, day_cost, extra_choice=extra)
     except PermissionError:
         return AUTH_EXPIRED_MSG
+    plan["list"] = list_name.strip()
     text = _fmt_plan(plan)
     if not apply or not plan["picks"]:
         return text
@@ -2347,21 +2414,129 @@ def _read_cart(cookies: dict[str, str]) -> dict:
     return cartlib.parse(list(_cart_render_all(cookies)))
 
 
-@mcp.tool()
-def view_cart(checked_only: bool = False) -> str:
-    """
-    The whole AliExpress cart, as the web page shows it (read-only).
+def _render_order(cookies: dict[str, str], cart_ids: list[str]) -> dict:
+    """The checkout page for these cart lines (renderOrder; places no order)."""
+    payload = {
+        "ultronVersion": "3.0", "_saasRegion": "aeg", "pageType": "Shipping",
+        "_currency": CURRENCY, "locale": "en_US",
+        "extraParam": json.dumps({"locale": "en_US", "intentional_currency": CURRENCY, "buyerCountry": COUNTRY,
+                                  "platformType": "PC", "siteType": "", "af": "", "sk": ""}),
+        "shippingAddressId": "0",
+        "buyParams": json.dumps({"orderFrom": "SELECTIVE_CARTS", "items": [{"cartId": str(c)} for c in cart_ids]}),
+        "contextID": f"PlaceOrder_{uuid.uuid4()}",
+    }
+    _cart_pace()
+    resp = mtop_call("mtop.aliexpress.checkout.renderOrder", "1.0", payload, cookies=cookies,
+                     method="POST", referer=f"{BASE_URL}/p/trade/confirm.html")
+    _cart_check(resp)
+    return checkoutlib.parse(resp)
 
-    Grouped into "Shipped by AliExpress" (Choice: one shipment, free above a
-    threshold) and "Shipped by global sellers" (shipping per cart line). Each
-    line: [x] when checked, quantity, variant, price, shipping, delivery
-    window, store, cart_id. Then what checkout would charge for the checked
-    lines, and a shipping analysis: every paid shipping line with the reason,
-    the slowest line, and other channel carts (e.g. Combo Blast) that are not
-    part of this cart.
+
+def _checkout_preview_text(cookies: dict[str, str], cart_ids: list[str]) -> str:
+    p = _render_order(cookies, cart_ids)
+    return checkoutlib.format_preview(p, len(cart_ids), cartlib.checkout_url(cart_ids))
+
+
+@mcp.tool()
+def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") -> str:
+    """
+    What checkout would really charge — read from AliExpress's own checkout
+    page, nothing is bought. Goods, discounts, shipping per store, the
+    estimated import charges (EU: about 3.57 per cart line) and the total,
+    plus the slowest line and the checkout link. Works for any number of
+    lines: the cart page's limit of 10 checked lines does not apply.
+
+    Which lines: `cart_ids`, else the lines of `list_name`, else the only
+    list there is, else the lines checked on the cart page.
 
     Args:
-        checked_only: list only the checked lines.
+        cart_ids: Cart lines to price.
+        list_name: A shopping list (see shop_list / set_cart_list).
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        ids = [str(c) for c in cart_ids or []]
+        if not ids:
+            cart = _read_cart(cookies)
+            names = sorted({v.get("list") for v in _line_store().values() if v.get("list")})
+            name = list_name or (names[0] if len(names) == 1 else "")
+            ids = ([ln["cart_id"] for ln in _list_lines(cart, name)] if name
+                   else [ln["cart_id"] for ln in cart["lines"] if ln["checked"]])
+            if not ids:
+                return f"No lines for list '{name}'." if name else "No cart ids given and nothing is checked."
+        return _checkout_preview_text(cookies, ids)
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
+    except Exception as e:
+        return f"Checkout preview failed: {e}"
+
+
+@mcp.tool()
+def set_cart_list(cart_ids: list[str], list_name: str, need: str = "") -> str:
+    """
+    Put cart lines on a shopping list (or take them off with list_name="").
+    The list decides how view_cart groups the cart and what checkout_preview
+    prices. Lines the user added themselves stay theirs: tagging never makes
+    them deletable by a plan.
+
+    Args:
+        cart_ids: Cart lines to tag.
+        list_name: The list ("voice satellite"); empty removes the tag.
+        need: What the line is for ("I2S microphone"), shown in view_cart.
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        lines = {ln["cart_id"]: ln for ln in _read_cart(cookies)["lines"]}
+    except Exception as e:
+        return f"Cart MTOP call failed: {e}"
+    store = _line_store()
+    tags, missing = {}, []
+    for cid in [str(c) for c in cart_ids]:
+        ln = lines.get(cid)
+        if not ln:
+            missing.append(cid)
+            continue
+        if not list_name:
+            if store.get(cid, {}).get("own"):
+                tags[cid] = None
+            else:
+                tags[cid] = {"list": "", "need": ""}
+            continue
+        tag = {"list": list_name.strip(), "need": need or store.get(cid, {}).get("need") or ""}
+        if cid not in store:
+            tag.update(item_id=ln["item_id"], sku_id=ln["sku_id"], own=True)
+        tags[cid] = tag
+    _remember_lines({c: t for c, t in tags.items() if t}, drop=[c for c, t in tags.items() if t is None])
+    out = f"{len(tags)} line(s) " + (f"on list '{list_name}'." if list_name else "taken off their list.")
+    if missing:
+        out += " Not in the cart: " + ", ".join(missing)
+    return out
+
+
+@mcp.tool()
+def view_cart(checked_only: bool = False, checkout: bool = True) -> str:
+    """
+    The whole AliExpress cart, sorted so it can be understood (read-only).
+
+    First every shopping list (see shop_list / set_cart_list): its lines with
+    what each is for, [x] when ticked on the cart page, and — per list — what
+    checkout really charges (goods, shipping, import charges, total) and the
+    checkout link with all its lines. The cart page keeps at most 10 lines
+    ticked; that does not matter for the list: the link takes all of them.
+    Lines not on the list but naming the same part are flagged as leftovers.
+
+    Then the other lines, grouped into "Shipped by AliExpress" (Choice: one
+    shipment, free above a threshold) and "Shipped by global sellers"
+    (shipping per cart line), the cart page's own total for the ticked lines,
+    a shipping analysis, and other channel carts (e.g. Combo Blast).
+
+    Args:
+        checked_only: list only the ticked lines among the others.
+        checkout: price every list at checkout (one call per list).
     """
     cookies = load_cookies()
     if not cookies:
@@ -2372,7 +2547,20 @@ def view_cart(checked_only: bool = False) -> str:
         return f"Cart MTOP call failed: {e}"
     if not c["lines"]:
         return f"The cart is empty (server count: {c['header'].get('count')})."
-    return cartlib.format_cart(c, show_unchecked=not checked_only)
+    tags = _line_store()
+    text = cartlib.format_cart(c, show_unchecked=not checked_only, tags=tags)
+    if not checkout:
+        return text
+    previews = []
+    for name in dict.fromkeys(v["list"] for v in tags.values() if v.get("list")):
+        ids = [ln["cart_id"] for ln in _list_lines(c, name)]
+        if not ids:
+            continue
+        try:
+            previews.append(f"## Checkout for list '{name}'\n" + _checkout_preview_text(cookies, ids))
+        except Exception as e:
+            previews.append(f"## Checkout for list '{name}': preview failed ({e})")
+    return "\n\n".join([text] + previews)
 
 
 @mcp.tool()
@@ -2445,25 +2633,41 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False, select
     return "\n".join(out)
 
 
-# Lines this MCP put into the cart. Only these may be removed without asking:
-# the user's own lines are never deleted by a plan.
+# Cart lines the MCP knows about: {cart_id: {item_id, sku_id, added, list,
+# need, own}}. Lines it put into the cart itself may be removed by a plan;
+# lines marked `own` are the user's (only tagged with a list, never deleted).
+# `list` / `need` say which shopping list and which need a line is for, so the
+# cart can be shown per list instead of as one heap.
 MCP_LINES_FILE = Path(os.environ.get(
     "ALIEXPRESS_MCP_LINES", str(CREDENTIALS_PATH.parent / "aliexpress-mcp-lines.json")))
 
 
-def _mcp_lines() -> dict[str, dict]:
+def _line_store() -> dict[str, dict]:
     try:
         return json.loads(MCP_LINES_FILE.read_text())
     except (OSError, ValueError):
         return {}
 
 
+def _mcp_lines() -> dict[str, dict]:
+    """Lines the MCP added itself (the only ones a plan may delete)."""
+    return {k: v for k, v in _line_store().items() if not v.get("own")}
+
+
 def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None = None) -> None:
-    lines = _mcp_lines()
-    lines.update(add or {})
+    lines = _line_store()
+    for cid, info in (add or {}).items():
+        lines[str(cid)] = {**lines.get(str(cid), {}), **info}
     for cid in drop or []:
         lines.pop(str(cid), None)
     MCP_LINES_FILE.write_text(json.dumps(lines, indent=1))
+
+
+def _list_lines(cart: dict, list_name: str = "") -> list[dict]:
+    """Cart lines on `list_name` (any list when empty), in cart order."""
+    store = _line_store()
+    return [ln for ln in cart["lines"]
+            if store.get(ln["cart_id"], {}).get("list") and (not list_name or store[ln["cart_id"]]["list"] == list_name)]
 
 
 def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
@@ -2516,16 +2720,20 @@ def _check_lines(cookies: dict[str, str], cart_ids: list[str], on: bool = True):
 
 
 @mcp.tool()
-def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
+def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "") -> str:
     """
     Add a product variant to the AliExpress cart and check it for checkout.
     This changes the real cart (it does not buy anything). Adding a variant
     that is already in the cart raises that line's quantity instead.
+    Every cart line costs import charges at checkout (about 3.57 in the EU),
+    so prefer a bigger pack in one line over a second line.
 
     Args:
         item_id: AliExpress item ID.
         sku_id: Variant from get_product_variants (required; picks pack size/color).
         quantity: How many of that variant.
+        list_name: Shopping list the line belongs to (see set_cart_list).
+        need: What it is for on that list ("I2S microphone").
     """
     cookies = load_cookies()
     if not cookies:
@@ -2536,6 +2744,11 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1) -> str:
         cid = _cart_add(cookies, item_id, sku_id, quantity)
     except Exception as e:
         return f"Add to cart failed: {e}"
+    if list_name:
+        tag = {"list": list_name.strip(), "need": need}
+        if cid not in _line_store():
+            tag.update(item_id=str(item_id), sku_id=str(sku_id), own=True)
+        _remember_lines({cid: tag})
     dropped = []
     try:
         c = _read_cart(cookies)
