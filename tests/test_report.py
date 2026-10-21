@@ -6,7 +6,8 @@ import report  # noqa: E402
 
 ITEM = {"img": "data:image/jpeg;base64,AAAA", "need": "Mic <pair>", "title": "ICS-43434 & co", "url": "https://x/1",
         "qty": 2, "variant": "1pcs", "cost": 19.98, "ship": 0.0, "kind": "Choice", "until": "31.10.",
-        "ticked": False, "own": False, "extra": "", "slowest": True, "optional": False}
+        "ticked": False, "own": False, "extra": "", "slowest": True, "optional": False,
+        "pieces": 2, "unit": 9.99}
 
 
 def test_cart_page_escapes_and_shows_totals():
@@ -18,6 +19,7 @@ def test_cart_page_escapes_and_shows_totals():
     assert page.startswith("<title>Warenkorb Sat</title>")
     assert "159,92 €" in page and "Mic &lt;pair&gt;" in page and "ICS-43434 &amp; co" in page
     assert 'href="https://c?a=1&amp;b=2"' in page and "Zu entscheiden" in page
+    assert "2 Stk · 9,99 €/Stk" in page
     assert "−1,78 € bis +1,79 €" in page and "<b>04.11.</b>" in page and "Nimm Choice." in page
 
 

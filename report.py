@@ -220,6 +220,8 @@ def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
             if it.get("optional"):
                 chips.append('<span class="chip off">zum Vergleich</span>')
             extra = f'<small>{_e(it["extra"])}</small>' if it.get("extra") else ""
+            if (it.get("pieces") or 1) > 1:
+                extra = f'<small>{it["pieces"]} Stk · {eur(it["unit"])}/Stk</small>' + extra
             rows.append(
                 f'<div class="row">{_img(it.get("img"))}<div class="t">'
                 f'<a class="need" href="{_e(it["url"])}" target="_blank" rel="noopener" title="{_e(it["title"])}">'

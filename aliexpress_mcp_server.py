@@ -2157,6 +2157,8 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
                         + (DUTY_PER_LINE if ln["group"] != "group_choice" else 0),
                 "extra": (f"inkl. {report.eur(ln['ship'] or 0)} Versand + {report.eur(DUTY_PER_LINE)} Abgabe"
                           if ln["group"] != "group_choice" else ""),
+                "pieces": ln["qty"] * deals.pack_size(ln["variant"] or ""),
+                "unit": (ln["price"] or 0) * ln["qty"] / max(1, ln["qty"] * deals.pack_size(ln["variant"] or "")),
                 "kind": "Choice" if ln["group"] == "group_choice" else "global",
                 "until": _day(ln["delivery"][1]), "slowest": slow is ln,
                 "optional": bool(tags[ln["cart_id"]].get("optional")),
@@ -2212,10 +2214,6 @@ def _cart_notes(cart: dict, tags: dict[str, dict], lines: list[dict]) -> list[st
             notes.append(f"{tags[ln['cart_id']].get('need') or ln['title'][:30]} kommt von einem globalen Händler: "
                          f"{_eur((ln['price'] or 0) * ln['qty'])} Ware + {_eur(ln['ship'] or 0)} Versand + "
                          f"{_eur(DUTY_PER_LINE)} Einfuhrabgabe.")
-    unticked = sum(1 for ln in lines if not ln["checked"])
-    if unticked:
-        notes.append(f"{unticked} Teile sind auf der Korbseite nicht angehakt, weil AliExpress nur "
-                     f"{cartlib.MAX_CHECKED} Haken behält. Der Kassen-Button enthält trotzdem alle {len(lines)}.")
     models = {m: ln for ln in lines for m in cartlib._models(ln["title"])}
     for ln in cart["lines"]:
         if (tags.get(ln["cart_id"]) or {}).get("list"):
