@@ -173,6 +173,7 @@ def _line(fields: dict) -> dict:
         "sku_id": str(iv.get("skuId") or ""),
         "variant": (iv.get("sku") or {}).get("skuInfo") or "",
         "title": iv.get("title") or "",
+        "image": iv.get("imageUrl"),
         "valid": bool(iv.get("valid", True)) and (iv.get("status") or "VALID") == "VALID",
         "checked": bool((fields.get("checkbox") or {}).get("selected")),
         "price": price,

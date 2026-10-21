@@ -2032,6 +2032,77 @@ def _chat_plan(plan: dict) -> str:
     return "\n".join(out)
 
 
+def _day(date: Optional[str]) -> str:
+    return f"{date[8:10]}.{date[5:7]}." if date and len(date) >= 10 else "?"
+
+
+def _chat_cart(cart: dict, tags: dict[str, dict], previews: dict[str, dict]) -> str:
+    """
+    The cart as the user reads it in the chat: per shopping list what checkout
+    charges, then every part with picture, link, price and whether it is
+    ticked; hints; the lines that are on no list.
+    """
+    out = []
+    by_list: dict[str, list] = {}
+    for ln in cart["lines"]:
+        name = (tags.get(ln["cart_id"]) or {}).get("list")
+        if name:
+            by_list.setdefault(name, []).append(ln)
+    for name, lines in by_list.items():
+        p = previews.get(name)
+        head = f"### Liste „{name}“ — {len(lines)} Teile"
+        if p and p.get("total") is not None:
+            net_duty = p["duty"] - p["duty_off"]
+            head += (f", an der Kasse **{_eur(p['total'])}**\n"
+                     f"Ware {_eur(p['subtotal'] or 0)} + Versand {_eur(p['shipping'] or 0)}"
+                     + (f" + Einfuhrabgaben {_eur(net_duty)}" if net_duty else "")
+                     + (f" − Rabatte {_eur(p['discounts'])}" if p["discounts"] else "")
+                     + (f" · alles da bis {_day(p['latest'])}" if p.get("latest") else ""))
+        out.append(head)
+        for ln in lines:
+            t = tags[ln["cart_id"]]
+            url = f"{BASE_URL}/item/{ln['item_id']}.html"
+            cost = (ln["price"] or 0) * ln["qty"]
+            ship = f" + {_eur(ln['ship'])} Versand" if ln["ship"] else ""
+            kind = "Choice" if ln["group"] == "group_choice" else "global"
+            out.append(f"- {_thumb(ln.get('image'))}**{t.get('need') or ln['title'][:30]}** — "
+                       f"[{ln['title'][:45]}]({url}) · {ln['qty']}× {ln['variant'] or 'Standard'} · "
+                       f"{_eur(cost)}{ship} · {kind} · bis {_day(ln['delivery'][1])}"
+                       + ("" if ln["checked"] else " · ☐ nicht angehakt")
+                       + (" · deine eigene Zeile" if t.get("own") else ""))
+        notes = []
+        glob = [ln for ln in lines if ln["group"] != "group_choice"]
+        for ln in glob:
+            notes.append(f"{tags[ln['cart_id']].get('need') or ln['title'][:30]} kommt von einem globalen Händler: "
+                         f"{_eur((ln['price'] or 0) * ln['qty'])} Ware + {_eur(ln['ship'] or 0)} Versand + "
+                         f"{_eur(DUTY_PER_LINE)} Abgabe")
+        unticked = sum(1 for ln in lines if not ln["checked"])
+        if unticked:
+            notes.append(f"{unticked} Teile sind auf der Korbseite nicht angehakt, weil AliExpress nur "
+                         f"{cartlib.MAX_CHECKED} Haken behält. Der Kassen-Link unten enthält trotzdem alle {len(lines)}.")
+        models = {m: ln for ln in lines for m in cartlib._models(ln["title"])}
+        for ln in cart["lines"]:
+            if (tags.get(ln["cart_id"]) or {}).get("list"):
+                continue
+            twin = next((models[m] for m in cartlib._models(ln["title"]) if m in models), None)
+            if twin:
+                notes.append(f"„{ln['title'][:40]}“ liegt zusätzlich im Korb, nicht auf der Liste — "
+                             f"dasselbe Teil wie {tags[twin['cart_id']].get('need') or 'ein Listenteil'}, wohl ein Rest.")
+        if notes:
+            out.append("")
+            out += [f"⚠️ {n}" for n in notes]
+        out.append(f"\n[Zur Kasse mit allen {len(lines)} Teilen]({cartlib.checkout_url([ln['cart_id'] for ln in lines])})")
+        out.append("")
+    rest = [ln for ln in cart["lines"] if not (tags.get(ln["cart_id"]) or {}).get("list")]
+    if rest:
+        out.append(f"### Sonst im Korb ({len(rest)}, auf keiner Liste)")
+        for ln in rest:
+            out.append(f"- [{ln['title'][:50]}]({BASE_URL}/item/{ln['item_id']}.html) · {ln['qty']}× "
+                       f"{_eur((ln['price'] or 0) * ln['qty'])} · "
+                       + ("angehakt" if ln["checked"] else "nicht angehakt"))
+    return "\n".join(out)
+
+
 def _set_qty(cookies: dict[str, str], cid: str, qty: int):
     def edit(fields):
         fields["operationType"] = "update_quantity"
@@ -2606,18 +2677,21 @@ def view_cart(checked_only: bool = False, checkout: bool = True) -> str:
         return f"The cart is empty (server count: {c['header'].get('count')})."
     tags = _line_store()
     text = cartlib.format_cart(c, show_unchecked=not checked_only, tags=tags)
-    if not checkout:
-        return text
+    priced: dict[str, dict] = {}
     previews = []
-    for name in dict.fromkeys(v["list"] for v in tags.values() if v.get("list")):
+    for name in dict.fromkeys(v["list"] for v in tags.values() if v.get("list")) if checkout else []:
         ids = [ln["cart_id"] for ln in _list_lines(c, name)]
         if not ids:
             continue
         try:
-            previews.append(f"## Checkout for list '{name}'\n" + _checkout_preview_text(cookies, ids))
+            priced[name] = _render_order(cookies, ids)
+            previews.append(f"## Checkout for list '{name}'\n"
+                            + checkoutlib.format_preview(priced[name], len(ids), cartlib.checkout_url(ids)))
         except Exception as e:
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
-    return "\n\n".join([text] + previews)
+    chat = _chat_cart(c, tags, priced)
+    return "\n\n".join(["## For the chat — show this to the user as it is\n\n" + chat,
+                         "## Details (for you)\n" + text] + previews)
 
 
 @mcp.tool()
