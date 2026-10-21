@@ -21,11 +21,12 @@ The usual job — a shopping list into a ready cart — is one tool:
    sellers, Choice free-shipping threshold, import charges per cart line,
    store discounts, delivery days) and prints the plan with the runner-up per
    part.
-   The result starts with "For the chat": the comparison per part (winner
-   with picture and link, runners-up with their extra cost, the total).
-   Paste that block into your answer unchanged — do not rewrite or shorten
-   it; it is made for the user and saves you the tokens. "Details (for you)"
-   below it is for your own checks.
+   The result starts with "For the user": a few lines to say in the chat
+   (no links, no pictures — the chat cannot embed them). Then the path of an
+   HTML page with every offer's picture, link, price and the runners-up:
+   publish it with the Artifact tool (always the same path, so the link
+   stays) and open it. view_cart does the same for the cart (cart.html).
+   "Details (for you)" is for your own checks.
 2. Read the notes. "variant names repeat" or "!" (suspiciously cheap
    variant): call `get_variant_images` and look; then set `match`. For parts
    that are often faked (ICS-43434, branded chips) read
