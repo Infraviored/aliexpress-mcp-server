@@ -186,7 +186,7 @@ def best_ways(
     return ways[:limit]
 
 
-def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.75) -> Optional[str]:
+def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.7) -> Optional[str]:
     """
     Warn when the winning way uses a variant far cheaper per piece than every
     other kind of variant: usually a different article ("Chip" = bare module

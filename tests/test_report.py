@@ -6,16 +6,19 @@ import report  # noqa: E402
 
 ITEM = {"img": "data:image/jpeg;base64,AAAA", "need": "Mic <pair>", "title": "ICS-43434 & co", "url": "https://x/1",
         "qty": 2, "variant": "1pcs", "cost": 19.98, "ship": 0.0, "kind": "Choice", "until": "31.10.",
-        "ticked": False, "own": False}
+        "ticked": False, "own": False, "extra": "", "slowest": True, "optional": False}
 
 
 def test_cart_page_escapes_and_shows_totals():
     page = report.cart_page([{"name": "Sat", "total": 159.92, "goods": 115.44, "ship": 7.01, "duty": 39.29,
                               "discount": 1.82, "latest": "15.11.", "checkout_url": "https://c?a=1&b=2",
-                              "notes": ["n1"], "items": [ITEM]}], [], "now")
+                              "slowest": "Mic", "summary": "Nimm Choice.", "items": [ITEM],
+                              "decisions": [{"kind": "choice", "title": "ESP über Choice", "price": (-1.78, 1.79),
+                                             "date": ("15.11.", "04.11."), "facts": ["f"]}]}], [], "now")
     assert page.startswith("<title>Warenkorb Sat</title>")
     assert "159,92 €" in page and "Mic &lt;pair&gt;" in page and "ICS-43434 &amp; co" in page
-    assert "nicht angehakt" in page and 'href="https://c?a=1&amp;b=2"' in page
+    assert 'href="https://c?a=1&amp;b=2"' in page and "Zu entscheiden" in page
+    assert "−1,78 € bis +1,79 €" in page and "<b>04.11.</b>" in page and "Nimm Choice." in page
 
 
 def test_plan_page():

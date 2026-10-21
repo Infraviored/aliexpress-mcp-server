@@ -1741,6 +1741,10 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
     # A match word may stand in the variant name or, for every variant, in
     # the title ("ESP32 S3 N16R8 CAM …" has the single variant "default").
     title = (offer.get("title") or "").lower()
+    # A title listing alternatives ("ESP32 / ESP32-C3 / ESP32-S3 …") proves
+    # nothing about a variant: then the words must be in the variant name.
+    if re.search(r"\s/\s", title):
+        title = ""
     ok = [v for v in offer["variants"] if v["salable"] and v["price"] is not None
           and not any(w in v["label"].lower() for w in avoid)]
     # Every match word must stand in the variant name or the title. When the
@@ -1997,33 +2001,180 @@ def _write_report(name: str, page: str) -> str:
             "and open it for the user — the chat cannot show pictures.")
 
 
-def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict]) -> str:
+# Choice alternatives found for global seller lines, so view_cart does not
+# search again on every call: {key: {"at": epoch, "alt": {...} | None}}.
+ALT_CACHE_FILE = Path(os.environ.get(
+    "ALIEXPRESS_ALT_CACHE", str(CREDENTIALS_PATH.parent / "aliexpress-alternatives.json")))
+ALT_TTL = 6 * 3600
+
+
+def _choice_alternative(ln: dict, tag: dict) -> Optional[dict]:
+    """The best Choice offer for the same pieces as this cart line (cached), or None."""
+    pieces = ln["qty"] * deals.pack_size(ln["variant"] or "")
+    query = tag.get("query") or tag.get("need") or ln["title"][:60]
+    key = f"{ln['item_id']}:{ln['sku_id']}:{pieces}:{query}:{tag.get('match', '')}:{tag.get('avoid', '')}"
+    try:
+        cache = json.loads(ALT_CACHE_FILE.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(key)
+    if hit and time.time() - hit["at"] < ALT_TTL:
+        return hit["alt"]
+    plan = _plan([{"need": tag.get("need") or query, "query": query, "pieces": pieces, "match": tag.get("match", ""),
+                   "avoid": tag.get("avoid", ""), "seller": "choice", "candidates": 8}])
+    alt = None
+    if plan["picks"]:
+        w = plan["picks"][0]["way"]
+        o = w["offer"]
+        alt = {"title": o["title"], "url": o["url"], "item_id": o["item_id"],
+               "img": next((v.get("image") for v, _ in w["lines"] if v.get("image")), None) or o.get("image"),
+               "buy": " + ".join(f"{q}× {v['label']}" for v, q in w["lines"]),
+               "lines": [{"sku_id": v["sku_id"], "qty": q} for v, q in w["lines"]],
+               "cost": round(w["goods"] - w["save"], 2), "days": w["days"],
+               "ambiguous": any(v.get("ambiguous") for v, _ in w["lines"])}
+    cache[key] = {"at": time.time(), "alt": alt}
+    ALT_CACHE_FILE.write_text(json.dumps(cache))
+    return alt
+
+
+def _date_in(days: Optional[int]) -> Optional[str]:
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400 * days)) if days else None
+
+
+def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternatives: bool) -> list[dict]:
+    """
+    What the user can decide about a list, each with its effect on price and
+    delivery: global lines → Choice, dropping optional parts, leftovers.
+    """
+    out = []
+    latest_of = lambda lns: max((ln["delivery"][1] for ln in lns if ln["delivery"][1]), default=None)
+    latest = latest_of(lines)
+    for ln in lines:
+        if ln["group"] == "group_choice" or not alternatives:
+            continue
+        t = tags[ln["cart_id"]]
+        try:
+            alt = _choice_alternative(ln, t)
+        except Exception as e:
+            logger.debug("alternative for %s failed: %s", ln["cart_id"], e)
+            alt = None
+        if not alt:
+            continue
+        now = (ln["price"] or 0) * ln["qty"] + (ln["ship"] or 0) + DUTY_PER_LINE
+        lo, hi = alt["cost"] - now, alt["cost"] + DUTY_PER_LINE - now
+        rest = latest_of([x for x in lines if x is not ln])
+        new_latest = max(d for d in (rest, _date_in(alt["days"])) if d) if (rest or alt["days"]) else None
+        out.append({
+            "kind": "choice", "cart_id": ln["cart_id"],
+            "title": f"{t.get('need') or ln['title'][:40]} über Choice kaufen",
+            "img": alt["img"], "link": alt["url"], "link_text": alt["title"],
+            "facts": [f"{alt['buy']} für {report.eur(alt['cost'])} statt {report.eur(now)} "
+                      f"(jetzt: Ware {report.eur((ln['price'] or 0) * ln['qty'])} + Versand {report.eur(ln['ship'] or 0)}"
+                      f" + Abgabe {report.eur(DUTY_PER_LINE)})",
+                      f"Lieferung in etwa {alt['days']} Tagen statt bis {_day(ln['delivery'][1])}"],
+            "price": (lo, hi),
+            "date": (_day(latest), _day(new_latest)) if new_latest and new_latest != latest else None,
+            "warn": "Variantenname kommt mehrfach vor — Bild prüfen" if alt["ambiguous"] else None,
+            "alt_days": alt["days"],
+            "do": f"shop_list apply: item {alt['item_id']} " + ", ".join(f"sku {x['sku_id']}×{x['qty']}" for x in alt["lines"])
+                  + f", then remove_from_cart {ln['cart_id']}",
+        })
+    switch = [d for d in out if d["kind"] == "choice"]
+    if len(switch) > 1:
+        moved = {d["cart_id"] for d in switch}
+        days = [d["alt_days"] for d in switch if d.get("alt_days")]
+        rest = latest_of([x for x in lines if x["cart_id"] not in moved])
+        new_latest = max([x for x in [rest] + [_date_in(n) for n in days] if x], default=None)
+        out.insert(0, {
+            "kind": "choice", "cart_id": None,
+            "title": "Alle Teile von globalen Händlern über Choice kaufen",
+            "facts": [", ".join(d["title"].replace(" über Choice kaufen", "") for d in switch)
+                      + ": eine Sendung, kein eigener Versand."],
+            "price": (sum(d["price"][0] for d in switch), sum(d["price"][1] for d in switch)),
+            "date": (_day(latest), _day(new_latest)) if new_latest and new_latest != latest else None,
+            "do": " ; ".join(d["do"] for d in switch),
+        })
+    opt = [ln for ln in lines if tags[ln["cart_id"]].get("optional")]
+    if opt:
+        goods = sum((ln["price"] or 0) * ln["qty"] + (ln["ship"] or 0) for ln in opt)
+        rest = latest_of([x for x in lines if x not in opt])
+        out.append({
+            "kind": "drop", "title": f"{len(opt)} Vergleichsteile weglassen",
+            "facts": [", ".join(tags[ln["cart_id"]].get("need") or ln["title"][:30] for ln in opt)],
+            "price": (-(goods + DUTY_PER_LINE * len(opt)), -goods),
+            "date": (_day(latest), _day(rest)) if rest and rest != latest else None,
+            "do": "remove_from_cart " + ", ".join(ln["cart_id"] for ln in opt),
+        })
+    models = {m: ln for ln in lines for m in cartlib._models(ln["title"])}
+    for ln in cart["lines"]:
+        if (tags.get(ln["cart_id"]) or {}).get("list"):
+            continue
+        twin = next((models[m] for m in cartlib._models(ln["title"]) if m in models), None)
+        if twin:
+            out.append({
+                "kind": "tidy", "title": f"Doppeltes Teil aus dem Korb löschen",
+                "facts": [f"„{ln['title'][:50]}“ liegt zusätzlich im Korb, wie "
+                          f"{tags[twin['cart_id']].get('need') or 'ein Listenteil'}. Es ist nicht im Kassen-Link, "
+                          "ändert den Preis also nicht."],
+                "price": None, "date": None, "do": f"remove_from_cart {ln['cart_id']}",
+            })
+    return out
+
+
+def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], summary: str = "",
+                 options: Optional[list[dict]] = None, alternatives: bool = True) -> tuple[str, list[dict]]:
     lists, by_list = [], {}
     for ln in cart["lines"]:
         name = (tags.get(ln["cart_id"]) or {}).get("list")
         if name:
             by_list.setdefault(name, []).append(ln)
     rest = [ln for ln in cart["lines"] if not (tags.get(ln["cart_id"]) or {}).get("list")]
-    imgs = report.inline_images([ln.get("image") for ln in cart["lines"]], _fetch_image)
+    all_dec = []
     for name, lines in by_list.items():
         p = previews.get(name) or {}
+        dec = _decisions(cart, tags, lines, alternatives)
+        for o in options or []:
+            dec.append({"kind": "agent", "title": o.get("title", ""), "facts": [o.get("text", "")] if o.get("text") else [],
+                        "img": o.get("img"), "link": o.get("link"), "link_text": o.get("link_text") or o.get("link"),
+                        "price": (o["delta"], o["delta"]) if isinstance(o.get("delta"), (int, float)) else None,
+                        "date": None, "do": o.get("do")})
+        all_dec += dec
+        dated = [ln for ln in lines if ln["delivery"][1]]
+        slow = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None
         lists.append({
             "name": name, "total": p.get("total"), "goods": p.get("subtotal") or 0.0,
             "ship": p.get("shipping") or 0.0, "duty": (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0),
-            "discount": p.get("discounts") or 0.0, "latest": _day(p.get("latest")) if p.get("latest") else None,
+            "discount": p.get("discounts") or 0.0,
+            "latest": _day(slow["delivery"][1]) if slow else None,
+            "slowest": (tags[slow["cart_id"]].get("need") or slow["title"][:30]) if slow else None,
+            "summary": summary, "decisions": dec,
             "checkout_url": cartlib.checkout_url([ln["cart_id"] for ln in lines]),
-            "notes": _cart_notes(cart, tags, lines),
             "items": [{
-                "img": imgs.get(ln.get("image")), "need": tags[ln["cart_id"]].get("need") or ln["title"][:40],
+                "img": ln.get("image"), "need": tags[ln["cart_id"]].get("need") or ln["title"][:40],
                 "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html", "qty": ln["qty"],
-                "variant": ln["variant"] or "Standard", "cost": (ln["price"] or 0) * ln["qty"],
-                "ship": ln["ship"] or 0.0, "kind": "Choice" if ln["group"] == "group_choice" else "global",
-                "until": _day(ln["delivery"][1]), "ticked": ln["checked"], "own": tags[ln["cart_id"]].get("own"),
-            } for ln in lines],
+                "variant": ln["variant"] or "Standard",
+                "cost": (ln["price"] or 0) * ln["qty"] + (ln["ship"] or 0)
+                        + (DUTY_PER_LINE if ln["group"] != "group_choice" else 0),
+                "extra": (f"inkl. {report.eur(ln['ship'] or 0)} Versand + {report.eur(DUTY_PER_LINE)} Abgabe"
+                          if ln["group"] != "group_choice" else ""),
+                "kind": "Choice" if ln["group"] == "group_choice" else "global",
+                "until": _day(ln["delivery"][1]), "slowest": slow is ln,
+                "optional": bool(tags[ln["cart_id"]].get("optional")),
+            } for ln in sorted(lines, key=lambda x: (x["group"] == "group_choice", -((x["price"] or 0) * x["qty"])))],
         })
-    others = [{"img": imgs.get(ln.get("image")), "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html",
-               "qty": ln["qty"], "cost": (ln["price"] or 0) * ln["qty"], "ticked": ln["checked"]} for ln in rest]
-    return _write_report("cart.html", report.cart_page(lists, others, time.strftime("%d.%m.%Y %H:%M")))
+    others = [{"img": ln.get("image"), "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html",
+               "qty": ln["qty"], "cost": (ln["price"] or 0) * ln["qty"]} for ln in rest]
+    urls = [it["img"] for L in lists for it in L["items"]] + [o["img"] for o in others] \
+        + [d.get("img") for d in all_dec]
+    imgs = report.inline_images(urls, _fetch_image)
+    for L in lists:
+        for it in L["items"]:
+            it["img"] = imgs.get(it["img"])
+        for d in L["decisions"]:
+            d["img"] = imgs.get(d.get("img")) if d.get("img") else None
+    for o in others:
+        o["img"] = imgs.get(o["img"])
+    return _write_report("cart.html", report.cart_page(lists, others, time.strftime("%d.%m.%Y %H:%M"))), all_dec
 
 
 def _plan_report(plan: dict) -> str:
@@ -2633,17 +2784,29 @@ def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") 
 
 
 @mcp.tool()
-def set_cart_list(cart_ids: list[str], list_name: str, need: str = "") -> str:
+def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: str = "", match: str = "",
+                  avoid: str = "", optional: Optional[bool] = None) -> str:
     """
     Put cart lines on a shopping list (or take them off with list_name="").
     The list decides how view_cart groups the cart and what checkout_preview
     prices. Lines the user added themselves stay theirs: tagging never makes
     them deletable by a plan.
 
+    query / match / avoid tell view_cart how to search a Choice alternative
+    for a line from a global seller (as in shop_list): without them it
+    searches the need, which can find the wrong article (bare chip instead of
+    a board).
+
     Args:
         cart_ids: Cart lines to tag.
-        list_name: The list ("voice satellite"); empty removes the tag.
-        need: What the line is for ("I2S microphone"), shown in view_cart.
+        list_name: The list ("Sprach-Satellit"); empty removes the tag.
+        need: Short name of what the line is for, in the user's language
+            ("I2S-Mikrofon"); it is the line's name on the overview page.
+        query: Search words for an alternative.
+        match: Words the alternative's variant or title must contain.
+        avoid: Words that rule an alternative out.
+        optional: True for parts that are only "to compare" or nice to have;
+            the overview offers to drop them.
     """
     cookies = load_cookies()
     if not cookies:
@@ -2666,6 +2829,11 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "") -> str:
                 tags[cid] = {"list": "", "need": ""}
             continue
         tag = {"list": list_name.strip(), "need": need or store.get(cid, {}).get("need") or ""}
+        for k, v in (("query", query), ("match", match), ("avoid", avoid)):
+            if v:
+                tag[k] = v
+        if optional is not None:
+            tag["optional"] = bool(optional)
         if cid not in store:
             tag.update(item_id=ln["item_id"], sku_id=ln["sku_id"], own=True)
         tags[cid] = tag
@@ -2677,7 +2845,8 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "") -> str:
 
 
 @mcp.tool()
-def view_cart(checked_only: bool = False, checkout: bool = True) -> str:
+def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = "",
+              options: Optional[list[dict]] = None, alternatives: bool = True) -> str:
     """
     The whole AliExpress cart, sorted so it can be understood (read-only).
 
@@ -2693,9 +2862,20 @@ def view_cart(checked_only: bool = False, checkout: bool = True) -> str:
     (shipping per cart line), the cart page's own total for the ticked lines,
     a shipping analysis, and other channel carts (e.g. Combo Blast).
 
+    It also writes the overview page (cart.html) for an artifact: the
+    checkout total, then "Zu entscheiden" — every choice with its effect on
+    price and delivery (global lines → their best Choice offer, dropping the
+    optional parts, leftovers) — then the parts. Add your own reading:
+
     Args:
         checked_only: list only the ticked lines among the others.
         checkout: price every list at checkout (one call per list).
+        summary: 1–3 sentences for the top of the page: what you recommend
+            and why, in the user's language.
+        options: extra decisions for the page, each {title, text, delta
+            (EUR, + dearer / − cheaper), link, img, do}.
+        alternatives: search Choice offers for global seller lines (cached
+            6 h; the first call takes a while).
     """
     cookies = load_cookies()
     if not cookies:
@@ -2721,7 +2901,12 @@ def view_cart(checked_only: bool = False, checkout: bool = True) -> str:
         except Exception as e:
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
     try:
-        page = _cart_report(c, tags, priced)
+        page, dec = _cart_report(c, tags, priced, summary, options, alternatives)
+        if dec:
+            page += "\n\nDecisions on the page (what to do if the user picks one):\n" + "\n".join(
+                f"- {d['title']}: " + (f"{d['price'][0]:+.2f}…{d['price'][1]:+.2f} EUR" if d.get("price") else "no price change")
+                + (f", delivery {d['date'][0]} → {d['date'][1]}" if d.get("date") else "")
+                + (f" — do: {d['do']}" if d.get("do") else "") for d in dec)
     except Exception as e:
         page = f"(page not written: {e})"
     return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced),
