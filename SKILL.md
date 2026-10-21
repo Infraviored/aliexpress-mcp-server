@@ -21,6 +21,11 @@ The usual job — a shopping list into a ready cart — is one tool:
    sellers, Choice free-shipping threshold, import charges per cart line,
    store discounts, delivery days) and prints the plan with the runner-up per
    part.
+   The result starts with "For the chat": the comparison per part (winner
+   with picture and link, runners-up with their extra cost, the total).
+   Paste that block into your answer unchanged — do not rewrite or shorten
+   it; it is made for the user and saves you the tokens. "Details (for you)"
+   below it is for your own checks.
 2. Read the notes. "variant names repeat" or "!" (suspiciously cheap
    variant): call `get_variant_images` and look; then set `match`. For parts
    that are often faked (ICS-43434, branded chips) read

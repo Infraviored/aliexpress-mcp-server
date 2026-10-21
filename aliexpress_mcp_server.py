@@ -1319,10 +1319,12 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         promos.append("coupons available on the product page")
 
     shop = res.get("SHOP_CARD_PC") or {}
+    imgs = (res.get("HEADER_IMAGE_PC") or {}).get("imagePathList") or []
     return {
         "item_id": item_id,
         "title": ((res.get("PRODUCT_TITLE") or {}).get("text")) or item_id,
         "url": f"{BASE_URL}/item/{item_id}.html",
+        "image": imgs[0] if imgs and isinstance(imgs[0], str) else None,
         "variants": variants,
         "shipping": shipping,
         "choice": bool(shipping.get("choice_threshold")),
@@ -1976,6 +1978,60 @@ def _fmt_plan(plan: dict) -> str:
     return "\n".join(out)
 
 
+def _eur(x: float) -> str:
+    return f"{x:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".") + (" €" if CURRENCY == "EUR" else f" {CURRENCY}")
+
+
+def _thumb(url: Optional[str]) -> str:
+    """A small picture of `url` from the AliExpress CDN, as markdown."""
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    if re.search(r"\.(jpe?g|png|webp)$", url, re.I):
+        url += "_120x120.jpg"
+    return f"![]({url}) "
+
+
+def _way_text(w: dict) -> str:
+    o = w["offer"]
+    buy = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
+    kind = "Choice" if o["choice"] else "global"
+    days = f"{w['days']} Tage" if w["days"] else "Lieferzeit ?"
+    return f"{buy}, {_eur(w['net'])} ({_eur(w['net'] / max(1, w['pieces']))}/Stk), {kind}, {days}"
+
+
+def _chat_plan(plan: dict) -> str:
+    """
+    The comparison the user reads in the chat: per need the winner with
+    picture and link, the runners-up with their difference, then the total.
+    Prices are what the line costs at checkout: goods + shipping + import
+    charges − automatic discounts.
+    """
+    out = []
+    for i, p in enumerate(plan["picks"], 1):
+        w, o = p["way"], p["way"]["offer"]
+        img = next((v.get("image") for v, _ in w["lines"] if v.get("image")), None) or o.get("image")
+        out.append(f"**{i}. {p['need']}** ({p['spec'].get('pieces', 1)} Stk)")
+        out.append(f"{_thumb(img)}[{o['title'][:60]}]({o['url']}) — {_way_text(w)}"
+                   + (f" · {p['why']}" if p.get("why") else ""))
+        for alt in p["others"]:
+            ao = alt["offer"]
+            out.append(f"- statt dessen: [{ao['title'][:50]}]({ao['url']}) — {_way_text(alt)}, "
+                       f"{'+' if alt['net'] >= w['net'] else '−'}{_eur(abs(alt['net'] - w['net']))}")
+        out.append("")
+    total = f"**Summe:** Ware {_eur(plan['goods'])} + Versand {_eur(plan['ship'])}"
+    if plan.get("duty"):
+        total += f" + Einfuhrabgaben {_eur(plan['duty'])}"
+    if plan["saved"]:
+        total += f" − Rabatte {_eur(plan['saved'])}"
+    total += f" = **{_eur(plan['total'])}**"
+    if plan["slowest"]:
+        total += f", spätestens nach {plan['slowest']['way']['days']} Tagen ({plan['slowest']['need']})"
+    out.append(total)
+    return "\n".join(out)
+
+
 def _set_qty(cookies: dict[str, str], cid: str, qty: int):
     def edit(fields):
         fields["operationType"] = "update_quantity"
@@ -2177,7 +2233,8 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     except PermissionError:
         return AUTH_EXPIRED_MSG
     plan["list"] = list_name.strip()
-    text = _fmt_plan(plan)
+    text = ("## For the chat — show this to the user as it is\n\n" + _chat_plan(plan)
+            + "\n\n## Details (for you)\n" + _fmt_plan(plan)) if plan["picks"] else _fmt_plan(plan)
     if not apply or not plan["picks"]:
         return text
     if not cookies:
