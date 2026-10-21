@@ -7,3 +7,7 @@ _diag_*.py
 _diag_*.html
 _diag_*.json
 .commitmsg
+
+# capture_mtop.py recording output — may contain PII (buyer address, order details)
+tools/*.json
+*.capture.json
