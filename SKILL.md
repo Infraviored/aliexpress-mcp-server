@@ -27,7 +27,9 @@ The usual job — a shopping list into a ready cart — is one tool:
    publish it with the Artifact tool (always the same path, so the link
    stays) and open it. view_cart does the same for the cart (cart.html).
    "Details (for you)" is for your own checks.
-2. Read the notes. "variant names repeat" or "!" (suspiciously cheap
+2. Read the notes. apply refuses a variant whose name repeats in its product
+   (e.g. "8 bit" was both a ring and a strip): check get_variant_images and
+   pass that item's `sku_id` + `qty`. "variant names repeat" or "!" (suspiciously cheap
    variant): call `get_variant_images` and look; then set `match`. For parts
    that are often faked (ICS-43434, branded chips) read
    `get_product_reviews(item_id, only_low=True)`.

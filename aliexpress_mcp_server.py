@@ -2333,6 +2333,14 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
         return text
     if not cookies:
         return text + "\n\n" + AUTH_EXPIRED_MSG
+    # A variant whose name repeats in its product ("8 bit" = ring and strip)
+    # is not put into the cart blind: look at the pictures, then pass sku_id.
+    blind = [p for p in plan["picks"] if not p["spec"].get("sku_id")
+             and any(v.get("ambiguous") for v, _ in p["way"]["lines"])]
+    if blind:
+        return text + "\n\nNot applied: the chosen variant's name repeats in " + ", ".join(
+            f"{p['need']} ({p['way']['offer']['item_id']}: '{p['way']['lines'][0][0]['label']}')" for p in blind
+        ) + ". Call get_variant_images, pick the right picture and pass its sku_id (with qty) for that item."
     try:
         return text + "\n\n" + _apply_plan(cookies, plan)
     except Exception as e:
