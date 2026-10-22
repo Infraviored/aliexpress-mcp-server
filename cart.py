@@ -62,12 +62,12 @@ def cents(amount: Any) -> Optional[float]:
 
 def money(text: Any) -> Optional[float]:
     """'Shipping: 3,67€' / '1.234,50 €' / '$4.02' / '-3,57€' / 'Free' -> float."""
+    if isinstance(text, (int, float)):
+        return float(text)
     s = str(text or "").strip()
-    if "free" in s.lower() or "kostenlos" in s.lower():
-        return 0.0
     m = re.search(r"\d[\d.,]*", s.replace(" ", ""))
     if not m:
-        return None
+        return 0.0 if "free" in s.lower() or "kostenlos" in s.lower() else None
     num = m.group(0)
     if "," in num and num.rfind(",") > num.rfind("."):
         num = num.replace(".", "").replace(",", ".")

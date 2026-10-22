@@ -125,3 +125,10 @@ def test_models_match_same_part_names():
     assert cart.models("Interface I2S PCM5102A DAC Decoder GY-PCM5102") >= {"PCM5102A"}
     assert "MP1584EN" in cart.models("5/10pcs MP1584EN Adjustable 3A")
     assert not cart.models("2cm Self Adhesive Soundproofing")
+
+
+def test_money_free_only_without_a_number():
+    assert cart.money("Free shipping") == 0.0
+    assert cart.money("Shipping: €1.99 | Free over €10") == 1.99
+    assert cart.money("-1,82€") == -1.82
+    assert cart.money(0) == 0.0

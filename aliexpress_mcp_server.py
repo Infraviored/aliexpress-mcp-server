@@ -74,7 +74,10 @@ def _save_cookies(update: dict[str, str]) -> None:
     except (OSError, ValueError):
         return
     data["cookies"] = {**data.get("cookies", {}), **update}
-    private.write_json(CREDENTIALS_PATH, data)
+    try:
+        private.write_json(CREDENTIALS_PATH, data)
+    except OSError as e:
+        logger.warning("could not save refreshed cookies: %s", e)
 
 
 def get_client(require_auth: bool = False, referer: str = BASE_URL) -> httpx.Client:
@@ -243,11 +246,12 @@ def mtop_call(
             s in ret_str for s in ("TOKEN_EMPTY", "TOKEN_EXPIRED", "TOKEN_EXOIRED")
         ):
             fresh = {name: resp.cookies.get(name) for name in resp.cookies if resp.cookies.get(name) is not None}
-            new_cookies = {**cookies, **fresh}
             if fresh:
-                # Keep the new token, or every later call fails once and retries.
+                # Keep the new token — in the caller's dict for the rest of this
+                # tool call, on disk for later ones — or every call fails once.
+                cookies.update(fresh)
                 _save_cookies(fresh)
-            return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer, method=method, captcha=captcha)
+            return mtop_call(api, version, payload, cookies=cookies, retries=retries - 1, referer=referer, method=method, captcha=captcha)
 
         # Bot check: solve the slider (or click the reCAPTCHA box) in real Chrome
         # on a virtual display, retry once.
@@ -624,10 +628,11 @@ def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
     return None
 
 
-def _ship_biz(result: dict) -> dict:
-    """The shipping offer of a product response (first delivery layout's bizData)."""
+def _ship_biz(result: dict, layouts_first: str = "originalLayoutResultList") -> dict:
+    """The shipping offer of a product response: bizData of the first layout, `layouts_first` preferred."""
     ship = result.get("SHIPPING") if isinstance(result.get("SHIPPING"), dict) else {}
-    layouts = ship.get("originalLayoutResultList") or ship.get("deliveryLayoutInfo") or []
+    other = "deliveryLayoutInfo" if layouts_first == "originalLayoutResultList" else "originalLayoutResultList"
+    layouts = ship.get(layouts_first) or ship.get(other) or []
     biz = layouts[0].get("bizData") if layouts and isinstance(layouts[0], dict) else None
     return biz if isinstance(biz, dict) else {}
 
@@ -943,7 +948,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         v["ambiguous"] = counts[v["label"]] > 1
 
     shipping: dict[str, Any] = {}
-    b = _ship_biz(res)
+    b = _ship_biz(res, "deliveryLayoutInfo")
     if b:
         free = b.get("shippingFee") == "free"
         shipping = {
@@ -1027,8 +1032,8 @@ def _coupon_stamps() -> dict[str, float]:
         raw = json.loads(COUPONS_FILE.read_text())
     except (OSError, ValueError):
         return {}
-    if isinstance(raw, list):  # older format: ids without dates
-        return {cid: time.time() for cid in raw}
+    if isinstance(raw, list):  # older format: ids without dates, too old to trust
+        return {}
     cutoff = time.time() - COUPON_MEMORY_DAYS * 86400
     return {cid: ts for cid, ts in raw.items() if ts >= cutoff}
 
@@ -2684,7 +2689,7 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
         return "quantity must be at least 1 (use remove_from_cart to delete a line)."
 
     try:
-        done, failed = _cart_line_action(cookies, {cart_id: _edit_qty(quantity)})
+        done, failed = _cart_line_action(cookies, {str(cart_id).strip(): _edit_qty(quantity)})
     except Exception as e:
         return f"Cart call failed: {e}"
     if failed:
@@ -2707,7 +2712,7 @@ def remove_from_cart(cart_ids: list[str]) -> str:
         return AUTH_EXPIRED_MSG
 
     try:
-        done, failed = _cart_line_action(cookies, {c: _edit_delete for c in cart_ids if str(c).strip()})
+        done, failed = _cart_line_action(cookies, {str(c).strip(): _edit_delete for c in cart_ids if str(c).strip()})
     except Exception as e:
         return f"Cart call failed: {e}"
     _remember_lines(drop=done)
