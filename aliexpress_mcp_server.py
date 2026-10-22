@@ -20,7 +20,7 @@ import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote_plus, quote
+from urllib.parse import quote_plus
 
 import httpx
 from bs4 import BeautifulSoup
@@ -40,6 +40,7 @@ CREDENTIALS_PATH = Path(
 
 COUNTRY = os.environ.get("ALIEXPRESS_COUNTRY", "DE")
 CURRENCY = os.environ.get("ALIEXPRESS_CURRENCY", "EUR")
+report.CURRENCY = CURRENCY
 ACCEPT_LANGUAGE = os.environ.get("ALIEXPRESS_ACCEPT_LANGUAGE", "de-DE,de;q=0.9,en;q=0.8")
 
 BASE_URL = "https://www.aliexpress.com"
@@ -285,24 +286,6 @@ def blocked_msg() -> str:
             " Wait 10-30 min, or pass it once in a browser and re-import cookies.")
 
 
-def _walk_find(obj: Any, match_keys: set) -> Any:
-    """Depth-first walk; return the first value whose key is in match_keys."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in match_keys and v not in (None, "", {}, []):
-                return v
-        for v in obj.values():
-            r = _walk_find(v, match_keys)
-            if r is not None:
-                return r
-    elif isinstance(obj, list):
-        for v in obj:
-            r = _walk_find(v, match_keys)
-            if r is not None:
-                return r
-    return None
-
-
 # ─── Parsing Helpers ────────────────────────────────────────────────────────
 
 PRICE_RE = re.compile(
@@ -313,67 +296,17 @@ PRICE_RE = re.compile(
 ITEM_ID_RE = re.compile(r"/item/(\d+)\.html")
 
 
-def _norm_price(raw: str) -> Optional[float]:
-    """Normalise a captured price string to a float.
-
-    Handles both '1,234.56' (en) and '1.234,56' / '1234,56' (de/fr) by
-    checking whether the *last* separator is a comma (European) or a dot.
-    """
-    raw = raw.strip()
-    if not raw:
-        return None
-    # European: comma is the decimal separator, dots are thousands
-    if "," in raw and ("." not in raw or raw.rfind(",") > raw.rfind(".")):
-        raw = raw.replace(".", "").replace(",", ".")
-    else:
-        raw = raw.replace(",", "")
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
 def parse_price(text: str) -> Optional[float]:
     """Pull the first price-looking number out of a string."""
     if not text:
         return None
     m = PRICE_RE.search(text)
     if m:
-        return _norm_price(m.group(1) or m.group(2))
+        return cartlib.money(m.group(1) or m.group(2))
     # Fallback: bare number (dot-decimal)
     m = re.search(r"([\d,]+\.\d{2})", text)
     if m:
-        return _norm_price(m.group(1))
-    return None
-
-
-def _extract_embedded_json(html: str, var_names: list[str]) -> Optional[dict]:
-    """
-    AliExpress embeds product/search data in <script> tags like:
-        window.runParams = {...}
-        window._d_c_._hycdylydh = function() { ... data: {...} }
-    Try to grab the JSON blob.
-    """
-    for name in var_names:
-        pattern = re.compile(
-            r"window\." + re.escape(name) + r"\s*=\s*(\{.*?\});?\s*\n",
-            re.DOTALL,
-        )
-        m = pattern.search(html)
-        if m:
-            blob = m.group(1)
-            try:
-                return json.loads(blob)
-            except json.JSONDecodeError:
-                pass
-
-    # Generic: look for `data: {...}` inside the runParams pattern
-    m = re.search(r"window\.runParams\s*=\s*(\{.*?\});", html, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            return None
+        return cartlib.money(m.group(1))
     return None
 
 
@@ -504,281 +437,8 @@ def _parse_search_json(html: str) -> list[dict]:
 
 
 def parse_search_results(html: str) -> list[dict]:
-    """Parse product cards from an AliExpress search results page."""
-    hits = _parse_search_json(html)
-    if hits:
-        return hits
-    cards = _parse_search_cards(html)
-    if cards:
-        return cards
-
-    products: list[dict] = []
-    seen_ids: set[str] = set()
-
-    # Approach 1: extract from embedded JSON (most reliable)
-    data = _extract_embedded_json(html, ["runParams", "_dida_"])
-    if data:
-        # Walk the structure looking for lists of items
-        items_pool: list[dict] = []
-
-        def walk(obj):
-            if isinstance(obj, dict):
-                # Common keys where items live
-                for k in ("mods", "items", "itemList", "resultList"):
-                    v = obj.get(k)
-                    if isinstance(v, list):
-                        for it in v:
-                            if isinstance(it, dict):
-                                items_pool.append(it)
-                for v in obj.values():
-                    walk(v)
-            elif isinstance(obj, list):
-                for v in obj:
-                    walk(v)
-
-        walk(data)
-
-        for it in items_pool:
-            # Heuristic: needs a productId or itemId
-            pid = (
-                it.get("productId")
-                or it.get("itemId")
-                or it.get("product_id")
-                or it.get("id")
-            )
-            title = (
-                it.get("title", {}).get("displayTitle")
-                if isinstance(it.get("title"), dict)
-                else it.get("title")
-            ) or it.get("subject") or it.get("name")
-            if not pid or not title:
-                continue
-            pid = str(pid)
-            if pid in seen_ids:
-                continue
-
-            price_info = it.get("prices") or it.get("price") or {}
-            sale_price = None
-            original_price = None
-            if isinstance(price_info, dict):
-                sp = price_info.get("salePrice") or price_info.get("formattedPrice")
-                op = price_info.get("originalPrice") or price_info.get("strikePrice")
-                if isinstance(sp, dict):
-                    sale_price = sp.get("minPrice") or parse_price(sp.get("formattedPrice", ""))
-                elif sp:
-                    sale_price = parse_price(str(sp))
-                if isinstance(op, dict):
-                    original_price = op.get("minPrice") or parse_price(op.get("formattedPrice", ""))
-                elif op:
-                    original_price = parse_price(str(op))
-
-            discount_pct = None
-            d = it.get("discount") or (price_info.get("discount") if isinstance(price_info, dict) else None)
-            if d:
-                dm = re.search(r"(\d+)", str(d))
-                if dm:
-                    discount_pct = int(dm.group(1))
-
-            trade = it.get("trade") or {}
-            sold_count = trade.get("tradeDesc") if isinstance(trade, dict) else None
-
-            rating = None
-            ev = it.get("evaluation") or {}
-            if isinstance(ev, dict):
-                r = ev.get("starRating") or ev.get("rating")
-                if r:
-                    try:
-                        rating = float(r)
-                    except (TypeError, ValueError):
-                        rating = None
-
-            seen_ids.add(pid)
-            products.append({
-                "item_id": pid,
-                "title": title.strip(),
-                "price": sale_price,
-                "original_price": original_price,
-                "discount_pct": discount_pct,
-                "rating": rating,
-                "sold_count": sold_count,
-                "url": f"{BASE_URL}/item/{pid}.html",
-            })
-
-        if products:
-            return products
-
-    # Approach 2: HTML fallback
-    soup = BeautifulSoup(html, "html.parser")
-    for link in soup.select("a[href*='/item/']"):
-        href = link.get("href", "")
-        m = ITEM_ID_RE.search(href)
-        if not m:
-            continue
-        pid = m.group(1)
-        if pid in seen_ids:
-            continue
-
-        # Climb up to the card container
-        card = link.find_parent(["div", "article", "li"]) or link
-        title_el = card.select_one("h1, h2, h3, [class*='title'], [class*='Title']")
-        title = title_el.get_text(strip=True) if title_el else link.get("title") or ""
-        if not title:
-            continue
-
-        card_text = card.get_text(" ", strip=True)
-        sale_price = parse_price(card_text)
-
-        # Try to find a second (higher) price for original
-        original_price = None
-        all_prices = [parse_price(t) for t in re.findall(r"[A-Z]{0,2}\$?\s*[\d,]+\.\d{2}", card_text)]
-        all_prices = [p for p in all_prices if p is not None]
-        if len(all_prices) >= 2:
-            sale_price = min(all_prices)
-            original_price = max(all_prices)
-
-        discount_pct = None
-        dm = re.search(r"-?(\d{1,2})%", card_text)
-        if dm:
-            discount_pct = int(dm.group(1))
-
-        sold_match = re.search(r"([\d,]+\+?)\s*sold", card_text, re.IGNORECASE)
-        sold_count = sold_match.group(0) if sold_match else None
-
-        rating = None
-        rmatch = re.search(r"\b([0-4]\.\d|5\.0)\b", card_text)
-        if rmatch:
-            try:
-                rating = float(rmatch.group(1))
-            except ValueError:
-                pass
-
-        seen_ids.add(pid)
-        products.append({
-            "item_id": pid,
-            "title": title[:200],
-            "price": sale_price,
-            "original_price": original_price,
-            "discount_pct": discount_pct,
-            "rating": rating,
-            "sold_count": sold_count,
-            "url": f"{BASE_URL}/item/{pid}.html",
-        })
-
-    return products
-
-
-def parse_product_detail(html: str, item_id: str) -> dict:
-    """Parse a product detail page."""
-    soup = BeautifulSoup(html, "html.parser")
-
-    details = {
-        "item_id": item_id,
-        "url": f"{BASE_URL}/item/{item_id}.html",
-        "title": None,
-        "price": None,
-        "original_price": None,
-        "discount_pct": None,
-        "rating": None,
-        "sold_count": None,
-        "seller_name": None,
-        "shipping_cost": None,
-        "shipping_estimate": None,
-        "variants": [],
-    }
-
-    # Title
-    if soup.title:
-        t = soup.title.get_text(strip=True)
-        # AliExpress titles often have " | AliExpress" or similar suffix
-        t = re.sub(r"\s*[|–-]\s*(AliExpress|aliexpress).*$", "", t, flags=re.IGNORECASE)
-        details["title"] = t or None
-
-    h1 = soup.select_one("h1")
-    if h1 and h1.get_text(strip=True):
-        details["title"] = h1.get_text(strip=True)
-
-    # Try embedded JSON first
-    data = _extract_embedded_json(html, ["runParams"])
-    if data:
-        # Walk for useful nuggets
-        def find_first(obj, keys):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    if k in keys and v not in (None, "", {}):
-                        return v
-                    r = find_first(v, keys)
-                    if r is not None:
-                        return r
-            elif isinstance(obj, list):
-                for v in obj:
-                    r = find_first(v, keys)
-                    if r is not None:
-                        return r
-            return None
-
-        price_node = find_first(data, {"priceModule", "price", "priceInfo"})
-        if isinstance(price_node, dict):
-            sp = price_node.get("minActivityAmount") or price_node.get("formatedActivityPrice") or price_node.get("formatedPrice")
-            op = price_node.get("formatedPrewarmingPrice") or price_node.get("maxAmount")
-            if isinstance(sp, dict):
-                details["price"] = sp.get("value") or parse_price(sp.get("formattedPrice", ""))
-            elif sp:
-                details["price"] = parse_price(str(sp))
-            if isinstance(op, dict):
-                details["original_price"] = op.get("value")
-            elif op:
-                details["original_price"] = parse_price(str(op))
-
-        title_node = find_first(data, {"title", "subject"})
-        if isinstance(title_node, str) and not details["title"]:
-            details["title"] = title_node
-
-        seller_node = find_first(data, {"storeName", "sellerName", "storeInfo"})
-        if isinstance(seller_node, str):
-            details["seller_name"] = seller_node
-        elif isinstance(seller_node, dict):
-            details["seller_name"] = seller_node.get("name") or seller_node.get("storeName")
-
-        ship_node = find_first(data, {"shippingModule", "logistics"})
-        if isinstance(ship_node, dict):
-            details["shipping_cost"] = parse_price(str(ship_node.get("formattedFreight", "")))
-            details["shipping_estimate"] = ship_node.get("deliveryDate") or ship_node.get("etd")
-
-    # Fallbacks from rendered HTML body text
-    body_text = soup.get_text(" ", strip=True)
-
-    if details["price"] is None:
-        # Look for a currency-prefixed price near the top
-        price_el = soup.select_one("[class*='price'], [class*='Price']")
-        if price_el:
-            details["price"] = parse_price(price_el.get_text(" ", strip=True))
-
-    # Discount
-    dmatch = re.search(r"-(\d{1,2})%", body_text)
-    if dmatch:
-        details["discount_pct"] = int(dmatch.group(1))
-
-    # Rating
-    rmatch = re.search(r"\b([0-4]\.\d|5\.0)\s*(?:out of|/)\s*5", body_text)
-    if rmatch:
-        try:
-            details["rating"] = float(rmatch.group(1))
-        except ValueError:
-            pass
-    elif details["rating"] is None:
-        rmatch = re.search(r"\b([0-4]\.\d|5\.0)\b\s*\(?\d", body_text)
-        if rmatch:
-            try:
-                details["rating"] = float(rmatch.group(1))
-            except ValueError:
-                pass
-
-    # Sold count
-    sold_match = re.search(r"([\d,]+\+?)\s*sold", body_text, re.IGNORECASE)
-    if sold_match:
-        details["sold_count"] = sold_match.group(0)
-
-    return details
+    """Product hits of an AliExpress search results page."""
+    return _parse_search_json(html) or _parse_search_cards(html)
 
 
 # ─── MCP Server ─────────────────────────────────────────────────────────────
@@ -1167,31 +827,11 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
     except Exception as e:
         logger.warning("MTOP PDP fetch failed: %s", e)
 
-    # Fallback: HTML scrape (rarely useful since PDP is CSR, but kept for robustness)
-    if not d or not (d.get("title") or d.get("price")):
-        client = get_client(referer=f"{BASE_URL}/")
-        try:
-            r = client.get(f"/item/{item_id}.html")
-            if check_auth_redirect(r):
-                return AUTH_EXPIRED_MSG
-            if r.status_code == 404:
-                return f"Product not found: item_id {item_id}."
-            r.raise_for_status()
-            html_d = parse_product_detail(r.text, item_id)
-            if not d:
-                d = html_d
-            else:
-                for k, v in html_d.items():
-                    if not d.get(k) and v:
-                        d[k] = v
-        finally:
-            client.close()
-
     if not d or not (d.get("title") or d.get("price")):
         return (
             f"Could not extract product data for item {item_id}. "
             "The MTOP API returned no data — session may be expired or the item "
-            "may be region-restricted. Try re-saving credentials."
+            "may be region-restricted. Try re-saving credentials." + blocked_msg()
         )
 
     lines = [f"# {d.get('title') or item_id}"]
@@ -1199,11 +839,11 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
     if d.get("price") is not None:
         if d.get("price_range"):
             lo, hi = d["price_range"]
-            line = f"Price: ${lo:.2f}–${hi:.2f} {CURRENCY}"
+            line = f"Price: {lo:.2f}–{hi:.2f} {CURRENCY}"
         else:
-            line = f"Price: ${d['price']:.2f} {CURRENCY}"
+            line = f"Price: {d['price']:.2f} {CURRENCY}"
         if d.get("original_price") and d["original_price"] > d["price"]:
-            line += f" (was ${d['original_price']:.2f}"
+            line += f" (was {d['original_price']:.2f}"
             if d.get("discount_pct"):
                 line += f", -{d['discount_pct']}%"
             line += ")"
@@ -1225,7 +865,7 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
         if d.get("store_url"):
             lines.append(f"Store: {d['store_url']}")
     if d.get("shipping_cost") is not None:
-        ship_line = "Shipping: " + ("Free" if d["shipping_cost"] == 0 else f"${d['shipping_cost']:.2f} {CURRENCY}")
+        ship_line = "Shipping: " + ("Free" if d["shipping_cost"] == 0 else f"{d['shipping_cost']:.2f} {CURRENCY}")
         lines.append(ship_line)
     if d.get("shipping_estimate"):
         eta_line = f"Estimated delivery: {d['shipping_estimate']}"
@@ -1235,9 +875,6 @@ def get_product_details(item_id: str = "", url: str = "") -> str:
     if d.get("ship_from"):
         lines.append(f"Ships from: {d['ship_from']}")
     return "\n".join(lines)
-
-
-_pack_size = deals.pack_size
 
 
 def _pdp_offer(item_id: str) -> Optional[dict]:
@@ -1276,7 +913,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         hot = any(h for _, _, h in parts)
         info = prices.get(sid) or {}
         price = parse_price(info.get("salePriceString") or "")
-        pack = _pack_size(label)
+        pack = deals.pack_size(label)
         variants.append({
             "sku_id": sid,
             "label": label,
@@ -1925,8 +1562,8 @@ def _cart_choice_goods(cookies: dict[str, str], exclude: set[str] = frozenset())
     they are ordered together with the plan.
     """
     cart = _read_cart(cookies)
-    return round(sum((ln["price"] or 0) * ln["qty"] for ln in cart["lines"]
-                     if ln["checked"] and ln["group"] == "group_choice" and ln["item_id"] not in exclude), 2)
+    return round(sum(cartlib.goods(ln) for ln in cart["lines"]
+                     if ln["checked"] and ln["choice"] and ln["item_id"] not in exclude), 2)
 
 
 def _fmt_plan(plan: dict) -> str:
@@ -1936,7 +1573,7 @@ def _fmt_plan(plan: dict) -> str:
     for i, p in enumerate(plan["picks"], 1):
         w, o = p["way"], p["way"]["offer"]
         kind = "Choice" if o["choice"] else f"global seller, {len(w['lines'])} line(s) × own shipping"
-        parts = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
+        parts = _way_view(w)["buy"]
         ship = "free" if o["choice"] else f"{w['ship']:.2f}"
         out.append(f"{i}. {p['need']}: {parts} = {w['pieces']} pcs — {o['title'][:60]} ({o['item_id']})")
         if p.get("why"):
@@ -1969,8 +1606,8 @@ def _fmt_plan(plan: dict) -> str:
                        + (f"; coupon to collect −{st['coupon']:.2f} ({st['coupon_how']})" if st["coupon"] else "")
                        + (f"; {st['more']}" if st["more"] else ""))
     out.append(f"Total ≈ {plan['goods']:.2f} goods + {plan['ship']:.2f} shipping"
-               + (f" + {plan['duty']:.2f} import charges ({DUTY_PER_LINE:.2f} per cart line, "
-                  f"Choice lines beyond {checkoutlib.CHOICE_DUTY_LINES} free)" if plan.get("duty") else "")
+               + (f" + {plan['duty']:.2f} import charges (estimate; checkout_preview has the real figure)"
+                  if plan.get("duty") else "")
                + (f" − {plan['saved']:.2f} automatic discounts" if plan["saved"] else "")
                + f" = {plan['total']:.2f} {cur}"
                + (f"; {plan['total'] - plan['coupons']:.2f} with the coupons collected" if plan["coupons"] else "")
@@ -1981,10 +1618,6 @@ def _fmt_plan(plan: dict) -> str:
     for n in plan["notes"]:
         out.append(f"note: {n}")
     return "\n".join(out)
-
-
-def _eur(x: float) -> str:
-    return f"{x:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".") + (" €" if CURRENCY == "EUR" else f" {CURRENCY}")
 
 
 # The HTML pages view_cart and shop_list write; the assistant publishes them
@@ -2008,32 +1641,41 @@ ALT_CACHE_FILE = Path(os.environ.get(
 ALT_TTL = 6 * 3600
 
 
-def _choice_alternative(ln: dict, tag: dict) -> Optional[dict]:
-    """The best Choice offer for the same pieces as this cart line (cached), or None."""
-    pieces = ln["qty"] * deals.pack_size(ln["variant"] or "")
-    query = tag.get("query") or tag.get("need") or ln["title"][:60]
-    key = f"{ln['item_id']}:{ln['sku_id']}:{pieces}:{query}:{tag.get('match', '')}:{tag.get('avoid', '')}"
+def _way_view(w: dict) -> dict:
+    """A way as the pages and texts show it: picture, title, link, what to buy."""
+    o = w["offer"]
+    return {"img": next((v.get("image") for v, _ in w["lines"] if v.get("image")), None) or o.get("image"),
+            "title": o["title"], "url": o["url"], "item_id": o["item_id"],
+            "buy": " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])}
+
+
+def _alt_cache() -> dict:
+    """The Choice-alternative cache without expired entries."""
     try:
         cache = json.loads(ALT_CACHE_FILE.read_text())
     except (OSError, ValueError):
-        cache = {}
+        return {}
+    return {k: v for k, v in cache.items() if time.time() - v.get("at", 0) < ALT_TTL}
+
+
+def _choice_alternative(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
+    """The best Choice offer for the same pieces as this cart line (via `cache`), or None."""
+    pieces = ln["qty"] * deals.pack_size(ln["variant"])
+    query = tag.get("query") or tag.get("need") or ln["title"][:60]
+    key = f"{ln['item_id']}:{ln['sku_id']}:{pieces}:{query}:{tag.get('match', '')}:{tag.get('avoid', '')}"
     hit = cache.get(key)
-    if hit and time.time() - hit["at"] < ALT_TTL:
+    if hit:
         return hit["alt"]
     plan = _plan([{"need": tag.get("need") or query, "query": query, "pieces": pieces, "match": tag.get("match", ""),
                    "avoid": tag.get("avoid", ""), "seller": "choice", "candidates": 8}])
     alt = None
     if plan["picks"]:
         w = plan["picks"][0]["way"]
-        o = w["offer"]
-        alt = {"title": o["title"], "url": o["url"], "item_id": o["item_id"],
-               "img": next((v.get("image") for v, _ in w["lines"] if v.get("image")), None) or o.get("image"),
-               "buy": " + ".join(f"{q}× {v['label']}" for v, q in w["lines"]),
+        alt = {**_way_view(w),
                "lines": [{"sku_id": v["sku_id"], "qty": q} for v, q in w["lines"]],
                "cost": round(w["goods"] - w["save"], 2), "days": w["days"],
                "ambiguous": any(v.get("ambiguous") for v, _ in w["lines"])}
     cache[key] = {"at": time.time(), "alt": alt}
-    ALT_CACHE_FILE.write_text(json.dumps(cache))
     return alt
 
 
@@ -2049,18 +1691,19 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
     out = []
     latest_of = lambda lns: max((ln["delivery"][1] for ln in lns if ln["delivery"][1]), default=None)
     latest = latest_of(lines)
-    for ln in lines:
-        if ln["group"] == "group_choice" or not alternatives:
+    cache = _alt_cache() if alternatives else {}
+    for ln in lines if alternatives else []:
+        if ln["choice"]:
             continue
         t = tags[ln["cart_id"]]
         try:
-            alt = _choice_alternative(ln, t)
+            alt = _choice_alternative(ln, t, cache)
         except Exception as e:
             logger.debug("alternative for %s failed: %s", ln["cart_id"], e)
             alt = None
         if not alt:
             continue
-        now = (ln["price"] or 0) * ln["qty"] + (ln["ship"] or 0) + DUTY_PER_LINE
+        now = cartlib.goods(ln) + (ln["ship"] or 0) + DUTY_PER_LINE
         lo, hi = alt["cost"] - now, alt["cost"] + DUTY_PER_LINE - now
         rest = latest_of([x for x in lines if x is not ln])
         new_latest = max(d for d in (rest, _date_in(alt["days"])) if d) if (rest or alt["days"]) else None
@@ -2069,7 +1712,7 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
             "title": f"{t.get('need') or ln['title'][:40]} über Choice kaufen",
             "img": alt["img"], "link": alt["url"], "link_text": alt["title"],
             "facts": [f"{alt['buy']} für {report.eur(alt['cost'])} statt {report.eur(now)} "
-                      f"(jetzt: Ware {report.eur((ln['price'] or 0) * ln['qty'])} + Versand {report.eur(ln['ship'] or 0)}"
+                      f"(jetzt: Ware {report.eur(cartlib.goods(ln))} + Versand {report.eur(ln['ship'] or 0)}"
                       f" + Abgabe {report.eur(DUTY_PER_LINE)})",
                       f"Lieferung in etwa {alt['days']} Tagen statt bis {_day(ln['delivery'][1])}"],
             "price": (lo, hi),
@@ -2079,7 +1722,9 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
             "do": f"shop_list apply: item {alt['item_id']} " + ", ".join(f"sku {x['sku_id']}×{x['qty']}" for x in alt["lines"])
                   + f", then remove_from_cart {ln['cart_id']}",
         })
-    switch = [d for d in out if d["kind"] == "choice"]
+    if cache:
+        ALT_CACHE_FILE.write_text(json.dumps(cache))
+    switch = list(out)
     if len(switch) > 1:
         moved = {d["cart_id"] for d in switch}
         days = [d["alt_days"] for d in switch if d.get("alt_days")]
@@ -2096,7 +1741,7 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
         })
     opt = [ln for ln in lines if tags[ln["cart_id"]].get("optional")]
     if opt:
-        goods = sum((ln["price"] or 0) * ln["qty"] + (ln["ship"] or 0) for ln in opt)
+        goods = sum(cartlib.goods(ln) + (ln["ship"] or 0) for ln in opt)
         rest = latest_of([x for x in lines if x not in opt])
         out.append({
             "kind": "drop", "title": f"{len(opt)} Vergleichsteile weglassen",
@@ -2105,30 +1750,21 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
             "date": (_day(latest), _day(rest)) if rest and rest != latest else None,
             "do": "remove_from_cart " + ", ".join(ln["cart_id"] for ln in opt),
         })
-    models = {m: ln for ln in lines for m in cartlib._models(ln["title"])}
-    for ln in cart["lines"]:
-        if (tags.get(ln["cart_id"]) or {}).get("list"):
-            continue
-        twin = next((models[m] for m in cartlib._models(ln["title"]) if m in models), None)
-        if twin:
-            out.append({
-                "kind": "tidy", "title": f"Doppeltes Teil aus dem Korb löschen",
-                "facts": [f"„{ln['title'][:50]}“ liegt zusätzlich im Korb, wie "
-                          f"{tags[twin['cart_id']].get('need') or 'ein Listenteil'}. Es ist nicht im Kassen-Link, "
-                          "ändert den Preis also nicht."],
-                "price": None, "date": None, "do": f"remove_from_cart {ln['cart_id']}",
-            })
+    for ln, twin in cartlib.leftovers(lines, cartlib.by_list(cart, tags)[1]):
+        out.append({
+            "kind": "tidy", "title": "Doppeltes Teil aus dem Korb löschen",
+            "facts": [f"„{ln['title'][:50]}“ liegt zusätzlich im Korb, wie "
+                      f"{tags[twin['cart_id']].get('need') or 'ein Listenteil'}. Es ist nicht im Kassen-Link, "
+                      "ändert den Preis also nicht."],
+            "price": None, "date": None, "do": f"remove_from_cart {ln['cart_id']}",
+        })
     return out
 
 
 def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], summary: str = "",
                  options: Optional[list[dict]] = None, alternatives: bool = True) -> tuple[str, list[dict]]:
-    lists, by_list = [], {}
-    for ln in cart["lines"]:
-        name = (tags.get(ln["cart_id"]) or {}).get("list")
-        if name:
-            by_list.setdefault(name, []).append(ln)
-    rest = [ln for ln in cart["lines"] if not (tags.get(ln["cart_id"]) or {}).get("list")]
+    lists = []
+    by_list, rest = cartlib.by_list(cart, tags)
     all_dec = []
     for name, lines in by_list.items():
         p = previews.get(name) or {}
@@ -2141,6 +1777,7 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
         all_dec += dec
         dated = [ln for ln in lines if ln["delivery"][1]]
         slow = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None
+        pieces = {ln["cart_id"]: ln["qty"] * deals.pack_size(ln["variant"]) for ln in lines}
         lists.append({
             "name": name, "total": p.get("total"), "goods": p.get("subtotal") or 0.0,
             "ship": p.get("shipping") or 0.0, "duty": (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0),
@@ -2153,19 +1790,19 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
                 "img": ln.get("image"), "need": tags[ln["cart_id"]].get("need") or ln["title"][:40],
                 "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html", "qty": ln["qty"],
                 "variant": ln["variant"] or "Standard",
-                "cost": (ln["price"] or 0) * ln["qty"] + (ln["ship"] or 0)
-                        + (DUTY_PER_LINE if ln["group"] != "group_choice" else 0),
+                "cost": cartlib.goods(ln) + (ln["ship"] or 0)
+                        + (DUTY_PER_LINE if not ln["choice"] else 0),
                 "extra": (f"inkl. {report.eur(ln['ship'] or 0)} Versand + {report.eur(DUTY_PER_LINE)} Abgabe"
-                          if ln["group"] != "group_choice" else ""),
-                "pieces": ln["qty"] * deals.pack_size(ln["variant"] or ""),
-                "unit": (ln["price"] or 0) * ln["qty"] / max(1, ln["qty"] * deals.pack_size(ln["variant"] or "")),
-                "kind": "Choice" if ln["group"] == "group_choice" else "global",
+                          if not ln["choice"] else ""),
+                "pieces": pieces[ln["cart_id"]],
+                "unit": cartlib.goods(ln) / max(1, pieces[ln["cart_id"]]),
+                "kind": "Choice" if ln["choice"] else "global",
                 "until": _day(ln["delivery"][1]), "slowest": slow is ln,
                 "optional": bool(tags[ln["cart_id"]].get("optional")),
-            } for ln in sorted(lines, key=lambda x: (x["group"] == "group_choice", -((x["price"] or 0) * x["qty"])))],
+            } for ln in sorted(lines, key=lambda x: (x["choice"], -cartlib.goods(x)))],
         })
     others = [{"img": ln.get("image"), "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html",
-               "qty": ln["qty"], "cost": (ln["price"] or 0) * ln["qty"]} for ln in rest]
+               "qty": ln["qty"], "cost": cartlib.goods(ln)} for ln in rest]
     urls = [it["img"] for L in lists for it in L["items"]] + [o["img"] for o in others] \
         + [d.get("img") for d in all_dec]
     imgs = report.inline_images(urls, _fetch_image)
@@ -2181,12 +1818,8 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
 
 def _plan_report(plan: dict) -> str:
     def offer(w: dict, diff: float = 0.0) -> dict:
-        o = w["offer"]
-        img = next((v.get("image") for v, _ in w["lines"] if v.get("image")), None) or o.get("image")
-        return {"img": img, "title": o["title"], "url": o["url"],
-                "buy": " + ".join(f"{q}× {v['label']}" for v, q in w["lines"]),
-                "net": w["net"], "unit": w["net"] / max(1, w["pieces"]),
-                "kind": "Choice" if o["choice"] else "global",
+        return {**_way_view(w), "net": w["net"], "unit": w["net"] / max(1, w["pieces"]),
+                "kind": "Choice" if w["offer"]["choice"] else "global",
                 "days": f"{w['days']} Tage" if w["days"] else "Lieferzeit ?", "diff": diff}
     picks = [{"need": p["need"], "pieces": p["spec"].get("pieces", 1), "why": p.get("why"),
               "winner": offer(p["way"]),
@@ -2210,40 +1843,30 @@ def _cart_notes(cart: dict, tags: dict[str, dict], lines: list[dict]) -> list[st
     """What the user should know about a list's lines: costly global lines, ticks, leftovers."""
     notes = []
     for ln in lines:
-        if ln["group"] != "group_choice":
+        if not ln["choice"]:
             notes.append(f"{tags[ln['cart_id']].get('need') or ln['title'][:30]} kommt von einem globalen Händler: "
-                         f"{_eur((ln['price'] or 0) * ln['qty'])} Ware + {_eur(ln['ship'] or 0)} Versand + "
-                         f"{_eur(DUTY_PER_LINE)} Einfuhrabgabe.")
-    models = {m: ln for ln in lines for m in cartlib._models(ln["title"])}
-    for ln in cart["lines"]:
-        if (tags.get(ln["cart_id"]) or {}).get("list"):
-            continue
-        twin = next((models[m] for m in cartlib._models(ln["title"]) if m in models), None)
-        if twin:
-            notes.append(f"„{ln['title'][:40]}“ liegt zusätzlich im Korb, nicht auf der Liste: dasselbe Teil wie "
-                         f"{tags[twin['cart_id']].get('need') or 'ein Listenteil'}, wohl ein Rest.")
+                         f"{report.eur(cartlib.goods(ln))} Ware + {report.eur(ln['ship'] or 0)} Versand + "
+                         f"{report.eur(DUTY_PER_LINE)} Einfuhrabgabe.")
+    for ln, twin in cartlib.leftovers(lines, cartlib.by_list(cart, tags)[1]):
+        notes.append(f"„{ln['title'][:40]}“ liegt zusätzlich im Korb, nicht auf der Liste: dasselbe Teil wie "
+                     f"{tags[twin['cart_id']].get('need') or 'ein Listenteil'}, wohl ein Rest.")
     return notes
 
 
 def _chat_cart(cart: dict, tags: dict[str, dict], previews: dict[str, dict]) -> str:
     """A few speakable lines per list: what checkout charges, the hints. Pictures and links are on the page."""
     out = []
-    by_list: dict[str, list] = {}
-    for ln in cart["lines"]:
-        name = (tags.get(ln["cart_id"]) or {}).get("list")
-        if name:
-            by_list.setdefault(name, []).append(ln)
+    by_list, rest = cartlib.by_list(cart, tags)
     for name, lines in by_list.items():
         p = previews.get(name)
         line = f"Liste „{name}“: {len(lines)} Teile"
         if p and p.get("total") is not None:
-            line += (f", an der Kasse {_eur(p['total'])} (Ware {_eur(p['subtotal'] or 0)}, Versand "
-                     f"{_eur(p['shipping'] or 0)}, Einfuhrabgaben {_eur(p['duty'] - p['duty_off'])}"
-                     + (f", Rabatte −{_eur(p['discounts'])}" if p["discounts"] else "") + ")"
+            line += (f", an der Kasse {report.eur(p['total'])} (Ware {report.eur(p['subtotal'] or 0)}, Versand "
+                     f"{report.eur(p['shipping'] or 0)}, Einfuhrabgaben {report.eur(p['duty'] - p['duty_off'])}"
+                     + (f", Rabatte −{report.eur(p['discounts'])}" if p["discounts"] else "") + ")"
                      + (f", alles da bis {_day(p['latest'])}" if p.get("latest") else ""))
         out.append(line.rstrip(".") + ".")
         out += [f"- {n}" for n in _cart_notes(cart, tags, lines)]
-    rest = [ln for ln in cart["lines"] if not (tags.get(ln["cart_id"]) or {}).get("list")]
     if rest:
         out.append(f"Sonst im Korb: {len(rest)} Zeilen auf keiner Liste ("
                    + ", ".join(ln["title"][:25] for ln in rest[:5]) + ("…" if len(rest) > 5 else "") + ").")
@@ -2256,23 +1879,16 @@ def _chat_plan(plan: dict) -> str:
     for p in plan["picks"]:
         w, o = p["way"], p["way"]["offer"]
         kind = "Choice" if o["choice"] else "globaler Händler"
-        line = (f"- {p['need']}: {o['title'][:40]}, {_eur(w['net'])} ({kind}, "
+        line = (f"- {p['need']}: {o['title'][:40]}, {report.eur(w['net'])} ({kind}, "
                 f"{w['days'] or '?'} Tage)")
         if p["others"]:
             nxt = p["others"][0]
-            line += f"; nächstbestes {_eur(nxt['net'])} (+{_eur(nxt['net'] - w['net'])})"
+            line += f"; nächstbestes {report.eur(nxt['net'])} (+{report.eur(nxt['net'] - w['net'])})"
         out.append(line)
-    out.append(f"Gesamt {_eur(plan['total'])}: Ware {_eur(plan['goods'])}, Versand {_eur(plan['ship'])}"
-               + (f", Einfuhrabgaben {_eur(plan['duty'])}" if plan.get("duty") else "")
-               + (f", Rabatte −{_eur(plan['saved'])}" if plan["saved"] else "") + ".")
+    out.append(f"Gesamt {report.eur(plan['total'])}: Ware {report.eur(plan['goods'])}, Versand {report.eur(plan['ship'])}"
+               + (f", Einfuhrabgaben {report.eur(plan['duty'])}" if plan.get("duty") else "")
+               + (f", Rabatte −{report.eur(plan['saved'])}" if plan["saved"] else "") + ".")
     return "\n".join(out)
-
-
-def _set_qty(cookies: dict[str, str], cid: str, qty: int):
-    def edit(fields):
-        fields["operationType"] = "update_quantity"
-        fields["quantityView"] = {"current": int(qty)}
-    return _cart_line_action(cookies, [cid], edit)
 
 
 def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
@@ -2280,7 +1896,8 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     cart = _read_cart(cookies)
     by_key = {(ln["item_id"], ln["sku_id"]): ln for ln in cart["lines"]}
     known = {ln["cart_id"] for ln in cart["lines"]}
-    mine = _mcp_lines()
+    store = _line_store()
+    mine = {k for k, v in store.items() if not v.get("own")}
     # One cart line per item+sku: add up what several picks want of it.
     wanted: dict[tuple, dict] = {}
     for p in plan["picks"]:
@@ -2293,15 +1910,14 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
             e["ship"] += ship
     want: list[str] = []
     expect: dict[str, dict] = {}
+    edits: dict[str, Any] = {}
     log = []
     for (iid, sku), e in wanted.items():
         ln = by_key.get((iid, sku))
         if ln and ln["cart_id"] in mine:
             cid = ln["cart_id"]
             if ln["qty"] != e["qty"]:
-                done, failed = _set_qty(cookies, cid, e["qty"])
-                log.append(f"quantity {ln['qty']}→{e['qty']}: {e['need']} ({e['label']})" if done
-                           else f"FAILED quantity for {e['need']}: {failed}")
+                edits[cid] = _edit_qty(e["qty"])
         elif ln:
             # The user's own line of this variant: never resized by a plan.
             cid = ln["cart_id"]
@@ -2321,9 +1937,9 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     # Tag every plan line with its list and need; the user's own lines too
     # (marked `own`, so no plan ever deletes them).
     name = plan.get("list") or ""
-    store = _line_store()
+    tags: dict[str, dict] = {}
+    drop_tags: list[str] = []
     if name:
-        tags = {}
         for (iid, sku), e in wanted.items():
             ln = by_key.get((iid, sku))
             cid = next((c for c in want if expect.get(c) is e), None)
@@ -2333,21 +1949,22 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
             if ln and ln["cart_id"] not in mine:
                 tag.update(item_id=iid, sku_id=sku, own=True)
             tags[cid] = tag
-        _remember_lines(tags)
         # The user's own lines that were on this list and are no longer: untag.
-        _remember_lines(drop=[c for c, v in store.items()
-                              if v.get("own") and v.get("list") == name and c not in want])
+        drop_tags = [c for c, v in store.items() if v.get("own") and v.get("list") == name and c not in want]
     drop = [ln for ln in cart["lines"]
             if ln["cart_id"] in mine and ln["cart_id"] not in want
             and (ln["item_id"] in plan["candidates"] or (name and store.get(ln["cart_id"], {}).get("list") == name))]
-    if drop:
-        def edit(fields):
-            fields["operationType"] = "delete"
-        done, failed = _cart_line_action(cookies, [ln["cart_id"] for ln in drop], edit)
-        _remember_lines(drop=done)
-        for ln in drop:
-            log.append(("removed (replaced by the plan): " if ln["cart_id"] in done else "FAILED to remove: ")
-                       + f"{ln['title'][:40]} ({ln['variant']})")
+    edits.update({ln["cart_id"]: _edit_delete for ln in drop})
+    done, failed = _cart_line_action(cookies, edits) if edits else ([], {})
+    _remember_lines(tags, drop=drop_tags + [ln["cart_id"] for ln in drop if ln["cart_id"] in done])
+    for (iid, sku), e in wanted.items():
+        ln = by_key.get((iid, sku))
+        if ln and ln["cart_id"] in edits:
+            log.append(f"quantity {ln['qty']}→{e['qty']}: {e['need']} ({e['label']})" if ln["cart_id"] in done
+                       else f"FAILED quantity for {e['need']}: {failed.get(ln['cart_id'])}")
+    for ln in drop:
+        log.append(("removed (replaced by the plan): " if ln["cart_id"] in done else "FAILED to remove: ")
+                   + f"{ln['title'][:40]} ({ln['variant']})")
     for st in plan["stores"].values():
         c = deals.coupon_to_collect(st["disc"], st["sub"])
         if not c:
@@ -2357,8 +1974,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         except Exception as e:
             res = f"failed: {e}"
         log.append(f"coupon {c['off']:.2f} off over {c['min']:.2f} at {st['name']}: {res}")
-    sel = _select(cookies, want, only=True)
-    after = _read_cart(cookies)
+    sel, after = _select(cookies, want, only=True)
     lines = {ln["cart_id"]: ln for ln in after["lines"]}
     diffs = []
     for cid, e in expect.items():
@@ -2386,7 +2002,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     except Exception as ex:
         out.append(f"(checkout preview failed: {ex}; estimate from the cart instead)")
     sub = [dict(lines[c], checked=True) for c in want if c in lines]
-    goods = sum((ln["price"] or 0) * ln["qty"] for ln in sub)
+    goods = sum(cartlib.goods(ln) for ln in sub)
     ship = sum(ln["ship"] or 0 for ln in sub)
     out.append(f"Checkout link total ≈ goods {goods:.2f} + shipping {ship:.2f}"
                f" − store discounts {plan['saved']:.2f} = {goods + ship - plan['saved']:.2f} {CURRENCY}"
@@ -2557,7 +2173,7 @@ def get_shipping_estimate(item_id: str) -> str:
 
     lines = [f"Shipping to {COUNTRY} for item {item_id}:"]
     if d.get("shipping_cost") is not None:
-        lines.append("  Cost: " + ("Free" if d["shipping_cost"] == 0 else f"${d['shipping_cost']:.2f} {CURRENCY}"))
+        lines.append("  Cost: " + ("Free" if d["shipping_cost"] == 0 else f"{d['shipping_cost']:.2f} {CURRENCY}"))
     if d.get("shipping_estimate"):
         lines.append(f"  Estimated delivery: {d['shipping_estimate']}")
     if d.get("ship_from"):
@@ -2658,41 +2274,58 @@ def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str]
     ))
 
 
-def _cart_session(cookies: dict[str, str]) -> tuple[dict, list[dict]]:
-    """All pages, plus one snapshot merged over them that actions are sent against."""
-    pages, merged = [], None
-    for state in _cart_render_all(cookies):
+def _cart_pages(cookies: dict[str, str]) -> tuple[dict, list[dict]]:
+    """
+    Every page of the cart, plus one snapshot merged over them that actions
+    are sent against (next pages must be requested from it as well).
+    """
+    state = _cart_render(cookies)
+    pages, merged = [state], cartlib.merge(None, state)
+    for n in range(1, CART_MAX_PAGES + 1):
+        pg = cartlib.pagination(state)
+        if not pg or not pg[1].get("hasMore"):
+            break
+        if n == CART_MAX_PAGES:
+            logger.warning("cart has more than %d pages; the rest is not read", CART_MAX_PAGES)
+            break
+        state = _cart_async(merged, pg[0], pg[1], cookies, next_page=True)
         pages.append(state)
         merged = cartlib.merge(merged, state)
     return merged, pages
 
 
-def _cart_render_all(cookies: dict[str, str]):
-    # Next pages must be requested from the merged snapshot as well.
-    merged = None
-    state = _cart_render(cookies)
-    for n in range(CART_MAX_PAGES):
-        yield state
-        merged = cartlib.merge(merged, state)
-        pg = cartlib.pagination(state)
-        if not pg or not pg[1].get("hasMore"):
-            return
-        if n == CART_MAX_PAGES - 1:
-            logger.warning("cart has more than %d pages; the rest is not read", CART_MAX_PAGES)
-            return
-        state = _cart_async(merged, pg[0], pg[1], cookies, next_page=True)
+def _edit_qty(qty: int):
+    def edit(fields):
+        fields["operationType"] = "update_quantity"
+        fields["quantityView"] = {"current": int(qty)}
+    return edit
 
 
-def _cart_line_action(cookies: dict[str, str], cart_ids: list[str], edit) -> tuple[list[str], dict[str, str]]:
+def _edit_check(on: bool):
+    def edit(fields):
+        fields["operationType"] = "checkbox"
+        fields.setdefault("checkbox", {})["selected"] = on
+    return edit
+
+
+def _edit_delete(fields):
+    fields["operationType"] = "delete"
+
+
+def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
+                      merged: Optional[dict] = None) -> tuple[list[str], dict[str, str]]:
     """
-    Fire one action per cart line against the merged snapshot. `edit(fields)`
-    sets operationType and the changed field on a copy of the line's block.
-    Each response is folded back in, as the web page does.
+    Fire one action per cart line against the merged snapshot (`merged`, read
+    when not given). `edits`: cart_id → edit(fields), which sets operationType
+    and the changed field on a copy of the line's block. Each response is
+    folded back in, as the web page does.
     """
-    merged, _ = _cart_session(cookies)
+    if merged is None:
+        merged, _ = _cart_pages(cookies)
     done: list[str] = []
     failed: dict[str, str] = {}
-    for cid in [str(c).strip() for c in cart_ids if str(c).strip()]:
+    for cid, edit in edits.items():
+        cid = str(cid).strip()
         bid = cartlib.item_blocks(merged).get(cid)
         if bid is None:
             failed[cid] = "not found in cart"
@@ -2709,7 +2342,7 @@ def _cart_line_action(cookies: dict[str, str], cart_ids: list[str], edit) -> tup
             failed[cid] = response.get("tip") or "rejected"
             continue
         merged = cartlib.merge(merged, resp)
-        if (block["fields"].get("operationType")) == "delete":
+        if block["fields"].get("operationType") == "delete":
             merged["data"].pop(bid, None)
             for children in (merged.get("page") or {}).get("structure", {}).values():
                 if bid in children:
@@ -2719,7 +2352,7 @@ def _cart_line_action(cookies: dict[str, str], cart_ids: list[str], edit) -> tup
 
 
 def _read_cart(cookies: dict[str, str]) -> dict:
-    return cartlib.parse(list(_cart_render_all(cookies)))
+    return cartlib.parse(_cart_pages(cookies)[1])
 
 
 def _render_order(cookies: dict[str, str], cart_ids: list[str]) -> dict:
@@ -2742,7 +2375,7 @@ def _render_order(cookies: dict[str, str], cart_ids: list[str]) -> dict:
 
 def _checkout_preview_text(cookies: dict[str, str], cart_ids: list[str]) -> str:
     p = _render_order(cookies, cart_ids)
-    return checkoutlib.format_preview(p, len(cart_ids), cartlib.checkout_url(cart_ids))
+    return checkoutlib.format_preview(p, len(cart_ids), cartlib.checkout_url(cart_ids), DUTY_PER_LINE)
 
 
 @mcp.tool()
@@ -2770,7 +2403,7 @@ def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") 
             cart = _read_cart(cookies)
             names = sorted({v.get("list") for v in _line_store().values() if v.get("list")})
             name = list_name or (names[0] if len(names) == 1 else "")
-            ids = ([ln["cart_id"] for ln in _list_lines(cart, name)] if name
+            ids = ([ln["cart_id"] for ln in cartlib.by_list(cart, _line_store())[0].get(name, [])] if name
                    else [ln["cart_id"] for ln in cart["lines"] if ln["checked"]])
             if not ids:
                 return f"No lines for list '{name}'." if name else "No cart ids given and nothing is checked."
@@ -2888,14 +2521,12 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
     text = cartlib.format_cart(c, show_unchecked=not checked_only, tags=tags)
     priced: dict[str, dict] = {}
     previews = []
-    for name in dict.fromkeys(v["list"] for v in tags.values() if v.get("list")) if checkout else []:
-        ids = [ln["cart_id"] for ln in _list_lines(c, name)]
-        if not ids:
-            continue
+    for name, lines in cartlib.by_list(c, tags)[0].items() if checkout else []:
+        ids = [ln["cart_id"] for ln in lines]
         try:
             priced[name] = _render_order(cookies, ids)
             previews.append(f"## Checkout for list '{name}'\n"
-                            + checkoutlib.format_preview(priced[name], len(ids), cartlib.checkout_url(ids)))
+                            + checkoutlib.format_preview(priced[name], len(ids), cartlib.checkout_url(ids), DUTY_PER_LINE))
         except Exception as e:
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
     try:
@@ -2933,35 +2564,34 @@ def select_cart_items(cart_ids: list[str], only: bool = False, selected: bool = 
     if not cookies:
         return AUTH_EXPIRED_MSG
     try:
-        report = _select(cookies, [str(c).strip() for c in cart_ids], only=only, selected=selected)
+        return _select(cookies, [str(c).strip() for c in cart_ids], only=only, selected=selected)[0]
     except Exception as e:
         return f"Cart call failed: {e}"
-    return report
 
 
-def _select(cookies: dict[str, str], want: list[str], only: bool = False, selected: bool = True) -> str:
-    before = _read_cart(cookies)
+def _select(cookies: dict[str, str], want: list[str], only: bool = False,
+            selected: bool = True) -> tuple[str, dict]:
+    """Check / uncheck lines in one pass; returns the report and the cart afterwards."""
+    merged, pages = _cart_pages(cookies)
+    before = cartlib.parse(pages)
     titles = {ln["cart_id"]: f"{ln['title'][:40]} ({ln['variant']})" for ln in before["lines"]}
     state_of = {ln["cart_id"]: ln["checked"] for ln in before["lines"]}
     unknown = [c for c in want if c not in state_of]
     want = [c for c in want if c in state_of]
     out = []
-    failed: dict[str, str] = {}
     if not selected:
-        done, failed = _check_lines(cookies, [c for c in want if state_of[c]], on=False)
+        done, failed = _cart_line_action(cookies, {c: _edit_check(False) for c in want if state_of[c]}, merged)
         out.append(f"Unchecked {len(done)} line(s).")
     else:
-        if only:
-            off = [c for c, on in state_of.items() if on and c not in want]
-            done_off, f = _check_lines(cookies, off, on=False) if off else ([], {})
-            failed.update(f)
-            if done_off:
-                out.append("Unchecked (not in the list): " + "; ".join(titles[c] for c in done_off))
+        # Uncheck first: AliExpress keeps only MAX_CHECKED lines checked.
+        off = [c for c, on in state_of.items() if on and c not in want] if only else []
         keep = want[:cartlib.MAX_CHECKED]
         on = [c for c in keep if not state_of[c]]
-        done_on, f = _check_lines(cookies, on, on=True) if on else ([], {})
-        failed.update(f)
-        out.insert(0, f"Checked {len(done_on)} line(s); {len(keep) - len(on)} were already checked.")
+        done, failed = _cart_line_action(
+            cookies, {**{c: _edit_check(False) for c in off}, **{c: _edit_check(True) for c in on}}, merged)
+        out.append(f"Checked {sum(1 for c in on if c in done)} line(s); {len(keep) - len(on)} were already checked.")
+        if any(c in done for c in off):
+            out.append("Unchecked (not in the list): " + "; ".join(titles[c] for c in off if c in done))
         if len(want) > cartlib.MAX_CHECKED:
             out.append(f"AliExpress keeps only {cartlib.MAX_CHECKED} lines checked on the cart page; "
                        f"the other {len(want) - cartlib.MAX_CHECKED} stay unchecked there "
@@ -2978,7 +2608,7 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False, select
                    f"{s['total']:.2f} {s.get('currency') or CURRENCY}")
     if selected and want:
         out.append(f"Checkout link ({len(want)} line(s)): {cartlib.checkout_url(want)}")
-    return "\n".join(out)
+    return "\n".join(out), after
 
 
 # Cart lines the MCP knows about: {cart_id: {item_id, sku_id, added, list,
@@ -2997,11 +2627,6 @@ def _line_store() -> dict[str, dict]:
         return {}
 
 
-def _mcp_lines() -> dict[str, dict]:
-    """Lines the MCP added itself (the only ones a plan may delete)."""
-    return {k: v for k, v in _line_store().items() if not v.get("own")}
-
-
 def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None = None) -> None:
     lines = _line_store()
     for cid, info in (add or {}).items():
@@ -3009,13 +2634,6 @@ def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None =
     for cid in drop or []:
         lines.pop(str(cid), None)
     MCP_LINES_FILE.write_text(json.dumps(lines, indent=1))
-
-
-def _list_lines(cart: dict, list_name: str = "") -> list[dict]:
-    """Cart lines on `list_name` (any list when empty), in cart order."""
-    store = _line_store()
-    return [ln for ln in cart["lines"]
-            if store.get(ln["cart_id"], {}).get("list") and (not list_name or store[ln["cart_id"]]["list"] == list_name)]
 
 
 def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
@@ -3060,13 +2678,6 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
     return cid
 
 
-def _check_lines(cookies: dict[str, str], cart_ids: list[str], on: bool = True):
-    def edit(fields):
-        fields["operationType"] = "checkbox"
-        fields.setdefault("checkbox", {})["selected"] = on
-    return _cart_line_action(cookies, cart_ids, edit)
-
-
 @mcp.tool()
 def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "") -> str:
     """
@@ -3099,11 +2710,12 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
         _remember_lines({cid: tag})
     dropped = []
     try:
-        c = _read_cart(cookies)
+        merged, pages = _cart_pages(cookies)
+        c = cartlib.parse(pages)
         line = next((ln for ln in c["lines"] if ln["cart_id"] == cid), None)
         if line and not line["checked"]:
             before = {ln["cart_id"]: ln for ln in c["lines"] if ln["checked"]}
-            _check_lines(cookies, [cid])
+            _cart_line_action(cookies, {cid: _edit_check(True)}, merged)
             c = _read_cart(cookies)
             line = next((ln for ln in c["lines"] if ln["cart_id"] == cid), None)
             now = {ln["cart_id"] for ln in c["lines"] if ln["checked"]}
@@ -3143,12 +2755,8 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
     if quantity < 1:
         return "quantity must be at least 1 (use remove_from_cart to delete a line)."
 
-    def edit(fields):
-        fields["operationType"] = "update_quantity"
-        fields["quantityView"] = {"current": int(quantity)}
-
     try:
-        done, failed = _cart_line_action(cookies, [cart_id], edit)
+        done, failed = _cart_line_action(cookies, {cart_id: _edit_qty(quantity)})
     except Exception as e:
         return f"Cart call failed: {e}"
     if failed:
@@ -3170,11 +2778,8 @@ def remove_from_cart(cart_ids: list[str]) -> str:
     if not cookies:
         return AUTH_EXPIRED_MSG
 
-    def edit(fields):
-        fields["operationType"] = "delete"
-
     try:
-        done, failed = _cart_line_action(cookies, cart_ids, edit)
+        done, failed = _cart_line_action(cookies, {c: _edit_delete for c in cart_ids if str(c).strip()})
     except Exception as e:
         return f"Cart call failed: {e}"
     _remember_lines(drop=done)

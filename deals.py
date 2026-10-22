@@ -21,7 +21,9 @@ import itertools
 import json
 import math
 import re
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
+
+from cart import money
 
 PACK_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:pcs|pc|pieces?|stück|stk|pack|lots?)\b|pack of\s*(\d{1,4})", re.I)
 
@@ -304,11 +306,6 @@ def upsell(ways: list[dict], currency: str, max_extra: float = 1.5, max_ratio: f
 _NUM = r"(\d+(?:[.,]\d+)?)"
 
 
-def _money(text: str) -> Optional[float]:
-    m = re.search(_NUM, text or "")
-    return float(m.group(1).replace(",", ".")) if m else None
-
-
 def parse_discounts(resp: dict) -> dict:
     """
     The "Discounts & coupon codes" panel as data:
@@ -341,7 +338,7 @@ def parse_discounts(resp: dict) -> dict:
                     m = re.search(_NUM + r"\D+off\D+over\D*" + _NUM, t)
                     if m:
                         out["tiers"].append((float(m.group(2).replace(",", ".")), float(m.group(1).replace(",", "."))))
-            elif title and _money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
+            elif title and money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
                 collect = (p.get("collectText") or "").lower()
                 assign = p.get("couponAssignParam") or {}
                 # "Follow & collect" would follow the store. Seen as bizType 121 /
@@ -360,7 +357,7 @@ def parse_discounts(resp: dict) -> dict:
                 else:
                     how = "automatic"
                 out["coupons"].append({
-                    "off": _money(title[0]), "min": _money(" ".join(sub)) or 0.0,
+                    "off": money(title[0]), "min": money(" ".join(sub)) or 0.0,
                     "how": how, "label": " ".join(desc) or kind,
                     "code": p.get("couponCode"), "campaign_id": str(p.get("campaignId") or ""),
                 })

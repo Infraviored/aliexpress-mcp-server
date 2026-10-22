@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import cart  # noqa: E402
 import checkout  # noqa: E402
 
 RESP = json.loads((Path(__file__).parent / "fixtures" / "checkout_render.json").read_text())
@@ -33,6 +34,6 @@ def test_duty_choice_lines_are_capped():
 
 
 def test_money():
-    assert checkout._money("1.234,56€") == 1234.56
-    assert checkout._money("-1,82€") == -1.82
-    assert checkout._money("Free shipping") == 0.0
+    assert cart.money("1.234,56€") == 1234.56
+    assert cart.money("-1,82€") == -1.82
+    assert cart.money("Free shipping") == 0.0

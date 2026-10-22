@@ -86,10 +86,9 @@ def _make_line(cart_id, seller_id, item_id, ship, group="global", checked=True):
         "cart_id": cart_id, "item_id": item_id, "sku_id": "1",
         "variant": "default", "title": f"item-{cart_id}", "valid": True,
         "checked": checked, "price": 5.0, "currency": "EUR",
-        "qty": 1, "max_qty": 10, "store": f"store-{seller_id}",
+        "qty": 1, "store": f"store-{seller_id}",
         "seller_id": seller_id, "ship": ship,
-        "ship_service": None, "ship_from": None,
-        "delivery": (None, None), "days": (None, None), "group": group,
+        "delivery": (None, None), "group": group, "choice": group == "group_choice",
     }
 
 
@@ -123,6 +122,6 @@ def test_format_lists_separates_list_from_other_lines_and_flags_leftovers():
 
 
 def test_models_match_same_part_names():
-    assert cart._models("Interface I2S PCM5102A DAC Decoder GY-PCM5102") >= {"PCM5102A"}
-    assert "MP1584EN" in cart._models("5/10pcs MP1584EN Adjustable 3A")
-    assert not cart._models("2cm Self Adhesive Soundproofing")
+    assert cart.models("Interface I2S PCM5102A DAC Decoder GY-PCM5102") >= {"PCM5102A"}
+    assert "MP1584EN" in cart.models("5/10pcs MP1584EN Adjustable 3A")
+    assert not cart.models("2cm Self Adhesive Soundproofing")

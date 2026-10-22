@@ -113,8 +113,14 @@ def _e(s) -> str:
     return html.escape(str(s if s is not None else ""), quote=True)
 
 
+# The account currency; the server sets it from ALIEXPRESS_CURRENCY.
+CURRENCY = "EUR"
+
+
 def eur(x: float) -> str:
-    return f"{x:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".") + " €"
+    """German money format in the account currency: 1.234,50 €."""
+    return (f"{x:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".")
+            + (" €" if CURRENCY == "EUR" else f" {CURRENCY}"))
 
 
 def inline_images(urls: list[str], fetch: Callable[[str], Optional[bytes]]) -> dict[str, str]:
