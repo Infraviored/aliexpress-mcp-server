@@ -1,11 +1,13 @@
-
+{
+  "mcpServers": {
     "aliexpress": {
-      "command": "python3",
-      "args": ["/Users/justinritchie/justinritchie-mcp-servers/aliexpress-mcp-server/aliexpress_mcp_server.py"],
+      "command": "/path/to/aliexpress-mcp-server/.venv/bin/python",
+      "args": ["/path/to/aliexpress-mcp-server/aliexpress_mcp_server.py"],
       "env": {
         "ALIEXPRESS_CREDENTIALS": "~/.mcp-credentials/aliexpress.json",
-        "ALIEXPRESS_COUNTRY": "CA",
-        "ALIEXPRESS_CURRENCY": "CAD"
+        "ALIEXPRESS_COUNTRY": "DE",
+        "ALIEXPRESS_CURRENCY": "EUR"
       }
-    },
-  
+    }
+  }
+}

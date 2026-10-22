@@ -52,7 +52,7 @@ def _blocks(state: dict, comp: str) -> list[tuple[str, dict]]:
     return [(bid, b) for bid, b in (state.get("data") or {}).items() if _comp(b).startswith(comp)]
 
 
-def _cents(amount: Any) -> Optional[float]:
+def cents(amount: Any) -> Optional[float]:
     if isinstance(amount, dict):
         cent = amount.get("cent")
         if isinstance(cent, (int, float)):
@@ -60,20 +60,28 @@ def _cents(amount: Any) -> Optional[float]:
     return None
 
 
-def _money(text: str) -> Optional[float]:
-    """'Shipping: 3,67€' / 'Versand: 1.234,50 €' / '$4.02' -> float."""
-    m = re.search(r"(\d[\d.,]*)", text or "")
+def money(text: Any) -> Optional[float]:
+    """'Shipping: 3,67€' / '1.234,50 €' / '$4.02' / '-3,57€' / 'Free' -> float."""
+    if isinstance(text, (int, float)):
+        return float(text)
+    s = str(text or "").strip()
+    m = re.search(r"\d[\d.,]*", s.replace(" ", ""))
     if not m:
-        return None
-    s = m.group(1)
-    if "," in s and (s.rfind(",") > s.rfind(".")):
-        s = s.replace(".", "").replace(",", ".")
+        return 0.0 if "free" in s.lower() or "kostenlos" in s.lower() else None
+    num = m.group(0)
+    if "," in num and num.rfind(",") > num.rfind("."):
+        num = num.replace(".", "").replace(",", ".")
     else:
-        s = s.replace(",", "")
+        num = num.replace(",", "")
     try:
-        return float(s)
+        v = float(num)
     except ValueError:
         return None
+    return -v if s.startswith("-") else v
+
+
+def cur_symbol(code: Optional[str]) -> str:
+    return "€" if (code or "EUR") == "EUR" else f" {code}"
 
 
 def _strip(html: str) -> str:
@@ -154,7 +162,7 @@ def _line(fields: dict) -> dict:
     price = None
     currency = None
     for pv in fields.get("priceViews") or []:
-        price = _cents(pv.get("amount"))
+        price = cents(pv.get("amount"))
         currency = (pv.get("amount") or {}).get("currencyCode") or pv.get("currency")
         if price is not None:
             break
@@ -165,7 +173,7 @@ def _line(fields: dict) -> dict:
     if lv.get("freeShipping"):
         ship = 0.0
     else:
-        ship = _money(lv.get("freightCost") or _strip(lv.get("freightDisplayText") or ""))
+        ship = money(lv.get("freightCost") or _strip(lv.get("freightDisplayText") or ""))
     qty = qv.get("current") or qv.get("origin") or 1
     return {
         "cart_id": str(iv.get("cartId")),
@@ -173,20 +181,19 @@ def _line(fields: dict) -> dict:
         "sku_id": str(iv.get("skuId") or ""),
         "variant": (iv.get("sku") or {}).get("skuInfo") or "",
         "title": iv.get("title") or "",
+        "image": iv.get("imageUrl"),
         "valid": bool(iv.get("valid", True)) and (iv.get("status") or "VALID") == "VALID",
         "checked": bool((fields.get("checkbox") or {}).get("selected")),
         "price": price,
         "currency": currency,
         "qty": int(qty),
-        "max_qty": qv.get("max"),
         "store": sv.get("name") or "",
         "seller_id": str(sv.get("sellerId") or ""),
         "ship": ship,
-        "ship_service": lv.get("chosenFreightService") or ut.get("serviceName"),
-        "ship_from": ut.get("shipFrom"),
         "delivery": (ut.get("deliveryDateMin"), ut.get("deliveryDate")),
         "days": (ut.get("deliveryDayMin"), ut.get("deliveryDayMax") or lv.get("deliveryDays")),
         "group": None,
+        "choice": False,
     }
 
 
@@ -221,13 +228,14 @@ def parse(states: list[dict]) -> dict:
                     "count": int(n.group(1)) if n else None,
                     "url": c.get("cartUrl"),
                 })
-            header = {"count": f.get("count"), "checked": f.get("selectNum"), "channels": channels}
+            header = {"count": f.get("count"), "channels": channels}
         for _, b in _blocks(state, SUMMARY):
             summary = _summary(b.get("fields") or {})
     for g in groups.values():
         for cid in g["cart_ids"]:
             if cid in lines:
                 lines[cid]["group"] = g["id"]
+                lines[cid]["choice"] = g["id"] == "group_choice"
     return {"lines": list(lines.values()), "groups": groups, "header": header, "summary": summary}
 
 
@@ -237,11 +245,11 @@ def _summary(f: dict) -> dict:
     if not blocks:
         return out
     pb = blocks[0]
-    out["total"] = _cents(pb.get("total"))
+    out["total"] = cents(pb.get("total"))
     discounts = []
     for sl in pb.get("summaryLines") or []:
         kind = sl.get("type") or ""
-        amount = _cents(sl.get("amount"))
+        amount = cents(sl.get("amount"))
         if kind == "CART_ITEM_TOTAL":
             out["subtotal"] = amount
         elif kind == "CART_SHIPPING_FEE":
@@ -252,15 +260,37 @@ def _summary(f: dict) -> dict:
         elif "DISCOUNT" in kind or "COUPON" in kind or "PROMOTION" in kind:
             for ch in sl.get("childs") or [sl]:
                 title = _strip((ch.get("title") or {}).get("title") or kind)
-                discounts.append((title, _cents(ch.get("amount"))))
+                discounts.append((title, cents(ch.get("amount"))))
     out["discounts"] = discounts
     return out
 
 
 # ─── Explaining the cart ────────────────────────────────────────────────────
 
-def _goods(ln: dict) -> float:
+def goods(ln: dict) -> float:
+    """Price × quantity of a cart line."""
     return (ln.get("price") or 0.0) * (ln.get("qty") or 1)
+
+
+def by_list(cart: dict, tags: dict[str, dict]) -> tuple[dict[str, list], list]:
+    """Lines per shopping list (`tags`: cart_id → {list, need, own}), and the rest."""
+    lists: dict[str, list] = {}
+    rest = []
+    for ln in cart["lines"]:
+        name = (tags.get(ln["cart_id"]) or {}).get("list")
+        (lists.setdefault(name, []) if name else rest).append(ln)
+    return lists, rest
+
+
+def leftovers(listed: list, others: list) -> list[tuple[dict, dict]]:
+    """(line, twin): lines of `others` naming the same part (model number) as a listed line."""
+    known = {m: ln for ln in listed for m in models(ln["title"])}
+    out = []
+    for ln in others:
+        twin = next((known[m] for m in models(ln["title"]) if m in known), None)
+        if twin:
+            out.append((ln, twin))
+    return out
 
 
 def shipping_report(cart: dict, choice_threshold: float = 10.0) -> dict:
@@ -278,7 +308,7 @@ def shipping_report(cart: dict, choice_threshold: float = 10.0) -> dict:
         has_ship = ln.get("ship")  # 0.0 (free) is falsy; only truthy values are paid
         if has_ship:
             reasons = []
-            if ln["group"] == "group_choice":
+            if ln["choice"]:
                 reasons.append("Choice below the free-shipping threshold")
             else:
                 reasons.append("global seller: every cart line pays its own shipping")
@@ -290,9 +320,9 @@ def shipping_report(cart: dict, choice_threshold: float = 10.0) -> dict:
                 elif ln["seller_id"] and ln["seller_id"] in seen_store:
                     store_title = seen_store[ln["seller_id"]]["title"][:30]
                     reasons.append(f"same store as '{store_title}' — shipping paid twice")
-                if ln["ship"] > _goods(ln):
+                if ln["ship"] > goods(ln):
                     reasons.append(
-                        f"shipping {ln['ship']:.2f} is more than the goods ({_goods(ln):.2f})"
+                        f"shipping {ln['ship']:.2f} is more than the goods ({goods(ln):.2f})"
                     )
             paid.append((ln, "; ".join(reasons)))
         # Track every line (paid or free) so a paid line arriving after a free
@@ -302,7 +332,7 @@ def shipping_report(cart: dict, choice_threshold: float = 10.0) -> dict:
         seen_item.setdefault(ln["item_id"], ln)
     dated = [ln for ln in checked if ln["delivery"][1]]
     slowest = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None
-    choice_goods = sum(_goods(ln) for ln in checked if ln["group"] == "group_choice")
+    choice_goods = sum(goods(ln) for ln in checked if ln["choice"])
     return {
         "paid": paid,
         "slowest": slowest,
@@ -319,45 +349,94 @@ def _when(ln: dict) -> str:
     return f"{(a or b)[5:]}…{b[5:]}" if a and a != b else b[5:]
 
 
-def format_cart(cart: dict, show_unchecked: bool = True) -> str:
-    cur = (cart["summary"].get("currency") or "EUR").replace("EUR", "€")
+# Model numbers in a title ("PCM5102A", "MP1584EN", "ICS-43434"): letters
+# and digits mixed, at least 4 long. Two lines sharing one are the same part.
+_MODEL = re.compile(r"\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9][A-Z0-9-]{3,}\b")
+
+
+def models(title: str) -> set[str]:
+    return {m.replace("-", "") for m in _MODEL.findall(title or "")} - {"USB", "RGB"}
+
+
+def _ship_s(ln: dict) -> str:
+    if ln["ship"] == 0:
+        return "free"
+    if ln["ship"] is not None:
+        return f"ship {ln['ship']:.2f}"
+    return "Choice shipping" if ln["choice"] else "ship ?"
+
+
+def _line_text(ln: dict, cur: str, prefix: str = "") -> str:
+    qty = f"{ln['qty']}× " if ln["qty"] != 1 else ""
+    bad = "" if ln["valid"] else " ⚠️ not available"
+    kind = "Choice" if ln["choice"] else "global"
+    return (f"- [{'x' if ln['checked'] else ' '}] {prefix}{qty}{ln['title'][:50]} | {ln['variant'] or '-'} | "
+            f"{(ln['price'] or 0):.2f}{cur} | {_ship_s(ln)} | {kind} | {_when(ln)}{bad}\n"
+            f"      cart_id {ln['cart_id']}")
+
+
+def format_lists(cart: dict, tags: dict[str, dict]) -> tuple[list[str], set[str]]:
+    """
+    The lines on shopping lists (`tags`: cart_id → {list, need, own}), one
+    section per list, each line with its need. Returns the text and the
+    cart ids shown.
+    """
+    cur = cur_symbol(cart["summary"].get("currency"))
+    lists, others = by_list(cart, tags)
+    out, shown = [], set()
+    for name, lines in lists.items():
+        ticked = sum(1 for ln in lines if ln["checked"])
+        value = sum(goods(ln) for ln in lines)
+        out.append(f"## List '{name}' — {len(lines)} line(s), goods {value:.2f}{cur}; "
+                   f"{ticked} ticked on the cart page")
+        for ln in lines:
+            t = tags[ln["cart_id"]]
+            need = f"{t['need']}: " if t.get("need") else ""
+            out.append(_line_text(ln, cur, need) + ("  (your own line)" if t.get("own") else ""))
+            shown.add(ln["cart_id"])
+        for ln, twin in leftovers(lines, others):
+            out.append(f"   ! not on the list but the same part as '{tags[twin['cart_id']].get('need') or twin['title'][:30]}': "
+                       f"{ln['title'][:45]} (cart_id {ln['cart_id']}) — a leftover?")
+        out.append(f"   Checkout link for the whole list: {checkout_url([ln['cart_id'] for ln in lines])}")
+        out.append("")
+    return out, shown
+
+
+def format_cart(cart: dict, show_unchecked: bool = True, tags: Optional[dict[str, dict]] = None) -> str:
+    cur = cur_symbol(cart["summary"].get("currency"))
     h = cart["header"]
     n_checked = sum(1 for ln in cart["lines"] if ln["checked"])
-    out = [f"Cart: {len(cart['lines'])} line(s), {n_checked} checked."]
+    out = [f"Cart: {len(cart['lines'])} line(s), {n_checked} ticked on the cart page."]
+    listed, shown = format_lists(cart, tags or {}) if tags else ([], set())
+    if listed:
+        out += [""] + listed
+        out.append("## Other lines (not on a list)" if len(shown) < len(cart["lines"]) else "")
     grouped: dict[str, list] = {}
     for ln in cart["lines"]:
+        if ln["cart_id"] in shown:
+            continue
         grouped.setdefault(ln["group"] or "other", []).append(ln)
     order = [g for g in ("group_choice", "global") if g in grouped] + [g for g in grouped if g not in ("group_choice", "global")]
     for gid in order:
         lines = grouped[gid]
         g = cart["groups"].get(gid, {"name": gid, "promo": []})
         ch = [ln for ln in lines if ln["checked"]]
-        goods = sum(_goods(ln) for ln in ch)
+        value = sum(goods(ln) for ln in ch)
         ship = sum(ln["ship"] or 0 for ln in ch)
         out.append("")
-        out.append(f"## {g['name']} — {len(ch)}/{len(lines)} checked, goods {goods:.2f}{cur}, shipping {ship:.2f}{cur}")
+        out.append(f"{'###' if listed else '##'} {g['name']} — {len(ch)}/{len(lines)} ticked, "
+                   f"goods {value:.2f}{cur}, shipping {ship:.2f}{cur}")
         for p in g.get("promo") or []:
             out.append(f"   ({p})")
         for ln in sorted(lines, key=lambda x: not x["checked"]):
             if not ln["checked"] and not show_unchecked:
                 continue
-            if ln["ship"] == 0:
-                ship_s = "free"
-            elif ln["ship"] is not None:
-                ship_s = f"ship {ln['ship']:.2f}"
-            else:
-                ship_s = "Choice shipping" if gid == "group_choice" else "ship ?"
-            qty = f"{ln['qty']}× " if ln["qty"] != 1 else ""
-            bad = "" if ln["valid"] else " ⚠️ not available"
-            out.append(
-                f"- [{'x' if ln['checked'] else ' '}] {qty}{ln['title'][:55]} | {ln['variant'] or '-'} | "
-                f"{(ln['price'] or 0):.2f}{cur} | {ship_s} | {_when(ln)} | {ln['store'][:25]}{bad}\n"
-                f"      cart_id {ln['cart_id']}  item {ln['item_id']}  sku {ln['sku_id']}"
-            )
+            out.append(_line_text(ln, cur) + f"  item {ln['item_id']}  sku {ln['sku_id']}  {ln['store'][:25]}")
     s = cart["summary"]
     if s.get("total") is not None:
         out.append("")
-        out.append("## Checkout would charge (checked lines)")
+        out.append(f"## Cart page total (only the {n_checked} ticked lines; no import charges — "
+                   "checkout_preview shows what checkout really charges)")
         out.append(f"Subtotal {s.get('subtotal') or 0:.2f}{cur} + shipping {s.get('shipping') or 0:.2f}{cur}"
                    + (f" ({s['shipping_note']})" if s.get("shipping_note") else ""))
         for title, amt in s.get("discounts") or []:
@@ -382,5 +461,5 @@ def format_cart(cart: dict, show_unchecked: bool = True) -> str:
     ids = [ln["cart_id"] for ln in cart["lines"] if ln["checked"]]
     if ids:
         out.append("")
-        out.append(f"Checkout link for the {len(ids)} checked line(s): {checkout_url(ids)}")
+        out.append(f"Checkout link for the {len(ids)} ticked line(s): {checkout_url(ids)}")
     return "\n".join(out)

@@ -21,7 +21,9 @@ import itertools
 import json
 import math
 import re
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
+
+from cart import money
 
 PACK_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:pcs|pc|pieces?|stück|stk|pack|lots?)\b|pack of\s*(\d{1,4})", re.I)
 
@@ -140,13 +142,15 @@ def best_ways(
     quote: Optional[dict],
     choice_free: bool,
     limit: int = 3,
+    duty: float = 0.0,
 ) -> list[dict]:
     """
     All ways to get >= `need` pieces from one ladder, using up to two pack
-    sizes, ranked by total (goods + shipping per cart line), then by fewer
-    lines. Each way: {"lines": [(variant, qty)], "line_ship": [fee per line],
-    "pieces", "goods", "ship", "total"}.
+    sizes, ranked by total (goods + shipping and import charges per cart
+    line), then by fewer lines. Each way: {"lines": [(variant, qty)],
+    "line_ship": [fee per line], "pieces", "goods", "ship", "duty", "total"}.
     `choice_free`: shipping counts as 0 (Choice item in an order above threshold).
+    `duty`: import charges per cart line (EU: flat per line, not per piece).
     """
     ways = []
     groups = ladders(variants) or {}
@@ -174,15 +178,17 @@ def best_ways(
                 # one cart line per variant, each with its own shipping
                 line_ship = [0.0 if choice_free else shipping_for(quote, q) for _, q in used]
                 ship = sum(line_ship)
+                tax = duty * len(used)
                 ways.append({
                     "lines": used, "line_ship": line_ship,
-                    "pieces": pieces, "goods": goods, "ship": ship, "total": goods + ship,
+                    "pieces": pieces, "goods": goods, "ship": ship, "duty": tax,
+                    "total": goods + ship + tax,
                 })
     ways.sort(key=lambda w: (w["total"], len(w["lines"]), -w["pieces"]))
     return ways[:limit]
 
 
-def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.75) -> Optional[str]:
+def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.7) -> Optional[str]:
     """
     Warn when the winning way uses a variant far cheaper per piece than every
     other kind of variant: usually a different article ("Chip" = bare module
@@ -206,7 +212,8 @@ def odd_one_out(ways: list[dict], variants: list[dict], ratio: float = 0.75) -> 
 def fmt_way(w: dict, currency: str) -> str:
     parts = " + ".join(f"{q}× {v['label']}" for v, q in w["lines"])
     ship = f" + {w['ship']:.2f} ship" if w["ship"] else ""
-    return f"{parts} = {w['pieces']} pcs, {w['goods']:.2f}{ship} = {w['total']:.2f} {currency} ({w['total'] / w['pieces']:.2f}/pc)"
+    tax = f" + {w['duty']:.2f} import" if w.get("duty") else ""
+    return f"{parts} = {w['pieces']} pcs, {w['goods']:.2f}{ship}{tax} = {w['total']:.2f} {currency} ({w['total'] / w['pieces']:.2f}/pc)"
 
 
 def ladder_lines(variants: list[dict], currency: str) -> list[str]:
@@ -299,11 +306,6 @@ def upsell(ways: list[dict], currency: str, max_extra: float = 1.5, max_ratio: f
 _NUM = r"(\d+(?:[.,]\d+)?)"
 
 
-def _money(text: str) -> Optional[float]:
-    m = re.search(_NUM, text or "")
-    return float(m.group(1).replace(",", ".")) if m else None
-
-
 def parse_discounts(resp: dict) -> dict:
     """
     The "Discounts & coupon codes" panel as data:
@@ -336,7 +338,7 @@ def parse_discounts(resp: dict) -> dict:
                     m = re.search(_NUM + r"\D+off\D+over\D*" + _NUM, t)
                     if m:
                         out["tiers"].append((float(m.group(2).replace(",", ".")), float(m.group(1).replace(",", "."))))
-            elif title and _money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
+            elif title and money(title[0]) is not None and "off" in title[0].lower() and "%" not in title[0]:
                 collect = (p.get("collectText") or "").lower()
                 assign = p.get("couponAssignParam") or {}
                 # "Follow & collect" would follow the store. Seen as bizType 121 /
@@ -355,7 +357,7 @@ def parse_discounts(resp: dict) -> dict:
                 else:
                     how = "automatic"
                 out["coupons"].append({
-                    "off": _money(title[0]), "min": _money(" ".join(sub)) or 0.0,
+                    "off": money(title[0]), "min": money(" ".join(sub)) or 0.0,
                     "how": how, "label": " ".join(desc) or kind,
                     "code": p.get("couponCode"), "campaign_id": str(p.get("campaignId") or ""),
                 })

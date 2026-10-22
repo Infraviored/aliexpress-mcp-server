@@ -86,10 +86,9 @@ def _make_line(cart_id, seller_id, item_id, ship, group="global", checked=True):
         "cart_id": cart_id, "item_id": item_id, "sku_id": "1",
         "variant": "default", "title": f"item-{cart_id}", "valid": True,
         "checked": checked, "price": 5.0, "currency": "EUR",
-        "qty": 1, "max_qty": 10, "store": f"store-{seller_id}",
+        "qty": 1, "store": f"store-{seller_id}",
         "seller_id": seller_id, "ship": ship,
-        "ship_service": None, "ship_from": None,
-        "delivery": (None, None), "days": (None, None), "group": group,
+        "delivery": (None, None), "group": group, "choice": group == "group_choice",
     }
 
 
@@ -108,3 +107,28 @@ def test_shipping_report_free_then_paid_same_store_warns_paid_twice():
         f"Expected 'paid twice' in reason for paid line, got: {reasons['cid-2']!r}"
     )
 
+
+
+def test_format_lists_separates_list_from_other_lines_and_flags_leftovers():
+    c = _cart()
+    ids = [ln["cart_id"] for ln in c["lines"]][:12]
+    tags = {cid: {"list": "sat", "need": f"need {i}"} for i, cid in enumerate(ids)}
+    text = cart.format_cart(c, tags=tags)
+    assert "## List 'sat' — 12 line(s)" in text
+    assert "## Other lines (not on a list)" in text
+    assert "the cart page keeps only 10 ticked" in text or "ticked on the cart page" in text
+    link = next(l for l in text.splitlines() if "Checkout link for the whole list" in l)
+    assert parse_qs(urlparse(link.split(": ", 1)[1]).query)["availableProductShopcartIds"][0].split(",") == ids
+
+
+def test_models_match_same_part_names():
+    assert cart.models("Interface I2S PCM5102A DAC Decoder GY-PCM5102") >= {"PCM5102A"}
+    assert "MP1584EN" in cart.models("5/10pcs MP1584EN Adjustable 3A")
+    assert not cart.models("2cm Self Adhesive Soundproofing")
+
+
+def test_money_free_only_without_a_number():
+    assert cart.money("Free shipping") == 0.0
+    assert cart.money("Shipping: €1.99 | Free over €10") == 1.99
+    assert cart.money("-1,82€") == -1.82
+    assert cart.money(0) == 0.0
