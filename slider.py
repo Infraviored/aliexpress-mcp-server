@@ -19,6 +19,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import private
+
 logger = logging.getLogger("aliexpress-mcp")
 
 KNOB = "#nc_1_n1z"
@@ -171,12 +173,5 @@ def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> boo
             xvfb.terminate()
 
     data["cookies"] = cookies
-    tmp = credentials_path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        tmp.replace(credentials_path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    private.write_json(credentials_path, data)
     return True

@@ -16,6 +16,8 @@ import re
 import sys
 from pathlib import Path
 
+import private
+
 
 def parse(raw: str) -> dict[str, str]:
     raw = raw.strip()
@@ -48,11 +50,7 @@ def main() -> int:
     out = Path(
         os.environ.get("ALIEXPRESS_CREDENTIALS", "~/.mcp-credentials/aliexpress.json")
     ).expanduser()
-    out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump({"cookies": cookies}, f)
-    os.chmod(out, 0o600)
+    private.write_json(out, {"cookies": cookies})
     if "--keep" not in sys.argv and src.resolve() != out.resolve():
         src.unlink()
     print(f"Wrote {len(cookies)} cookies to {out}: {', '.join(sorted(cookies))}")

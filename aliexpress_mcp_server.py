@@ -31,6 +31,7 @@ import cart as cartlib
 import checkout as checkoutlib
 import report
 import deals
+import private
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -64,6 +65,16 @@ def load_cookies() -> dict[str, str]:
         return data.get("cookies", {})
     except (json.JSONDecodeError, KeyError):
         return {}
+
+
+def _save_cookies(update: dict[str, str]) -> None:
+    """Merge `update` into the credential file (e.g. a refreshed _m_h5_tk)."""
+    try:
+        data = json.loads(CREDENTIALS_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    data["cookies"] = {**data.get("cookies", {}), **update}
+    private.write_json(CREDENTIALS_PATH, data)
 
 
 def get_client(require_auth: bool = False, referer: str = BASE_URL) -> httpx.Client:
@@ -207,7 +218,6 @@ def mtop_call(
     with httpx.Client(timeout=30.0, follow_redirects=True) as c:
         if method.upper() == "POST":
             body = {"data": params.pop("data")}
-            params["type"] = "originaljson"
             resp = c.post(url, params=params, data=body, headers=headers)
         else:
             resp = c.get(url, params=params, headers=headers)
@@ -230,13 +240,13 @@ def mtop_call(
         # Retry once if the token expired (the server will have set fresh cookies).
         # httpx.Response.cookies iterates as cookie-name strings, so pull values by key.
         if retries > 0 and any(
-            s in ret_str for s in ("FAIL_SYS_TOKEN_EMPTY", "FAIL_SYS_TOKEN_EXPIRED", "FAIL_SYS_TOKEN_EXOIRED", "TOKEN_EMPTY", "TOKEN_EXPIRED")
+            s in ret_str for s in ("TOKEN_EMPTY", "TOKEN_EXPIRED", "TOKEN_EXOIRED")
         ):
-            new_cookies = dict(cookies)
-            for name in resp.cookies:
-                val = resp.cookies.get(name)
-                if val is not None:
-                    new_cookies[name] = val
+            fresh = {name: resp.cookies.get(name) for name in resp.cookies if resp.cookies.get(name) is not None}
+            new_cookies = {**cookies, **fresh}
+            if fresh:
+                # Keep the new token, or every later call fails once and retries.
+                _save_cookies(fresh)
             return mtop_call(api, version, payload, cookies=new_cookies, retries=retries - 1, referer=referer, method=method, captcha=captcha)
 
         # Bot check: solve the slider (or click the reCAPTCHA box) in real Chrome
@@ -614,6 +624,14 @@ def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
     return None
 
 
+def _ship_biz(result: dict) -> dict:
+    """The shipping offer of a product response (first delivery layout's bizData)."""
+    ship = result.get("SHIPPING") if isinstance(result.get("SHIPPING"), dict) else {}
+    layouts = ship.get("originalLayoutResultList") or ship.get("deliveryLayoutInfo") or []
+    biz = layouts[0].get("bizData") if layouts and isinstance(layouts[0], dict) else None
+    return biz if isinstance(biz, dict) else {}
+
+
 def _extract_pdp_fields(mtop_resp: dict, item_id: str) -> dict:
     """
     Pull fields we care about from an MTOP PDP response.
@@ -749,44 +767,36 @@ def _extract_pdp_fields(mtop_resp: dict, item_id: str) -> dict:
                 pass
 
     # ── Shipping ──────────────────────────────────────────────────────
-    ship = result.get("SHIPPING")
-    if isinstance(ship, dict):
-        # bizData lives inside originalLayoutResultList[0] or deliveryLayoutInfo[0]
-        layouts = ship.get("originalLayoutResultList") or ship.get("deliveryLayoutInfo") or []
-        biz = None
-        if isinstance(layouts, list) and layouts:
-            l0 = layouts[0]
-            if isinstance(l0, dict):
-                biz = l0.get("bizData")
-        if isinstance(biz, dict):
-            amt = biz.get("displayAmount")
-            if amt is not None:
-                try:
-                    d["shipping_cost"] = float(amt)
-                except (TypeError, ValueError):
-                    d["shipping_cost"] = parse_price(str(amt))
-            if d["shipping_cost"] is None and biz.get("logisticsComposeThreshold"):
-                # e.g., "C$0.00" — sometimes the "threshold" is actually the freight text
-                d["shipping_cost"] = parse_price(biz["logisticsComposeThreshold"])
-            eta_min = biz.get("displayEtaMinDate")
-            eta_max = biz.get("displayEtaMaxDate")
-            if eta_min and eta_max:
-                d["shipping_estimate"] = f"{eta_min} – {eta_max}"
-            elif eta_min:
-                d["shipping_estimate"] = eta_min
-            d["ship_from"] = biz.get("shipFrom")
-            dmin = biz.get("deliveryDayMin")
-            dmax = biz.get("deliveryDayMax")
-            if dmin is not None:
-                try:
-                    d["ship_days_min"] = int(dmin)
-                except (TypeError, ValueError):
-                    pass
-            if dmax is not None:
-                try:
-                    d["ship_days_max"] = int(dmax)
-                except (TypeError, ValueError):
-                    pass
+    biz = _ship_biz(result)
+    if biz:
+        amt = biz.get("displayAmount")
+        if amt is not None:
+            try:
+                d["shipping_cost"] = float(amt)
+            except (TypeError, ValueError):
+                d["shipping_cost"] = parse_price(str(amt))
+        if d["shipping_cost"] is None and biz.get("logisticsComposeThreshold"):
+            # e.g., "C$0.00" — sometimes the "threshold" is actually the freight text
+            d["shipping_cost"] = parse_price(biz["logisticsComposeThreshold"])
+        eta_min = biz.get("displayEtaMinDate")
+        eta_max = biz.get("displayEtaMaxDate")
+        if eta_min and eta_max:
+            d["shipping_estimate"] = f"{eta_min} – {eta_max}"
+        elif eta_min:
+            d["shipping_estimate"] = eta_min
+        d["ship_from"] = biz.get("shipFrom")
+        dmin = biz.get("deliveryDayMin")
+        dmax = biz.get("deliveryDayMax")
+        if dmin is not None:
+            try:
+                d["ship_days_min"] = int(dmin)
+            except (TypeError, ValueError):
+                pass
+        if dmax is not None:
+            try:
+                d["ship_days_max"] = int(dmax)
+            except (TypeError, ValueError):
+                pass
 
     # ── Image ─────────────────────────────────────────────────────────
     hdr = result.get("HEADER_IMAGE_PC")
@@ -933,9 +943,8 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         v["ambiguous"] = counts[v["label"]] > 1
 
     shipping: dict[str, Any] = {}
-    layouts = (res.get("SHIPPING") or {}).get("deliveryLayoutInfo") or []
-    if layouts:
-        b = layouts[0].get("bizData") or {}
+    b = _ship_biz(res)
+    if b:
         free = b.get("shippingFee") == "free"
         shipping = {
             "ship_to": b.get("shipToCode"),
@@ -1008,20 +1017,24 @@ COUPONS_FILE = CREDENTIALS_PATH.parent / "aliexpress-coupons.json"
 COUPON_MEMORY_DAYS = 14
 
 
-def _collected_coupons() -> set[str]:
+def _coupon_stamps() -> dict[str, float]:
     """
-    Public code coupons this MCP collected within COUPON_MEMORY_DAYS. An order
-    may have used one up meanwhile; forgetting it after a while means it is
-    shown as collectable again rather than counted forever.
+    Public code coupons this MCP collected within COUPON_MEMORY_DAYS, with
+    when. An order may have used one up meanwhile; forgetting it after a
+    while means it is shown as collectable again rather than counted forever.
     """
     try:
         raw = json.loads(COUPONS_FILE.read_text())
     except (OSError, ValueError):
-        return set()
+        return {}
     if isinstance(raw, list):  # older format: ids without dates
-        return set(raw)
+        return {cid: time.time() for cid in raw}
     cutoff = time.time() - COUPON_MEMORY_DAYS * 86400
-    return {cid for cid, ts in raw.items() if ts >= cutoff}
+    return {cid: ts for cid, ts in raw.items() if ts >= cutoff}
+
+
+def _collected_coupons() -> set[str]:
+    return set(_coupon_stamps())
 
 
 def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
@@ -1036,6 +1049,16 @@ def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
     except Exception as e:
         logger.debug("freight quote %s failed: %s", offer["item_id"], e)
         return None
+
+
+def _words(text: str) -> list[str]:
+    return [w.lower() for w in (text or "").split()]
+
+
+def _by_match(variants: list[dict], match: str) -> list[dict]:
+    """Variants whose name contains every word of `match` (all when empty)."""
+    words = _words(match)
+    return [v for v in variants if all(w in v["label"].lower() for w in words)]
 
 
 def _fmt_shipping(sh: dict) -> str:
@@ -1070,14 +1093,11 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     offer = _pdp_offer(item_id)
     if not offer:
         return f"No variant data for {item_id} (session expired or product gone)." + blocked_msg()
-    rows = offer["variants"]
-    total = len(rows)
-    words = [w.lower() for w in match.split()]
-    if words:
-        rows = [r for r in rows if all(w in r["label"].lower() for w in words)]
+    total = len(offer["variants"])
+    rows = _by_match(offer["variants"], match)
     rows.sort(key=lambda r: (not r["salable"], r["unit"] if r["unit"] is not None else 1e9))
 
-    head = f"{len(rows)} of {total} variant(s)" + (f" matching '{match}'" if words else "")
+    head = f"{len(rows)} of {total} variant(s)" + (f" matching '{match}'" if match.strip() else "")
     lines = [offer["title"], offer["url"]]
     if offer.get("store"):
         lines.append(f"store: {offer['store']}" + (f" ({offer['store_positive']}% positive)" if offer.get("store_positive") else ""))
@@ -1129,8 +1149,7 @@ def get_variant_images(item_id: str, match: str = ""):
     offer = _pdp_offer(item_id)
     if not offer:
         return f"No variant data for {item_id}." + blocked_msg()
-    words = [w.lower() for w in match.split()]
-    rows = [v for v in offer["variants"] if all(w in v["label"].lower() for w in words)]
+    rows = _by_match(offer["variants"], match)
     table = [offer["title"][:100]] + [
         f"#{v['n']} {v['label']} — {v['price']:.2f} {CURRENCY} · sku {v['sku_id']}"
         + ("" if v["salable"] else " · NOT AVAILABLE")
@@ -1166,8 +1185,7 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     offer = _pdp_offer(item_id)
     if not offer:
         return f"No variant data for {item_id}." + blocked_msg()
-    words = [w.lower() for w in match.split()]
-    vs = [v for v in offer["variants"] if v["salable"] and all(w in v["label"].lower() for w in words)]
+    vs = [v for v in _by_match(offer["variants"], match) if v["salable"]]
     if not vs:
         return f"No available variant matches '{match}'."
     quote = _freight(offer)
@@ -1228,17 +1246,7 @@ def _collect(item_id: str, coupons: list[dict]) -> dict[str, str]:
     res = browser_actions.collect_coupons(item_id, [c["campaign_id"] for c in coupons], CREDENTIALS_PATH)
     got = {cid for cid, r in res.items() if r == "collected"}
     if got:
-        now = time.time()
-        keep = {cid: now for cid in _collected_coupons()}
-        try:
-            old = json.loads(COUPONS_FILE.read_text())
-            if isinstance(old, dict):
-                keep.update({k: v for k, v in old.items() if k in keep})
-        except (OSError, ValueError):
-            pass
-        keep.update({cid: now for cid in got})
-        COUPONS_FILE.write_text(json.dumps(keep))
-        os.chmod(COUPONS_FILE, 0o600)
+        private.write_json(COUPONS_FILE, {**_coupon_stamps(), **{cid: time.time() for cid in got}})
     _DISC_CACHE.pop(item_id, None)
     return res
 
@@ -1335,10 +1343,6 @@ UNKNOWN_DAYS = 30
 # DE). Every extra line costs this, whatever its price — the biggest reason a
 # list of cheap parts gets expensive.
 DUTY_PER_LINE = float(os.environ.get("ALIEXPRESS_DUTY_PER_LINE", str(checkoutlib.DUTY_PER_LINE)))
-
-
-def _words(text: str) -> list[str]:
-    return [w.lower() for w in (text or "").split()]
 
 
 def _choice_only(spec: dict) -> bool:
@@ -2149,36 +2153,12 @@ def get_shipping_estimate(item_id: str) -> str:
     Args:
         item_id: AliExpress item ID (e.g., "1005007655628250")
     """
-    cookies = load_cookies()
-    if not cookies:
-        return AUTH_EXPIRED_MSG
-
-    try:
-        resp = _fetch_pdp_mtop(item_id)
-    except Exception as e:
-        return f"MTOP call failed: {e}"
-
-    if not resp:
-        return (
-            f"Could not fetch shipping data for item {item_id} — MTOP returned "
-            "no usable response. Try re-saving AliExpress credentials."
-        )
-
-    d = _extract_pdp_fields(resp, item_id)
-    if d.get("shipping_cost") is None and not d.get("shipping_estimate"):
-        return (
-            f"Shipping info not present in API response for item {item_id}. "
-            "This can happen for items that need an interactive region selection."
-        )
-
-    lines = [f"Shipping to {COUNTRY} for item {item_id}:"]
-    if d.get("shipping_cost") is not None:
-        lines.append("  Cost: " + ("Free" if d["shipping_cost"] == 0 else f"{d['shipping_cost']:.2f} {CURRENCY}"))
-    if d.get("shipping_estimate"):
-        lines.append(f"  Estimated delivery: {d['shipping_estimate']}")
-    if d.get("ship_from"):
-        lines.append(f"  Ships from: {d['ship_from']}")
-    return "\n".join(lines)
+    offer = _pdp_offer(item_id)
+    if not offer:
+        return f"Could not fetch shipping data for item {item_id}." + blocked_msg()
+    quote = _freight(offer)
+    text = deals.fmt_quote(quote, CURRENCY) if quote else _fmt_shipping(offer["shipping"])
+    return f"Shipping to {COUNTRY} for item {item_id}: {text}"
 
 
 # ─── Cart protocol (droplet) ────────────────────────────────────────────────
