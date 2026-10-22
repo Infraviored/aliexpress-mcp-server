@@ -1,109 +1,94 @@
 # AliExpress MCP Server
 
 An MCP server for shopping on AliExpress from an agent: search, compare offers
-as checkout will price them, collect store coupons, and put a shopping list
-into the cart, checked and ready. Prices, shipping and delivery are for the
-configured country and currency (`ALIEXPRESS_COUNTRY`, `ALIEXPRESS_CURRENCY`,
-default DE / EUR).
+as checkout will price them, and turn a shopping list into a cart that is ready
+to order. Prices, shipping and delivery are for `ALIEXPRESS_COUNTRY` /
+`ALIEXPRESS_CURRENCY` (default DE / EUR).
 
-It never checks out or pays. It hands out the checkout link; paying is the
-user's click.
+It never checks out or pays. It hands out the checkout link, and paying is the
+user's click. `SKILL.md` is the guide for the agent.
 
 ## Tools
 
-- `shop_list(items, apply, list_name)` — a shopping list to a ready cart. Finds the best
-  offer per part (shipping and import charges per cart line, Choice
-  free-shipping threshold, store discounts, delivery time), and with
-  `apply=True` adds/resizes the lines, removes its own replaced lines,
-  collects the store coupon worth having, checks exactly the plan, returns
-  the checkout link and compares plan and cart.
-- `view_cart(checked_only, checkout)` — the cart sorted by shopping list:
-  each list's lines with their need and tick state, leftovers flagged, and
-  what checkout really charges for the list; then the other lines grouped
-  into "Shipped by AliExpress" (Choice) and global sellers, a shipping
-  analysis and the other channel carts.
-- `checkout_preview(cart_ids | list_name)` — the real checkout page for any
-  lines, nothing bought: goods, discounts, shipping per store, import
-  charges, total, slowest line, checkout link.
-- `set_cart_list(cart_ids, list_name, need)` — put existing cart lines (also
-  the user's own) on a shopping list.
-- `select_cart_items(cart_ids, only)` — tick lines on the cart page; returns
-  the checkout link (AliExpress keeps at most 10 lines ticked; the link and
-  checkout_preview have no limit).
-- `add_to_cart`, `update_cart_quantity`, `remove_from_cart` — cart lines.
-- `best_offer(item_id, pieces)`, `plan_basket(lines)` — pricing without
-  touching the cart.
-- `get_discounts(item_id, subtotal)`, `collect_coupon(item_id, subtotal)` —
-  store discounts and coupons; collecting runs the product page in Chrome.
+- `shop_list(items, list_name, apply)` takes a shopping list and returns a
+  ready cart. For each part it finds the best offer, counting shipping and
+  import charges per cart line, the Choice free-shipping threshold, store
+  discounts and delivery time. With `apply=True` it puts exactly that plan
+  into the cart and returns the checkout link.
+- `view_cart` shows the cart per shopping list. It includes the real checkout
+  total and the decisions still open, and writes the overview page
+  `cart.html`.
+- `checkout_preview(cart_ids | list_name)` reads the real checkout page for
+  any set of lines. Nothing is bought.
+- `set_cart_list`, `select_cart_items`, `add_to_cart`, `update_cart_quantity`
+  and `remove_from_cart` change cart lines.
+- `best_offer(item_id, pieces)` finds the cheapest pack mix from one product.
+- `get_discounts` and `collect_coupon` handle store discounts and coupons.
 - `search_products`, `get_product_details`, `get_product_variants`,
-  `get_variant_images`, `get_product_reviews`, `get_shipping_estimate`.
-
-The cart and coupon protocols were learned by recording the real pages with
-`tools/capture_mtop.py`; see `docs/mtop-notes.md`. A bot check (slider or
-reCAPTCHA box) is passed automatically in Chrome on a virtual display
-(`slider.py`); cart lines this MCP added, and which shopping list each line
-belongs to, are remembered in `~/.mcp-credentials/aliexpress-mcp-lines.json`.
-
-Import charges: since July 2026 the EU charges a flat 3 € duty per item in
-small parcels; AliExpress collects it at checkout as 3.57 € (with VAT) per
-cart line, and pays it itself beyond the 9th Choice line. For a list of cheap
-parts this is often the biggest cost after the goods, so the planner counts
-it per line.
+  `get_variant_images`, `get_product_reviews` and `get_shipping_estimate`
+  look up products.
 
 ## How it works
 
-The initial product page is a client-side-rendered shell (`window._d_c_.isCSR = true`, `window.runParams = {}`) — real product data loads over AJAX from AliExpress's MTOP API after the JS runs. So HTML scraping doesn't work for PDP data.
-
-Instead, this server replicates what `mtop.js` does in the browser: it makes signed calls to `mtop.aliexpress.pdp.pc.query` using the session's `_m_h5_tk` cookie as the HMAC token. The signing algorithm:
+Product, cart and checkout data come from AliExpress's MTOP API, the same
+signed calls the web pages make:
 
 ```
 sign = md5(token + "&" + t_ms + "&" + "12574478" + "&" + json_payload)
 ```
 
-where `token` is the prefix of `_m_h5_tk` before the underscore, and `12574478` is AliExpress's public web `appKey`. Token refresh on `FAIL_SYS_TOKEN_EXPIRED` is handled automatically.
+Here `token` is the part of the `_m_h5_tk` cookie before the underscore. An
+expired token is refreshed and saved back to the credential file. The cart and
+checkout protocols were recorded from the real pages with
+`tools/capture_mtop.py`; see `docs/mtop-notes.md`. Search parses the search
+page's HTML.
 
-Search still uses the simpler HTML path (embedded `window.runParams` JSON from the search SSR HTML) — no signed calls needed.
+Calls are paced (`ALIEXPRESS_MTOP_GAP`, 0.8 s) and product pages are cached
+for 10 min. A bot check (a slider or a reCAPTCHA box) is passed automatically
+in Chrome on a virtual display (`slider.py`).
+
+Local state lives next to the credentials in `~/.mcp-credentials/`, all files
+mode 600:
+- the cart lines this MCP added and the shopping list each line belongs to;
+- the coupons it collected;
+- cached Choice alternatives.
+
+Import charges: the EU charges a flat 3 € duty per item in small parcels.
+AliExpress collects it at checkout as about 3.57 € per cart line and takes over
+part of it on larger Choice orders. The planner estimates it per line, and
+`checkout_preview` reads the real figure.
 
 ## Setup
 
-1. Install dependencies:
+1. Install the dependencies and Chrome for Playwright:
 
    ```bash
-   pip install -r requirements.txt
+   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+   .venv/bin/playwright install chrome
    ```
 
-2. Install the [MCP Auth Bridge](https://github.com/justinritchie/mcp-auth-bridge) Chrome extension. The `aliexpress` entry is already in its `sites.json`.
+2. Log in on aliexpress.com. Then export the cookies (for example with the
+   [MCP Auth Bridge](https://github.com/justinritchie/mcp-auth-bridge)
+   extension) and import them:
 
-3. Open `https://www.aliexpress.com`, log in, then click **Save AliExpress** in the extension popup. This writes cookies to `~/.mcp-credentials/aliexpress.json`.
-
-4. Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-   ```json
-   {
-     "mcpServers": {
-       "aliexpress": {
-         "command": "python3",
-         "args": ["/Users/YOUR_USER/justinritchie-mcp-servers/aliexpress-mcp-server/aliexpress_mcp_server.py"],
-         "env": {
-           "ALIEXPRESS_CREDENTIALS": "~/.mcp-credentials/aliexpress.json",
-           "ALIEXPRESS_COUNTRY": "CA",
-           "ALIEXPRESS_CURRENCY": "CAD"
-         }
-       }
-     }
-   }
+   ```bash
+   .venv/bin/python import_cookies.py cookies.txt   # writes ~/.mcp-credentials/aliexpress.json
    ```
 
-5. Restart Claude Desktop.
+3. Register the server with your MCP client. `mcp_config_example.json` shows
+   the entry; set `ALIEXPRESS_COUNTRY` and `ALIEXPRESS_CURRENCY` there.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest -q tests
+```
+
+The fixtures are recorded responses with personal data removed.
 
 ## Known limitations
 
-- **Low-volume / brand-new listings** sometimes return empty MTOP responses (endpoint returns `SUCCESS` but an empty data block). Likely a region/visibility gate. Search results still show the listing fine.
-- **Cookies expire / lag the cart.** When tool calls start returning "session expired" — or `view_cart` reports an empty cart despite having items — re-open aliexpress.com in Chrome and click **Save AliExpress** again to capture fresh session cookies. The `_m_h5_tk` token and cart state rotate together; stale cookies show an empty server-side cart.
-- **Rate limiting** is the user's responsibility. The server sends realistic Chrome headers but doesn't throttle; don't hammer the search.
-
-## Architecture
-
-Follows the pattern of [dekudeals-mcp-server](../dekudeals-mcp-server/) — FastMCP + httpx + BeautifulSoup — with added MTOP client code in `aliexpress_mcp_server.py`. Session cookies come from the shared credential file written by the [MCP Auth Bridge](https://github.com/justinritchie/mcp-auth-bridge) Chrome extension.
-
-The MTOP response field paths (`PRODUCT_TITLE.text`, `PRICE.targetSkuPriceInfo.salePriceString`, `PC_RATING.rating`, `SHIPPING.originalLayoutResultList[0].bizData.displayAmount`, etc.) were reverse-engineered live from a real response in April 2026 and are documented inline in `_extract_pdp_fields()`. If AliExpress reorganizes the component layout, that function is the place to update.
+- **Empty product data:** very new or low-volume listings sometimes return an
+  empty product response.
+- **Expired cookies:** when the cookies expire, tools say "session expired" or
+  the cart looks empty. Log in again and re-import the cookies.

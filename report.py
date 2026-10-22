@@ -55,7 +55,6 @@ section { display: grid; gap: 14px; }
 .row:first-child { border-top: 0; }
 .row img, .row .noimg { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; background: var(--line); }
 .row .t { min-width: 0; display: grid; gap: 2px; }
-.row .need { font-weight: 600; }
 .row .title { color: var(--muted); font-size: .88rem; overflow-wrap: anywhere; }
 .row .meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: .82rem; color: var(--muted); }
 .row .money { text-align: right; display: grid; gap: 2px; }
@@ -67,8 +66,6 @@ section { display: grid; gap: 14px; }
 .chip.off { color: var(--muted); border-style: dashed; }
 .row.alt { grid-template-columns: 48px minmax(0, 1fr) auto; background: var(--bg); }
 .row.alt img, .row.alt .noimg { width: 48px; height: 48px; }
-.notes { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.notes li { background: var(--warn-bg); border-radius: 8px; padding: 8px 12px; }
 .btn { justify-self: start; display: inline-block; background: var(--accent); color: var(--surface);
   padding: 10px 18px; border-radius: 8px; text-decoration: none; font-weight: 600; }
 .why { font-size: .85rem; color: var(--accent); }
@@ -127,13 +124,13 @@ def inline_images(urls: list[str], fetch: Callable[[str], Optional[bytes]]) -> d
     """url → data: URI of its thumbnail (`fetch` returns the small JPEG; fetched in parallel)."""
     from concurrent.futures import ThreadPoolExecutor
 
-    def small(u: str) -> str:
+    def _abs(u: str) -> str:
         # `fetch` asks the CDN for the small size itself.
         return "https:" + u if u.startswith("//") else u
 
     def one(u: str) -> tuple[str, Optional[str]]:
         try:
-            data = fetch(small(u))
+            data = fetch(_abs(u))
         except Exception:
             data = None
         return u, ("data:image/jpeg;base64," + base64.b64encode(data).decode()) if data else None
@@ -185,6 +182,21 @@ def _decision(d: dict) -> str:
             f'<div class="ct"><h3>{_e(d["title"])}</h3>{pill}</div>{date}{facts}{warn}{link}</div></article>')
 
 
+def _head(eyebrow: str, title: str, label: str, total: Optional[float]) -> str:
+    right = (f'<div class="sum"><div class="eyebrow">{label}</div><div class="total">{eur(total)}</div></div>'
+             if total is not None else "")
+    return f'<header class="head"><div><div class="eyebrow">{eyebrow}</div><h1>{_e(title)}</h1></div>{right}</header>'
+
+
+def _money(goods: float, ship: float, duty: float, off: float) -> str:
+    return _breakdown([("Ware", goods, "--goods"), ("Versand", ship, "--ship"),
+                       ("Einfuhrabgaben", duty, "--duty"), ("Rabatte", -off, "--off")])
+
+
+def _kind_chip(kind: str) -> str:
+    return f'<span class="chip {"choice" if kind == "Choice" else "global"}">{_e(kind)}</span>'
+
+
 def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
     """
     lists: [{name, total, goods, ship, duty, discount, latest, slowest, summary,
@@ -196,12 +208,7 @@ def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
     """
     out = []
     for L in lists:
-        top = (f'<header class="head"><div><div class="eyebrow">Einkaufsliste · {len(L["items"])} Teile</div>'
-               f'<h1>{_e(L["name"])}</h1></div>')
-        if L.get("total") is not None:
-            top += (f'<div class="sum"><div class="eyebrow">an der Kasse</div>'
-                    f'<div class="total">{eur(L["total"])}</div></div>')
-        top += "</header>"
+        top = _head(f'Einkaufsliste · {len(L["items"])} Teile', L["name"], "an der Kasse", L.get("total"))
         lead = ""
         if L.get("latest"):
             lead = (f'<p class="lead">Alles da bis <b>{_e(L["latest"])}</b>'
@@ -214,13 +221,12 @@ def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
                    + "".join(_decision(d) for d in L["decisions"]) + "</div></section>")
         money = ""
         if L.get("total") is not None:
-            money = _breakdown([("Ware", L["goods"], "--goods"), ("Versand", L["ship"], "--ship"),
-                                ("Einfuhrabgaben", L["duty"], "--duty"), ("Rabatte", -L["discount"], "--off")])
+            money = _money(L["goods"], L["ship"], L["duty"], L["discount"])
         go = (f'<div class="go"><a class="btn" href="{_e(L["checkout_url"])}" target="_blank" rel="noopener">'
               f'Zur Kasse mit allen {len(L["items"])} Teilen</a><span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
         rows = []
         for it in L["items"]:
-            chips = [f'<span class="chip {"choice" if it["kind"] == "Choice" else "global"}">{_e(it["kind"])}</span>']
+            chips = [_kind_chip(it["kind"])]
             if it.get("slowest"):
                 chips.append('<span class="chip global">am langsamsten</span>')
             if it.get("optional"):
@@ -261,15 +267,12 @@ def plan_page(name: str, picks: list[dict], total: dict, stamp: str) -> str:
         return (f'<div class="row{" alt" if alt else ""}">{_img(o.get("img"))}<div class="t">'
                 f'<a class="title" href="{_e(o["url"])}" target="_blank" rel="noopener">{_e(o["title"])}</a>'
                 f'<div class="meta"><span>{_e(o["buy"])}</span>'
-                f'<span class="chip {"choice" if o["kind"] == "Choice" else "global"}">{_e(o["kind"])}</span>'
+                f'{_kind_chip(o["kind"])}'
                 f'<span>{_e(o["days"])}</span></div></div>'
                 f'<div class="money"><b>{eur(o["net"])}</b>{diff}</div></div>')
 
-    out = [f'<div class="head"><div><div class="eyebrow">Vergleich · {len(picks)} Teile</div><h1>{_e(name)}</h1></div>'
-           f'<div style="text-align:right"><div class="eyebrow">Plan gesamt</div>'
-           f'<div class="total">{eur(total["total"])}</div></div></div>',
-           _breakdown([("Ware", total["goods"], "--goods"), ("Versand", total["ship"], "--ship"),
-                       ("Einfuhrabgaben", total["duty"], "--duty"), ("Rabatte", -total["saved"], "--off")])]
+    out = [_head(f"Vergleich · {len(picks)} Teile", name, "Plan gesamt", total["total"]),
+           _money(total["goods"], total["ship"], total["duty"], total["saved"])]
     for p in picks:
         alts = "".join(offer_row(a, True) for a in p["alts"])
         why = f'<div class="why">{_e(p["why"])}</div>' if p.get("why") else ""

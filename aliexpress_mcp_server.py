@@ -1168,11 +1168,10 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     """
     Cheapest way to get at least `pieces` pieces from one product: compares
     pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping and the
-    store's discounts/coupons (ranked by net price; lists every discount). Non-Choice
-    shipping is measured as A + B per extra unit; Choice shipping counts as
-    free when the Choice part of the order is over the threshold. Every cart
-    line also pays import charges (EU, ship to DE: about 3.57 per line, not
-    per piece), so one bigger pack beats two lines.
+    store's discounts/coupons and the import charge per cart line (ranked by
+    net price; lists every discount). Non-Choice shipping is measured as
+    A + B per extra unit; Choice shipping counts as free when the Choice part
+    of the order is over the threshold.
 
     Args:
         item_id: AliExpress item ID.
@@ -1223,7 +1222,7 @@ def get_discounts(item_id: str, subtotal: float = 0) -> str:
     The product's "Discounts & coupon codes": automatic store discount tiers,
     store coupons (collect / follow / code), coins. With `subtotal` (your
     order total in this store) it says what applies and what the next tier
-    would give. best_offer and plan_basket already apply these.
+    would give. best_offer and shop_list already apply these.
 
     Args:
         item_id: AliExpress item ID.
@@ -1727,7 +1726,7 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
                   + f", then remove_from_cart {ln['cart_id']}",
         })
     if cache:
-        ALT_CACHE_FILE.write_text(json.dumps(cache))
+        private.write_json(ALT_CACHE_FILE, cache)
     switch = list(out)
     if len(switch) > 1:
         moved = {d["cart_id"] for d in switch}
@@ -2050,20 +2049,14 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     of delivery. When the report says variant names repeat or a variant is
     suspiciously cheap, look at get_variant_images and set `match`.
 
-    apply=True: adds or re-sizes the planned lines, removes lines this MCP
-    added earlier for these products that the plan no longer uses (never the
-    user's own lines), unchecks everything else, checks the plan (AliExpress
-    keeps at most 10 checked) and returns the checkout link with all plan
-    lines, then compares plan and cart (shipping, delivery).
+    apply=True: adds or re-sizes the planned lines and removes the lines
+    this MCP added earlier for this list's products or `list_name` that the
+    plan replaced — never the user's own lines, never other lists. Collects
+    the store coupon worth having, ticks the plan, prices it at checkout,
+    returns the checkout link with every plan line and compares plan and cart.
 
-    Deletions are scoped to candidate products of this shopping list and to
-    lines the MCP added earlier under the same `list_name`. Lines the MCP
-    added for other lists are left untouched.
-
-    Every cart line costs import charges at checkout (EU, ship to DE: about
-    3.57 per line, whatever its price or quantity). The plan counts them, so
-    it prefers one bigger pack over two lines; tell the user when an item
-    on the list is only "to compare" — each such line costs the duty too.
+    Every cart line pays an import charge (about 3.57 € to DE) whatever its
+    quantity; the plan counts it, so one bigger pack beats two lines.
 
     Args:
         items: The shopping list (see above).
@@ -2114,34 +2107,6 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
         return text + "\n\n" + _apply_plan(cookies, plan)
     except Exception as e:
         return text + f"\n\nApplying failed: {e}"
-
-
-@mcp.tool()
-def plan_basket(items: list[str]) -> str:
-    """
-    Price fixed cart lines before they go into the cart (shop_list without
-    searching or optimizing): shipping per line, Choice threshold, store
-    discounts, delivery.
-
-    Args:
-        items: Lines "item_id:sku_id:quantity" (sku_id from get_product_variants).
-    """
-    specs = []
-    for raw in items:
-        parts = [x.strip() for x in str(raw).split(":")]
-        if len(parts) < 2:
-            return f"{raw}: expected item_id:sku_id:quantity"
-        q = int(parts[2]) if len(parts) > 2 and parts[2] else 1
-        spec = {"need": parts[0], "item_ids": [parts[0]], "qty": q}
-        if parts[1]:
-            spec["sku_id"] = parts[1]
-        else:
-            spec["pieces"] = q
-        specs.append(spec)
-    try:
-        return _fmt_plan(_plan(specs))
-    except PermissionError:
-        return AUTH_EXPIRED_MSG
 
 
 @mcp.tool()
@@ -2362,10 +2327,8 @@ def _checkout_preview_text(cookies: dict[str, str], cart_ids: list[str]) -> str:
 def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") -> str:
     """
     What checkout would really charge — read from AliExpress's own checkout
-    page, nothing is bought. Goods, discounts, shipping per store, the
-    estimated import charges (EU: about 3.57 per cart line) and the total,
-    plus the slowest line and the checkout link. Works for any number of
-    lines: the cart page's limit of 10 checked lines does not apply.
+    page, nothing is bought: goods, discounts, shipping, import charges,
+    total, the slowest line and the checkout link.
 
     Which lines: `cart_ids`, else the lines of `list_name`, else the only
     list there is, else the lines checked on the cart page.
@@ -2459,24 +2422,10 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
 def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = "",
               options: Optional[list[dict]] = None, alternatives: bool = True) -> str:
     """
-    The whole AliExpress cart, sorted so it can be understood (read-only).
-
-    First every shopping list (see shop_list / set_cart_list): its lines with
-    what each is for, [x] when ticked on the cart page, and — per list — what
-    checkout really charges (goods, shipping, import charges, total) and the
-    checkout link with all its lines. The cart page keeps at most 10 lines
-    ticked; that does not matter for the list: the link takes all of them.
-    Lines not on the list but naming the same part are flagged as leftovers.
-
-    Then the other lines, grouped into "Shipped by AliExpress" (Choice: one
-    shipment, free above a threshold) and "Shipped by global sellers"
-    (shipping per cart line), the cart page's own total for the ticked lines,
-    a shipping analysis, and other channel carts (e.g. Combo Blast).
-
-    It also writes the overview page (cart.html) for an artifact: the
-    checkout total, then "Zu entscheiden" — every choice with its effect on
-    price and delivery (global lines → their best Choice offer, dropping the
-    optional parts, leftovers) — then the parts. Add your own reading:
+    The cart, read-only: each shopping list with its lines, its checkout
+    total and checkout link, leftovers flagged; then the other lines and a
+    shipping analysis. Writes the overview page (cart.html) with the
+    decisions (global lines → Choice offers, optional parts, leftovers).
 
     Args:
         checked_only: list only the ticked lines among the others.
@@ -2613,7 +2562,7 @@ def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None =
         lines[str(cid)] = {**lines.get(str(cid), {}), **info}
     for cid in drop or []:
         lines.pop(str(cid), None)
-    MCP_LINES_FILE.write_text(json.dumps(lines, indent=1))
+    private.write_json(MCP_LINES_FILE, lines)
 
 
 def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
@@ -2664,8 +2613,7 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
     Add a product variant to the AliExpress cart and check it for checkout.
     This changes the real cart (it does not buy anything). Adding a variant
     that is already in the cart raises that line's quantity instead.
-    Every cart line costs import charges at checkout (about 3.57 in the EU),
-    so prefer a bigger pack in one line over a second line.
+    Every cart line pays an import charge: prefer a bigger pack in one line.
 
     Args:
         item_id: AliExpress item ID.
