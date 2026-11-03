@@ -17,21 +17,21 @@ _CSS = """
 <style>
 /* Layout: one column, summary first, then parts as rows (picture | text | money). */
 :root {
-  --bg: #f5f7f6; --surface: #ffffff; --fg: #1b2420; --muted: #5d6b65; --line: #dbe2df;
-  --accent: #0f7a5c; --warn: #b4540a; --warn-bg: #fdf1e6; --goods: #2f6f8f; --ship: #8a6bb8;
-  --duty: #c2593a; --off: #7fa892;
+  --bg: #f4f4f8; --surface: #ffffff; --fg: #1c1d26; --muted: #62647a; --line: #dcdde8;
+  --accent: #3b4bd8; --warn: #b4540a; --warn-bg: #fdf1e6; --goods: #3b6fd8; --ship: #8a6bb8;
+  --duty: #c2593a; --off: #5f8f7a;
   --display: "Barlow Semi Condensed", "Arial Narrow", sans-serif;
   --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #121715; --surface: #1a211e; --fg: #e3ebe7; --muted: #95a59e; --line: #2c3632;
-  --accent: #4cc39b; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #6fb1d1; --ship: #b49ae0;
-  --duty: #e8876a; --off: #6f9a84; color-scheme: dark } }
+  --bg: #13141b; --surface: #1b1c26; --fg: #e6e7f2; --muted: #9a9cb3; --line: #2b2d3d;
+  --accent: #8f9bff; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #7fa3ff; --ship: #b49ae0;
+  --duty: #e8876a; --off: #7fb09a; color-scheme: dark } }
 :root[data-theme="dark"] {
-  --bg: #121715; --surface: #1a211e; --fg: #e3ebe7; --muted: #95a59e; --line: #2c3632;
-  --accent: #4cc39b; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #6fb1d1; --ship: #b49ae0;
-  --duty: #e8876a; --off: #6f9a84; color-scheme: dark }
+  --bg: #13141b; --surface: #1b1c26; --fg: #e6e7f2; --muted: #9a9cb3; --line: #2b2d3d;
+  --accent: #8f9bff; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #7fa3ff; --ship: #b49ae0;
+  --duty: #e8876a; --off: #7fb09a; color-scheme: dark }
 body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--body); }
 .wrap { max-width: 860px; margin: 0 auto; padding-block: 20px 40px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
@@ -114,13 +114,18 @@ h3 { text-wrap: balance; }
 .row.pick.alt { background: var(--bg); }
 .row .why { font-size: .86rem; color: var(--fg); }
 .row .diff { font-size: .84rem; color: var(--muted); }
-.sec-note { width: 100%; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+details.nt summary { cursor: pointer; color: var(--muted); font-size: .85rem; padding-block: 2px; }
+.sec-note { width: 100%; margin-top: 6px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
   background: var(--surface); color: var(--fg); font: inherit; font-size: .88rem; }
 .pickbar { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
-  padding: 12px 14px; display: grid; gap: 8px; }
-.pickbar pre { margin: 0; white-space: pre-wrap; font: .82rem/1.4 var(--mono); max-height: 30vh; overflow: auto; }
-.pickbar button { justify-self: start; background: var(--accent); color: var(--surface); border: 0; border-radius: 8px;
-  padding: 8px 16px; font: 600 .95rem var(--body); cursor: pointer; }
+  padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; justify-content: space-between; }
+.pickbar code { font: 600 1rem var(--mono); letter-spacing: .06em; }
+.code { font: 600 .72rem var(--mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; }
+.row img { cursor: zoom-in; }
+#lb { position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center;
+  background: rgba(10, 11, 18, .86); padding: 16px; cursor: zoom-out; }
+#lb.on { display: flex; }
+#lb img { max-width: min(96vw, 900px); max-height: 92vh; width: auto; height: auto; object-fit: contain; border-radius: 8px; background: #fff; }
 .chip.changed { color: var(--warn); border-color: var(--warn); }
 @media (max-width: 520px) { .row.pick { grid-template-columns: 22px 52px minmax(0, 1fr); }
   .row.pick .money { grid-column: 3; text-align: left; } }
@@ -320,33 +325,37 @@ _PICK_JS = r"""<script>
   secs.forEach(function (s) {
     var i = s.getAttribute("data-i"), r = saved["s" + i], n = saved["n" + i];
     if (r !== undefined) { var el = s.querySelector('input[value="' + r + '"]'); if (el) el.checked = true; }
-    if (n) s.querySelector(".sec-note").value = n;
+    if (n) { s.querySelector(".sec-note").value = n; s.querySelector("details.nt").open = true; }
   });
   function render() {
-    var lines = [], st = {};
+    var codes = [], st = {}, changed = 0;
     secs.forEach(function (s) {
-      var i = s.getAttribute("data-i"), r = s.querySelector("input[type=radio]:checked"), n = s.querySelector(".sec-note").value.trim();
-      var first = s.querySelector("input[type=radio]");
-      st["s" + i] = r.value; st["n" + i] = n;
-      var changed = r !== first;
-      lines.push("- " + s.getAttribute("data-sec") + ": " + r.getAttribute("data-title") +
-        (r.getAttribute("data-price") ? " (" + r.getAttribute("data-price") + ")" : "") +
-        (changed ? " [geändert]" : "") + (r.getAttribute("data-url") ? " " + r.getAttribute("data-url") : "") +
-        (n ? " | Notiz: " + n : ""));
+      var i = s.getAttribute("data-i"), r = s.querySelector("input[type=radio]:checked");
+      st["s" + i] = r.value; st["n" + i] = s.querySelector(".sec-note").value.trim();
+      if (r.value !== "0") changed++;
+      codes.push(String.fromCharCode(65 + Number(i)) + (Number(r.value) + 1));
     });
-    document.getElementById("pk-out").textContent = lines.join("\n");
+    document.getElementById("pk-out").textContent = codes.join(" ");
+    document.getElementById("pk-msg").textContent = changed ? changed + " geändert" : "wie vorgeschlagen";
     try { localStorage.setItem(key, JSON.stringify(st)); } catch (e) {}
   }
   document.addEventListener("input", render);
-  document.getElementById("pk-copy").addEventListener("click", function () {
-    var t = "Meine Auswahl:\n" + document.getElementById("pk-out").textContent, m = document.getElementById("pk-msg");
-    function done(ok) { m.textContent = ok ? "kopiert, im Chat einfügen" : "markieren und kopieren"; }
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(function () { done(true); }, function () { done(false); });
-    else done(false);
-  });
   render();
 })();
 </script>"""
+
+_LB_JS = r"""<script>
+(function () {
+  var lb = document.getElementById("lb"), big = lb.querySelector("img");
+  document.addEventListener("click", function (e) {
+    var im = e.target.closest && e.target.closest(".row img");
+    if (im) { e.preventDefault(); big.src = im.src; lb.className = "on"; }
+    else if (lb.className === "on") lb.className = "";
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") lb.className = ""; });
+})();
+</script>"""
+
 
 
 def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict],
@@ -378,6 +387,8 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
         for ci, c in enumerate(cards):
             chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>'
                             for t in c.get("tags") or [])
+            if pick:
+                chips = f'<span class="code">{chr(65 + si)}{ci + 1}</span>' + chips
             name = (f'<a class="need" href="{_e(c["url"])}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
                     if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
             kind = "why" if ci == 0 else "diff"
@@ -391,14 +402,15 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
             rows.append(f'<div class="{cls}">{radio}{_img(c["img"])}'
                         f'<div class="t">{name}<div class="meta">{chips}</div>{text}</div>'
                         f'<div class="money">{price}</div></div>')
-        note = (f'<input class="sec-note" type="text" name="n{si}" placeholder="Notiz zu {_e(sec["heading"])} (optional)">'
-                if pick else "")
+        note = (f'<details class="nt"><summary>Notiz</summary><input class="sec-note" type="text" name="n{si}" '
+                f'placeholder="Notiz zu {_e(sec["heading"])}"></details>' if pick else "")
         out.append(f'<section data-sec="{_e(sec["heading"])}" data-i="{si}"><h2>{_e(sec["heading"])}</h2>{intro}'
                    f'<div class="rows">{"".join(rows)}</div>{note}</section>')
     if pickable:
-        out.append('<div class="pickbar"><div class="eyebrow">Deine Wahl</div><pre id="pk-out"></pre>'
-                   '<button type="button" id="pk-copy">Auswahl kopieren</button>'
+        out.append('<div class="pickbar"><span>Wahl: <code id="pk-out"></code></span>'
                    '<span id="pk-msg" class="eyebrow"></span></div>')
         out.append(_PICK_JS)
+    out.append('<div id="lb" role="dialog" aria-label="Bild"><img alt=""></div>')
+    out.append(_LB_JS)
     out.append(f"<footer>Stand {_e(stamp)}. Nichts bestellt, Bezahlen ist dein Klick.</footer>")
     return _page(title, "\n".join(out))

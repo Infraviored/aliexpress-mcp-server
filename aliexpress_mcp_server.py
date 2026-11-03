@@ -2745,7 +2745,7 @@ def _report_image(card: dict) -> Optional[str]:
     url = "https:" + src if src.startswith("//") else src
     try:
         ali = any(h in url for h in ("alicdn.com", "aliexpress-media.com"))
-        r = httpx.get(url + ("_350x350.jpg" if ali and not url.endswith(("_350x350.jpg", ".png")) else ""),
+        r = httpx.get(url + ("_800x800.jpg" if ali and not url.endswith((".png", ".webp")) else ""),
                       timeout=20.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
         if r.status_code != 200 or not r.content:
             return None
