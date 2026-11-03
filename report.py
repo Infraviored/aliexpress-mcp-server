@@ -138,6 +138,12 @@ _FONTS = ('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family
           '&family=IBM+Plex+Mono:wght@400;600&family=Source+Sans+3:wght@400;600&display=swap">')
 
 
+def _url(u) -> str:
+    """Link target for a report: http(s) only, so a card cannot carry a javascript: link."""
+    u = str(u or "").strip()
+    return u if u.lower().startswith(("https://", "http://")) else ""
+
+
 def _e(s) -> str:
     return html.escape(str(s if s is not None else ""), quote=True)
 
@@ -324,7 +330,7 @@ _PICK_JS = r"""<script>
   var secs = [].slice.call(document.querySelectorAll("section[data-sec]")).filter(function (s) { return s.querySelector("input[type=radio]"); });
   secs.forEach(function (s) {
     var i = s.getAttribute("data-i"), r = saved["s" + i], n = saved["n" + i];
-    if (r !== undefined) { var el = s.querySelector('input[value="' + r + '"]'); if (el) el.checked = true; }
+    if (/^\d+$/.test(String(r))) { var el = s.querySelector('input[value="' + r + '"]'); if (el) el.checked = true; }
     if (n) { s.querySelector(".sec-note").value = n; s.querySelector("details.nt").open = true; }
   });
   function render() {
@@ -389,13 +395,13 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
                             for t in c.get("tags") or [])
             if pick:
                 chips = f'<span class="code">{chr(65 + si)}{ci + 1}</span>' + chips
-            name = (f'<a class="need" href="{_e(c["url"])}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
+            name = (f'<a class="need" href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
                     if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
             kind = "why" if ci == 0 else "diff"
             text = f'<span class="{kind}">{_e(c["text"])}</span>' if c.get("text") else ""
             price = f'<b>{_e(c["price"])}</b>' if c.get("price") else ""
             radio = (f'<input type="radio" name="s{si}" value="{ci}" data-title="{_e(c["title"])}" '
-                     f'data-url="{_e(c.get("url") or "")}" data-price="{_e(c.get("price") or "")}" '
+                     f'data-url="{_e(_url(c.get("url")))}" data-price="{_e(c.get("price") or "")}" '
                      f'{"checked" if ci == 0 else ""} aria-label="{_e(c["title"])} wählen">' if pick else "")
             cls = "row" + (" pick" if pick else "") + (" chosen" if ci == 0 and c.get("chosen") else "") \
                 + (" alt" if pick and ci > 0 else "")

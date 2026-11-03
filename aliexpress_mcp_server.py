@@ -14,6 +14,7 @@ import gzip
 import json
 import os
 import re
+import threading
 import time
 import uuid
 import hashlib
@@ -1636,7 +1637,7 @@ REPORT_DIR = Path(os.environ.get("ALIEXPRESS_REPORT_DIR", "~/aliexpress-reports"
 def _write_report(name: str, page: str) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / name
-    path.write_text(page)
+    path.write_text(page, encoding="utf-8")
     return (f"Page with pictures and links: {path}\n"
             "Publish it with the Artifact tool (file_path above; the same path keeps the same link) "
             "and open it for the user — the chat cannot show pictures.")
@@ -2722,34 +2723,65 @@ def remove_from_cart(cart_ids: list[str]) -> str:
     return "\n".join(lines)
 
 
+_REPORT_PDP_LOCK = threading.Lock()
+_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def _public_https(url: str) -> bool:
+    """True for an https URL whose host resolves only to public addresses (no loopback, LAN, metadata)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    if u.scheme != "https" or not u.hostname:
+        return False
+    try:
+        return all(ipaddress.ip_address(a[4][0]).is_global
+                   for a in socket.getaddrinfo(u.hostname, u.port or 443, proto=socket.IPPROTO_TCP))
+    except (OSError, ValueError):
+        return False
+
+
+def _cdn_picture_url(url: str) -> str:
+    """AliExpress CDN picture at 800x800, leaving URLs that already carry a size or a query alone."""
+    if "?" in url or re.search(r"_\d+x\d+\w*\.\w+$", url) or not url.lower().endswith((".jpg", ".jpeg")):
+        return url
+    return url + "_800x800.jpg"
+
+
 def _report_image(card: dict) -> Optional[str]:
-    """data: URI for one report card: its `image` (URL, local file or data: URI), else the picture of `item_id`."""
+    """data: URI for one report card: its `image` (https URL, file inside the report folder, data: URI), else the picture of `item_id`."""
     import mimetypes
     src = (card.get("image") or "").strip()
     if not src and card.get("item_id"):
-        offer = _pdp_offer(str(card["item_id"]))
+        with _REPORT_PDP_LOCK:  # one product page at a time: shared pacing, cache and cookie refresh
+            offer = _pdp_offer(str(card["item_id"]))
         if offer:
             sku = str(card.get("sku_id") or "")
             src = next((v.get("image") for v in offer["variants"]
                         if sku and str(v.get("sku_id")) == sku and v.get("image")), "") or offer.get("image") or ""
     if not src:
         return None
-    if src.startswith("data:"):
+    if src.startswith("data:image/"):
         return src
     if src.startswith(("/", "~")):
-        path = Path(src).expanduser()
-        if not path.is_file():
+        path = Path(src).expanduser().resolve()
+        # Only pictures inside the report folder: a card must not pull arbitrary files into a page.
+        if (not path.is_file() or path.suffix.lower() not in _IMAGE_EXT
+                or REPORT_DIR.resolve() not in path.parents):
             return None
         mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
         return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
     url = "https:" + src if src.startswith("//") else src
     try:
-        ali = any(h in url for h in ("alicdn.com", "aliexpress-media.com"))
-        r = httpx.get(url + ("_800x800.jpg" if ali and not url.endswith((".png", ".webp")) else ""),
-                      timeout=20.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
-        if r.status_code != 200 or not r.content:
+        if not _public_https(url):
             return None
-        mime = r.headers.get("content-type", "image/jpeg").split(";")[0]
+        if any(h in url for h in ("alicdn.com", "aliexpress-media.com")):
+            url = _cdn_picture_url(url)
+        r = httpx.get(url, timeout=20.0, headers={"User-Agent": USER_AGENT}, follow_redirects=False)
+        mime = r.headers.get("content-type", "").split(";")[0]
+        if r.status_code != 200 or not r.content or not mime.startswith("image/"):
+            return None
         return f"data:{mime};base64," + base64.b64encode(r.content).decode()
     except Exception:
         return None
@@ -2776,6 +2808,9 @@ def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
              "text": "one or two sentences", "url": link, "link_text": "...", "chosen": true}.
             A card without a resolvable picture makes the call fail and lists it.
     """
+    for sec in sections:
+        for c in sec.get("cards") or []:
+            c.setdefault("title", c.get("item_id") or "?")
     cards = [c for sec in sections for c in sec.get("cards") or []]
     if not cards:
         return "No cards: give at least one section with cards."
