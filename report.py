@@ -17,21 +17,21 @@ _CSS = """
 <style>
 /* Layout: one column, summary first, then parts as rows (picture | text | money). */
 :root {
-  --bg: #f5f7f6; --surface: #ffffff; --fg: #1b2420; --muted: #5d6b65; --line: #dbe2df;
-  --accent: #0f7a5c; --warn: #b4540a; --warn-bg: #fdf1e6; --goods: #2f6f8f; --ship: #8a6bb8;
-  --duty: #c2593a; --off: #7fa892;
+  --bg: #f4f4f8; --surface: #ffffff; --fg: #1c1d26; --muted: #62647a; --line: #dcdde8;
+  --accent: #3b4bd8; --warn: #b4540a; --warn-bg: #fdf1e6; --goods: #3b6fd8; --ship: #8a6bb8;
+  --duty: #c2593a; --off: #5f8f7a;
   --display: "Barlow Semi Condensed", "Arial Narrow", sans-serif;
   --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #121715; --surface: #1a211e; --fg: #e3ebe7; --muted: #95a59e; --line: #2c3632;
-  --accent: #4cc39b; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #6fb1d1; --ship: #b49ae0;
-  --duty: #e8876a; --off: #6f9a84; color-scheme: dark } }
+  --bg: #13141b; --surface: #1b1c26; --fg: #e6e7f2; --muted: #9a9cb3; --line: #2b2d3d;
+  --accent: #8f9bff; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #7fa3ff; --ship: #b49ae0;
+  --duty: #e8876a; --off: #7fb09a; color-scheme: dark } }
 :root[data-theme="dark"] {
-  --bg: #121715; --surface: #1a211e; --fg: #e3ebe7; --muted: #95a59e; --line: #2c3632;
-  --accent: #4cc39b; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #6fb1d1; --ship: #b49ae0;
-  --duty: #e8876a; --off: #6f9a84; color-scheme: dark }
+  --bg: #13141b; --surface: #1b1c26; --fg: #e6e7f2; --muted: #9a9cb3; --line: #2b2d3d;
+  --accent: #8f9bff; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #7fa3ff; --ship: #b49ae0;
+  --duty: #e8876a; --off: #7fb09a; color-scheme: dark }
 body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--body); }
 .wrap { max-width: 860px; margin: 0 auto; padding-block: 20px 40px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
@@ -99,11 +99,49 @@ footer { color: var(--muted); font-size: .82rem; }
 .row .need:hover { text-decoration: underline; }
 .others summary { cursor: pointer; color: var(--muted); padding-block: 6px; }
 h3 { text-wrap: balance; }
+
+/* generic report: summary tiles, notes, one row per article */
+.facts { display: flex; flex-wrap: wrap; gap: 10px; }
+.fact { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 0; display: grid; gap: 2px; }
+.fact b { font: 600 1.25rem var(--mono); font-variant-numeric: tabular-nums; }
+.fact span { color: var(--muted); font-size: .82rem; }
+.note { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 14px; }
+.note.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.note p { margin: 2px 0 0; }
+.row.chosen { box-shadow: inset 3px 0 0 var(--accent); }
+.row.pick { grid-template-columns: 22px 64px minmax(0, 1fr) auto; }
+.row.pick input[type=radio] { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+.row.pick.alt { background: var(--bg); }
+.row .why { font-size: .86rem; color: var(--fg); }
+.row .diff { font-size: .84rem; color: var(--muted); }
+details.nt summary { cursor: pointer; color: var(--muted); font-size: .85rem; padding-block: 2px; }
+.sec-note { width: 100%; margin-top: 6px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--fg); font: inherit; font-size: .88rem; }
+.pickbar { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
+  padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; justify-content: space-between; }
+.pickbar code { font: 600 1rem var(--mono); letter-spacing: .06em; }
+.code { font: 600 .72rem var(--mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; }
+.row img { cursor: zoom-in; }
+#lb { position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center;
+  background: rgba(10, 11, 18, .86); padding: 16px; cursor: zoom-out; }
+#lb.on { display: flex; }
+#lb img { max-width: min(96vw, 900px); max-height: 92vh; width: auto; height: auto; object-fit: contain; border-radius: 8px; background: #fff; }
+.chip.changed { color: var(--warn); border-color: var(--warn); }
+@media (max-width: 520px) { .row.pick { grid-template-columns: 22px 52px minmax(0, 1fr); }
+  .row.pick .money { grid-column: 3; text-align: left; } }
+.chip.ok { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+.intro { margin: 0; color: var(--muted); max-width: 65ch; }
 </style>
 """
 
 _FONTS = ('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600'
           '&family=IBM+Plex+Mono:wght@400;600&family=Source+Sans+3:wght@400;600&display=swap">')
+
+
+def _url(u) -> str:
+    """Link target for a report: http(s) only, so a card cannot carry a javascript: link."""
+    u = str(u or "").strip()
+    return u if u.lower().startswith(("https://", "http://")) else ""
 
 
 def _e(s) -> str:
@@ -283,3 +321,102 @@ def plan_page(name: str, picks: list[dict], total: dict, stamp: str) -> str:
     out.append(f"<footer>Stand {_e(stamp)}. Preis je Zeile = Ware + Versand + Einfuhrabgabe − automatische Rabatte; "
                "die Alternativen zeigen den Aufpreis zum gewählten Angebot.</footer>")
     return _page("Vergleich " + name, "\n".join(out))
+
+
+_PICK_JS = r"""<script>
+(function () {
+  var key = "report:" + document.title, saved = {};
+  try { saved = JSON.parse(localStorage.getItem(key) || "{}"); } catch (e) {}
+  var secs = [].slice.call(document.querySelectorAll("section[data-sec]")).filter(function (s) { return s.querySelector("input[type=radio]"); });
+  secs.forEach(function (s) {
+    var i = s.getAttribute("data-i"), r = saved["s" + i], n = saved["n" + i];
+    if (/^\d+$/.test(String(r))) { var el = s.querySelector('input[value="' + r + '"]'); if (el) el.checked = true; }
+    if (n) { s.querySelector(".sec-note").value = n; s.querySelector("details.nt").open = true; }
+  });
+  function render() {
+    var codes = [], st = {}, changed = 0;
+    secs.forEach(function (s) {
+      var i = s.getAttribute("data-i"), r = s.querySelector("input[type=radio]:checked");
+      st["s" + i] = r.value; st["n" + i] = s.querySelector(".sec-note").value.trim();
+      if (r.value !== "0") changed++;
+      codes.push(String.fromCharCode(65 + Number(i)) + (Number(r.value) + 1));
+    });
+    document.getElementById("pk-out").textContent = codes.join(" ");
+    document.getElementById("pk-msg").textContent = changed ? changed + " geändert" : "wie vorgeschlagen";
+    try { localStorage.setItem(key, JSON.stringify(st)); } catch (e) {}
+  }
+  document.addEventListener("input", render);
+  render();
+})();
+</script>"""
+
+_LB_JS = r"""<script>
+(function () {
+  var lb = document.getElementById("lb"), big = lb.querySelector("img");
+  document.addEventListener("click", function (e) {
+    var im = e.target.closest && e.target.closest(".row img");
+    if (im) { e.preventDefault(); big.src = im.src; lb.className = "on"; }
+    else if (lb.className === "on") lb.className = "";
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") lb.className = ""; });
+})();
+</script>"""
+
+
+
+def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict],
+                 sections: list[dict], stamp: str) -> str:
+    """
+    The one page layout every report uses: header, summary figures, notes, then
+    sections with one row per article (small picture). Raises ValueError when a card has no picture.
+
+    facts: [{label, value}]   notes: [{text, warn: bool}]
+    sections: [{heading, intro, pick (radio per card, first card = chosen), cards: [{title, img (data: URI), price, tags, text,
+                url, link_text, chosen}]}]
+    """
+    missing = [c["title"] for sec in sections for c in sec["cards"] if not c.get("img")]
+    if missing:
+        raise ValueError("no picture for: " + "; ".join(missing))
+    out = [f'<header class="head"><div><div class="eyebrow">{_e(subtitle)}</div><h1>{_e(title)}</h1></div></header>']
+    if facts:
+        out.append('<div class="facts">' + "".join(
+            f'<div class="fact"><b>{_e(f["value"])}</b><span>{_e(f["label"])}</span></div>' for f in facts) + "</div>")
+    for n in notes:
+        out.append(f'<div class="note{" warn" if n.get("warn") else ""}"><p>{_e(n["text"])}</p></div>')
+    pickable = False
+    for si, sec in enumerate(sections):
+        intro = f'<p class="intro">{_e(sec["intro"])}</p>' if sec.get("intro") else ""
+        cards = sec["cards"]
+        pick = bool(sec.get("pick")) and len(cards) > 1
+        pickable = pickable or pick
+        rows = []
+        for ci, c in enumerate(cards):
+            chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>'
+                            for t in c.get("tags") or [])
+            if pick:
+                chips = f'<span class="code">{chr(65 + si)}{ci + 1}</span>' + chips
+            name = (f'<a class="need" href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
+                    if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
+            kind = "why" if ci == 0 else "diff"
+            text = f'<span class="{kind}">{_e(c["text"])}</span>' if c.get("text") else ""
+            price = f'<b>{_e(c["price"])}</b>' if c.get("price") else ""
+            radio = (f'<input type="radio" name="s{si}" value="{ci}" data-title="{_e(c["title"])}" '
+                     f'data-url="{_e(_url(c.get("url")))}" data-price="{_e(c.get("price") or "")}" '
+                     f'{"checked" if ci == 0 else ""} aria-label="{_e(c["title"])} wählen">' if pick else "")
+            cls = "row" + (" pick" if pick else "") + (" chosen" if ci == 0 and c.get("chosen") else "") \
+                + (" alt" if pick and ci > 0 else "")
+            rows.append(f'<div class="{cls}">{radio}{_img(c["img"])}'
+                        f'<div class="t">{name}<div class="meta">{chips}</div>{text}</div>'
+                        f'<div class="money">{price}</div></div>')
+        note = (f'<details class="nt"><summary>Notiz</summary><input class="sec-note" type="text" name="n{si}" '
+                f'placeholder="Notiz zu {_e(sec["heading"])}"></details>' if pick else "")
+        out.append(f'<section data-sec="{_e(sec["heading"])}" data-i="{si}"><h2>{_e(sec["heading"])}</h2>{intro}'
+                   f'<div class="rows">{"".join(rows)}</div>{note}</section>')
+    if pickable:
+        out.append('<div class="pickbar"><span>Wahl: <code id="pk-out"></code></span>'
+                   '<span id="pk-msg" class="eyebrow"></span></div>')
+        out.append(_PICK_JS)
+    out.append('<div id="lb" role="dialog" aria-label="Bild"><img alt=""></div>')
+    out.append(_LB_JS)
+    out.append(f"<footer>Stand {_e(stamp)}. Nichts bestellt, Bezahlen ist dein Klick.</footer>")
+    return _page(title, "\n".join(out))
