@@ -109,6 +109,21 @@ h3 { text-wrap: balance; }
 .note.warn { border-left-color: var(--warn); background: var(--warn-bg); }
 .note p { margin: 2px 0 0; }
 .row.chosen { box-shadow: inset 3px 0 0 var(--accent); }
+.row.pick { grid-template-columns: 22px 64px minmax(0, 1fr) auto; }
+.row.pick input[type=radio] { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+.row.pick.alt { background: var(--bg); }
+.row .why { font-size: .86rem; color: var(--fg); }
+.row .diff { font-size: .84rem; color: var(--muted); }
+.sec-note { width: 100%; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--fg); font: inherit; font-size: .88rem; }
+.pickbar { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
+  padding: 12px 14px; display: grid; gap: 8px; }
+.pickbar pre { margin: 0; white-space: pre-wrap; font: .82rem/1.4 var(--mono); max-height: 30vh; overflow: auto; }
+.pickbar button { justify-self: start; background: var(--accent); color: var(--surface); border: 0; border-radius: 8px;
+  padding: 8px 16px; font: 600 .95rem var(--body); cursor: pointer; }
+.chip.changed { color: var(--warn); border-color: var(--warn); }
+@media (max-width: 520px) { .row.pick { grid-template-columns: 22px 52px minmax(0, 1fr); }
+  .row.pick .money { grid-column: 3; text-align: left; } }
 .chip.ok { color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .intro { margin: 0; color: var(--muted); max-width: 65ch; }
 </style>
@@ -297,6 +312,43 @@ def plan_page(name: str, picks: list[dict], total: dict, stamp: str) -> str:
     return _page("Vergleich " + name, "\n".join(out))
 
 
+_PICK_JS = r"""<script>
+(function () {
+  var key = "report:" + document.title, saved = {};
+  try { saved = JSON.parse(localStorage.getItem(key) || "{}"); } catch (e) {}
+  var secs = [].slice.call(document.querySelectorAll("section[data-sec]")).filter(function (s) { return s.querySelector("input[type=radio]"); });
+  secs.forEach(function (s) {
+    var i = s.getAttribute("data-i"), r = saved["s" + i], n = saved["n" + i];
+    if (r !== undefined) { var el = s.querySelector('input[value="' + r + '"]'); if (el) el.checked = true; }
+    if (n) s.querySelector(".sec-note").value = n;
+  });
+  function render() {
+    var lines = [], st = {};
+    secs.forEach(function (s) {
+      var i = s.getAttribute("data-i"), r = s.querySelector("input[type=radio]:checked"), n = s.querySelector(".sec-note").value.trim();
+      var first = s.querySelector("input[type=radio]");
+      st["s" + i] = r.value; st["n" + i] = n;
+      var changed = r !== first;
+      lines.push("- " + s.getAttribute("data-sec") + ": " + r.getAttribute("data-title") +
+        (r.getAttribute("data-price") ? " (" + r.getAttribute("data-price") + ")" : "") +
+        (changed ? " [geändert]" : "") + (r.getAttribute("data-url") ? " " + r.getAttribute("data-url") : "") +
+        (n ? " | Notiz: " + n : ""));
+    });
+    document.getElementById("pk-out").textContent = lines.join("\n");
+    try { localStorage.setItem(key, JSON.stringify(st)); } catch (e) {}
+  }
+  document.addEventListener("input", render);
+  document.getElementById("pk-copy").addEventListener("click", function () {
+    var t = "Meine Auswahl:\n" + document.getElementById("pk-out").textContent, m = document.getElementById("pk-msg");
+    function done(ok) { m.textContent = ok ? "kopiert, im Chat einfügen" : "markieren und kopieren"; }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(function () { done(true); }, function () { done(false); });
+    else done(false);
+  });
+  render();
+})();
+</script>"""
+
+
 def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict],
                  sections: list[dict], stamp: str) -> str:
     """
@@ -304,7 +356,7 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
     sections with one row per article (small picture). Raises ValueError when a card has no picture.
 
     facts: [{label, value}]   notes: [{text, warn: bool}]
-    sections: [{heading, intro, cards: [{title, img (data: URI), price, tags, text,
+    sections: [{heading, intro, pick (radio per card, first card = chosen), cards: [{title, img (data: URI), price, tags, text,
                 url, link_text, chosen}]}]
     """
     missing = [c["title"] for sec in sections for c in sec["cards"] if not c.get("img")]
@@ -316,19 +368,37 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
             f'<div class="fact"><b>{_e(f["value"])}</b><span>{_e(f["label"])}</span></div>' for f in facts) + "</div>")
     for n in notes:
         out.append(f'<div class="note{" warn" if n.get("warn") else ""}"><p>{_e(n["text"])}</p></div>')
-    for sec in sections:
+    pickable = False
+    for si, sec in enumerate(sections):
         intro = f'<p class="intro">{_e(sec["intro"])}</p>' if sec.get("intro") else ""
+        cards = sec["cards"]
+        pick = bool(sec.get("pick")) and len(cards) > 1
+        pickable = pickable or pick
         rows = []
-        for c in sec["cards"]:
+        for ci, c in enumerate(cards):
             chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>'
                             for t in c.get("tags") or [])
-            text = f'<span>{_e(c["text"])}</span>' if c.get("text") else ""
             name = (f'<a class="need" href="{_e(c["url"])}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
                     if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
+            kind = "why" if ci == 0 else "diff"
+            text = f'<span class="{kind}">{_e(c["text"])}</span>' if c.get("text") else ""
             price = f'<b>{_e(c["price"])}</b>' if c.get("price") else ""
-            rows.append(f'<div class="row{" chosen" if c.get("chosen") else ""}">{_img(c["img"])}'
-                        f'<div class="t">{name}<div class="meta">{chips}{text}</div></div>'
+            radio = (f'<input type="radio" name="s{si}" value="{ci}" data-title="{_e(c["title"])}" '
+                     f'data-url="{_e(c.get("url") or "")}" data-price="{_e(c.get("price") or "")}" '
+                     f'{"checked" if ci == 0 else ""} aria-label="{_e(c["title"])} wählen">' if pick else "")
+            cls = "row" + (" pick" if pick else "") + (" chosen" if ci == 0 and c.get("chosen") else "") \
+                + (" alt" if pick and ci > 0 else "")
+            rows.append(f'<div class="{cls}">{radio}{_img(c["img"])}'
+                        f'<div class="t">{name}<div class="meta">{chips}</div>{text}</div>'
                         f'<div class="money">{price}</div></div>')
-        out.append(f'<section><h2>{_e(sec["heading"])}</h2>{intro}<div class="rows">{"".join(rows)}</div></section>')
+        note = (f'<input class="sec-note" type="text" name="n{si}" placeholder="Notiz zu {_e(sec["heading"])} (optional)">'
+                if pick else "")
+        out.append(f'<section data-sec="{_e(sec["heading"])}" data-i="{si}"><h2>{_e(sec["heading"])}</h2>{intro}'
+                   f'<div class="rows">{"".join(rows)}</div>{note}</section>')
+    if pickable:
+        out.append('<div class="pickbar"><div class="eyebrow">Deine Wahl</div><pre id="pk-out"></pre>'
+                   '<button type="button" id="pk-copy">Auswahl kopieren</button>'
+                   '<span id="pk-msg" class="eyebrow"></span></div>')
+        out.append(_PICK_JS)
     out.append(f"<footer>Stand {_e(stamp)}. Nichts bestellt, Bezahlen ist dein Klick.</footer>")
     return _page(title, "\n".join(out))

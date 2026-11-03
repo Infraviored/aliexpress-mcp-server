@@ -50,3 +50,10 @@ def test_generic_page_refuses_cards_without_picture():
     import pytest
     with pytest.raises(ValueError, match="Cover without"):
         report.generic_page("T", "", [], [], [{"heading": "H", "cards": [_card(title="Cover without", img=None)]}], "now")
+
+
+def test_generic_page_pick_mode_has_radios_and_valid_script():
+    sec = {"heading": "Teil", "pick": True, "cards": [_card(chosen=True), _card(title="Alt", text="anders")]}
+    page = report.generic_page("T", "", [], [], [sec], "now")
+    assert page.count('type="radio"') == 2 and "checked" in page and "pk-copy" in page
+    assert "\\n" in page.split("<script>")[1]  # JS keeps escaped newlines, not real ones inside strings
