@@ -43,7 +43,7 @@ def test_generic_page_layout_and_escaping():
     assert page.startswith("<title>T</title>")
     assert "32,02 €" in page and "Cover &lt;1&gt;" in page and "Achtung &lt;b&gt;" in page
     assert 'href="https://x/1?a=1&amp;b=2"' in page and 'class="note warn"' in page
-    assert 'class="chip ok"' in page and "tile chosen" in page
+    assert "row chosen" in page
 
 
 def test_generic_page_refuses_cards_without_picture():

@@ -100,7 +100,7 @@ footer { color: var(--muted); font-size: .82rem; }
 .others summary { cursor: pointer; color: var(--muted); padding-block: 6px; }
 h3 { text-wrap: balance; }
 
-/* generic report: summary tiles, notes, picture tiles */
+/* generic report: summary tiles, notes, one row per article */
 .facts { display: flex; flex-wrap: wrap; gap: 10px; }
 .fact { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 0; display: grid; gap: 2px; }
 .fact b { font: 600 1.25rem var(--mono); font-variant-numeric: tabular-nums; }
@@ -108,15 +108,7 @@ h3 { text-wrap: balance; }
 .note { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 14px; }
 .note.warn { border-left-color: var(--warn); background: var(--warn-bg); }
 .note p { margin: 2px 0 0; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 14px; }
-.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: grid; grid-template-rows: auto 1fr; min-width: 0; }
-.tile.chosen { border-color: var(--accent); }
-.tile img { width: 100%; max-width: 100%; aspect-ratio: 1 / 1; object-fit: cover; display: block; background: var(--line); }
-.tile .b { padding: 10px 12px 12px; display: grid; gap: 6px; align-content: start; min-width: 0; }
-.tile h3 { margin: 0; font: 600 1rem var(--body); }
-.tile .price { font: 600 1.05rem var(--mono); font-variant-numeric: tabular-nums; }
-.tile p { margin: 0; color: var(--muted); font-size: .88rem; }
-.tile a.go-link { font-size: .85rem; overflow-wrap: anywhere; }
+.row.chosen { box-shadow: inset 3px 0 0 var(--accent); }
 .chip.ok { color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .intro { margin: 0; color: var(--muted); max-width: 65ch; }
 </style>
@@ -309,7 +301,7 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
                  sections: list[dict], stamp: str) -> str:
     """
     The one page layout every report uses: header, summary figures, notes, then
-    sections of picture tiles. Raises ValueError when a card has no picture.
+    sections with one row per article (small picture). Raises ValueError when a card has no picture.
 
     facts: [{label, value}]   notes: [{text, warn: bool}]
     sections: [{heading, intro, cards: [{title, img (data: URI), price, tags, text,
@@ -326,17 +318,17 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
         out.append(f'<div class="note{" warn" if n.get("warn") else ""}"><p>{_e(n["text"])}</p></div>')
     for sec in sections:
         intro = f'<p class="intro">{_e(sec["intro"])}</p>' if sec.get("intro") else ""
-        tiles = []
+        rows = []
         for c in sec["cards"]:
             chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>'
                             for t in c.get("tags") or [])
-            price = f'<div class="price">{_e(c["price"])}</div>' if c.get("price") else ""
-            text = f'<p>{_e(c["text"])}</p>' if c.get("text") else ""
-            link = (f'<a class="go-link" href="{_e(c["url"])}" target="_blank" rel="noopener">'
-                    f'{_e((c.get("link_text") or "Zum Angebot")[:70])}</a>' if c.get("url") else "")
-            tiles.append(f'<article class="tile{" chosen" if c.get("chosen") else ""}">{_img(c["img"])}'
-                         f'<div class="b"><h3>{_e(c["title"])}</h3>{price}'
-                         f'<div class="meta">{chips}</div>{text}{link}</div></article>')
-        out.append(f'<section><h2>{_e(sec["heading"])}</h2>{intro}<div class="tiles">{"".join(tiles)}</div></section>')
+            text = f'<span>{_e(c["text"])}</span>' if c.get("text") else ""
+            name = (f'<a class="need" href="{_e(c["url"])}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
+                    if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
+            price = f'<b>{_e(c["price"])}</b>' if c.get("price") else ""
+            rows.append(f'<div class="row{" chosen" if c.get("chosen") else ""}">{_img(c["img"])}'
+                        f'<div class="t">{name}<div class="meta">{chips}{text}</div></div>'
+                        f'<div class="money">{price}</div></div>')
+        out.append(f'<section><h2>{_e(sec["heading"])}</h2>{intro}<div class="rows">{"".join(rows)}</div></section>')
     out.append(f"<footer>Stand {_e(stamp)}. Nichts bestellt, Bezahlen ist dein Klick.</footer>")
     return _page(title, "\n".join(out))
