@@ -2722,6 +2722,79 @@ def remove_from_cart(cart_ids: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _report_image(card: dict) -> Optional[str]:
+    """data: URI for one report card: its `image` (URL, local file or data: URI), else the picture of `item_id`."""
+    import mimetypes
+    src = (card.get("image") or "").strip()
+    if not src and card.get("item_id"):
+        offer = _pdp_offer(str(card["item_id"]))
+        if offer:
+            sku = str(card.get("sku_id") or "")
+            src = next((v.get("image") for v in offer["variants"]
+                        if sku and str(v.get("sku_id")) == sku and v.get("image")), "") or offer.get("image") or ""
+    if not src:
+        return None
+    if src.startswith("data:"):
+        return src
+    if src.startswith(("/", "~")):
+        path = Path(src).expanduser()
+        if not path.is_file():
+            return None
+        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
+    url = "https:" + src if src.startswith("//") else src
+    try:
+        ali = any(h in url for h in ("alicdn.com", "aliexpress-media.com"))
+        r = httpx.get(url + ("_350x350.jpg" if ali and not url.endswith(("_350x350.jpg", ".png")) else ""),
+                      timeout=20.0, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
+        if r.status_code != 200 or not r.content:
+            return None
+        mime = r.headers.get("content-type", "image/jpeg").split(";")[0]
+        return f"data:{mime};base64," + base64.b64encode(r.content).decode()
+    except Exception:
+        return None
+
+
+@mcp.tool()
+def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
+                facts: list[dict] = None, notes: list[dict] = None) -> str:
+    """
+    Build THE report page for the user: always use this, never write report
+    HTML by hand, so every report looks the same. Pictures are mandatory.
+
+    Args:
+        name: File name without extension (e.g. "tesla-camera-covers").
+        title: Page title, a short name.
+        subtitle: One line above the title (topic, date).
+        facts: Summary figures at the top: [{"label": "Cart without import charge", "value": "32,02 €"}].
+        notes: Callouts: [{"text": "...", "warn": true}] (warn = orange, for risks and open questions).
+        sections: [{"heading": "...", "intro": "...", "cards": [card, ...]}] where card =
+            {"title": "...", "item_id": "1005012122426554"  (picture is fetched from the product page)
+             or "image": URL | /local/file.jpg | data: URI,
+             "sku_id": optional, takes that variant's picture,
+             "price": "3,15 €", "tags": ["Choice", "8.–13.11.", "✓ in cart"],
+             "text": "one or two sentences", "url": link, "link_text": "...", "chosen": true}.
+            A card without a resolvable picture makes the call fail and lists it.
+    """
+    cards = [c for sec in sections for c in sec.get("cards") or []]
+    if not cards:
+        return "No cards: give at least one section with cards."
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for c, img in zip(cards, ex.map(_report_image, cards)):
+            c["img"] = img
+    for sec in sections:
+        sec.setdefault("cards", [])
+        sec.setdefault("heading", "")
+    try:
+        page = report.generic_page(title, subtitle, facts or [], notes or [], sections,
+                                   time.strftime("%d.%m.%Y %H:%M"))
+    except ValueError as e:
+        return (f"Report not written: {e}. Give each of those cards an item_id or an image "
+                "(URL, local file, data: URI), then call make_report again." + blocked_msg())
+    return _write_report(f"{re.sub(r'[^A-Za-z0-9_-]+', '-', name).strip('-') or 'report'}.html", page)
+
+
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

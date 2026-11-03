@@ -29,3 +29,24 @@ def test_plan_page():
     page = report.plan_page("L", [{"need": "N", "pieces": 1, "why": None, "winner": o, "alts": [dict(o, diff=0.24)]}],
                             {"goods": 1.05, "ship": 0, "duty": 3.57, "saved": 0, "total": 4.62, "slowest": None}, "now")
     assert "+0,24 €" in page and "4,62 €" in page
+
+
+def _card(**kw):
+    return dict({"title": "Cover <1>", "img": "data:image/jpeg;base64,AAAA", "price": "3,15 €",
+                 "tags": ["✓ im Korb", "Choice"], "url": "https://x/1?a=1&b=2"}, **kw)
+
+
+def test_generic_page_layout_and_escaping():
+    page = report.generic_page("T", "Sub", [{"label": "Summe", "value": "32,02 €"}],
+                               [{"text": "Achtung <b>", "warn": True}],
+                               [{"heading": "H", "cards": [_card(chosen=True)]}], "now")
+    assert page.startswith("<title>T</title>")
+    assert "32,02 €" in page and "Cover &lt;1&gt;" in page and "Achtung &lt;b&gt;" in page
+    assert 'href="https://x/1?a=1&amp;b=2"' in page and 'class="note warn"' in page
+    assert 'class="chip ok"' in page and "tile chosen" in page
+
+
+def test_generic_page_refuses_cards_without_picture():
+    import pytest
+    with pytest.raises(ValueError, match="Cover without"):
+        report.generic_page("T", "", [], [], [{"heading": "H", "cards": [_card(title="Cover without", img=None)]}], "now")

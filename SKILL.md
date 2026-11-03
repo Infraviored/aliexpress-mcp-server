@@ -25,6 +25,16 @@ Cart questions: `view_cart(summary=…, options=…)` — pass your recommendati
 publish its page the same way. Existing lines onto a list: `set_cart_list`.
 Real total for any lines: `checkout_preview`. One product, N pieces: `best_offer`.
 
+## Reports
+
+Every page for the user (research, comparison, "what did you find") comes from
+`make_report`, never from hand-written HTML: one layout, always with pictures.
+Each card needs `item_id` (picture from the product page) or `image` (URL,
+local file). Put the verdict into `notes`, the totals into `facts`, mark what
+is in the cart with a "✓ im Korb" tag. The cart and the plan pages
+(`view_cart`, `shop_list`) have their own builders. Publish the file it names
+with the Artifact tool, or hand it over as a file if that tool is missing.
+
 ## Rules
 
 - Choice cheaper than a global seller (goods + shipping + import charge)? Take
