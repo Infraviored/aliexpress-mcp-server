@@ -46,7 +46,7 @@ def ladders(variants: list[dict]) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {}
     for v in variants:
         if v.get("salable", True) and v.get("price") is not None:
-            groups.setdefault(base_name(v["label"]), []).append(v)
+            groups.setdefault(v.get("group") or base_name(v["label"]), []).append(v)
     out = {}
     for k, vs in groups.items():
         sizes = {v["pack"] for v in vs}
@@ -157,7 +157,7 @@ def best_ways(
     # variants without a ladder are their own one-rung ladders
     for v in variants:
         if v.get("salable", True) and v.get("price") is not None:
-            groups.setdefault(base_name(v["label"]) + f"#{v['sku_id']}", [v])
+            groups.setdefault((v.get("group") or base_name(v["label"])) + f"#{v['sku_id']}", [v])
     seen = set()
     for rungs in groups.values():
         for a, b in itertools.combinations_with_replacement(rungs, 2):

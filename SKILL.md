@@ -27,6 +27,15 @@ Real total for any lines: `checkout_preview`. One product, N pieces: `best_offer
 
 ## Reports
 
+**The answer to every product search is the report, nothing else.** When the user asks
+you to look for something, find a better price or compare, you finish with one
+`make_report` page: the recommendation on top (`chosen`, with a short reason), the
+alternatives below it (1–2 sentences on what differs), `"pick": True` on the section so
+he can click his choice. Hand it over as a file or artifact. Do not ask the question in
+chat, do not put it on a `decide` card (that rule is for other work, not for shopping
+choices), do not write a table in chat. In chat give two or three sentences and the
+recommendation; the page does the rest. Adding to the cart happens after he picked.
+
 Every page for the user (research, comparison, "what did you find") comes from
 `make_report`, never from hand-written HTML: one layout, always with pictures.
 Each card needs `item_id` (picture from the product page) or `image` (URL,
@@ -46,4 +55,21 @@ with the Artifact tool, or hand it over as a file if that tool is missing.
 - Hand out the list's checkout link, never "the ticked lines": the cart page
   keeps only 10 ticked, the link has no limit.
 - Ask before `remove_from_cart` on lines the MCP did not add.
-- "Bot check not passed": stop calling for 15–30 min; every call extends it.
+- Offer only what the user asked for. Every word of the request that decides the
+  product ("High Speed", "matt", "black", brand, size) must be in the offer's
+  FULL title or variant; read the title, do not shorten it into something else.
+  Never show an option that is dearer and no better than another one in the same
+  list (same promise, higher price): leave it out. Show 2–4 alternatives that differ in
+  something the user can care about (price per piece, delivery, brand, pack), and say what.
+- Pack sizes: `best_offer` reads "5PCS"/"Stück" from the variant name only. A name like
+  "5 Black" (5-spool bundle) counts as ONE piece unless you pass `packs="5 black=5; 1 black=1"`;
+  without it a request for 5 spools is priced as 5 bundles (25 spools). Check the product
+  page when `best_offer` warns that no pack size was found.
+- Fewer calls, fewer bot checks. The server pauses 2–3.5 s between calls, remembers product
+  pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
+  fast with "bot check active"). Search first, then look closely at 2–4 candidates only,
+  not every hit; never run many `best_offer` calls in a row for the same question.
+- "Bot check not passed": do not keep calling (every call extends it). Fastest way out:
+  `.venv/bin/python import_profile.py --ask` — the user passes the check once in a real Chrome
+  (remote-browser card in the dashboard, run it in the background and tell him), the cookies
+  are imported. Otherwise wait 15–30 min.

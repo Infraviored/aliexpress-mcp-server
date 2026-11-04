@@ -76,3 +76,8 @@ def test_follow_coupons_are_recognised_in_any_language():
     assert d["coupons"][0]["how"] == "follow & collect"
     d = deals.parse_discounts(_panel(_coupon(collectText="Sammeln", bizType=100)))
     assert d["coupons"][0]["how"] == "collect"
+
+
+def test_pack_size_ignores_bare_numbers():
+    assert deals.pack_size("5 Black / Germany") == 1
+    assert deals.pack_size("5PCS / Black") == 5
