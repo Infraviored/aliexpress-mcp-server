@@ -27,6 +27,15 @@ Real total for any lines: `checkout_preview`. One product, N pieces: `best_offer
 
 ## Reports
 
+**The answer to every product search is the report, nothing else.** When the user asks
+you to look for something, find a better price or compare, you finish with one
+`make_report` page: the recommendation on top (`chosen`, with a short reason), the
+alternatives below it (1–2 sentences on what differs), `"pick": True` on the section so
+he can click his choice. Hand it over as a file or artifact. Do not ask the question in
+chat, do not put it on a `decide` card (that rule is for other work, not for shopping
+choices), do not write a table in chat. In chat give two or three sentences and the
+recommendation; the page does the rest. Adding to the cart happens after he picked.
+
 Every page for the user (research, comparison, "what did you find") comes from
 `make_report`, never from hand-written HTML: one layout, always with pictures.
 Each card needs `item_id` (picture from the product page) or `image` (URL,
