@@ -25,7 +25,7 @@ import private
 
 CRED = Path(os.environ.get("ALIEXPRESS_CREDENTIALS", "~/.mcp-credentials/aliexpress.json")).expanduser()
 PROFILE = Path("~/.mcp-credentials/aliexpress-profile").expanduser()
-REMOTE_BROWSER = Path("~/repos/claude-code-voice/bin/remote-browser.mjs").expanduser()
+REMOTE_BROWSER = Path(os.environ.get("REMOTE_BROWSER", "~/repos/claude-code-voice/bin/remote-browser.mjs")).expanduser()
 LOGIN = ("xman_t", "xman_us_t", "sgcookie", "havana_tgc")
 
 
@@ -40,9 +40,12 @@ def _decrypt(key: bytes, enc: bytes) -> str:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     if enc[:3] not in (b"v10", b"v11"):
         return ""
-    d = Cipher(algorithms.AES(key), modes.CBC(b" " * 16)).decryptor()
-    p = d.update(enc[3:]) + d.finalize()
-    p = p[:-p[-1]]
+    try:
+        d = Cipher(algorithms.AES(key), modes.CBC(b" " * 16)).decryptor()
+        p = d.update(enc[3:]) + d.finalize()
+        p = p[:-p[-1]]
+    except (ValueError, IndexError):  # truncated or foreign value: skip this cookie
+        return ""
     if len(p) > 32 and not p[:32].isascii():  # newer Chrome puts a 32-byte hash in front
         p = p[32:]
     return p.decode("utf8", "replace")
@@ -51,6 +54,8 @@ def _decrypt(key: bytes, enc: bytes) -> str:
 def read_profile(profile: Path) -> tuple[dict[str, str], dict[str, float]]:
     """(cookies, days left per cookie) for aliexpress.com from a Chrome profile."""
     src = profile / "Default" / "Cookies"
+    if not src.is_file():
+        raise FileNotFoundError(f"no cookie database in {profile} (log in first: --ask)")
     key = _key()
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "c.db"
@@ -72,17 +77,25 @@ def main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
     profile = Path(args[0]).expanduser() if args else PROFILE
     if ask:
+        if not REMOTE_BROWSER.is_file():
+            print(f"{REMOTE_BROWSER} not found (set REMOTE_BROWSER)", file=sys.stderr)
+            return 1
         r = subprocess.run(["node", str(REMOTE_BROWSER), "--label", "AliExpress: einloggen / Bot-Check lösen",
                             "--url", "https://www.aliexpress.com", "--profile", str(profile), "--minutes", "30"])
         if r.returncode != 0:
             print("remote browser cancelled or expired, nothing imported", file=sys.stderr)
             return 1
-    cookies, left = read_profile(profile)
+    try:
+        cookies, left = read_profile(profile)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
     login = [n for n in LOGIN if n in cookies]
     if not login:
         print("No login cookie in the profile: log in first (use --ask).", file=sys.stderr)
         return 1
     private.write_json(CRED, {"cookies": cookies})
+    (CRED.parent / "aliexpress-botcheck.json").unlink(missing_ok=True)  # a fresh login ends the pause
     print(f"{len(cookies)} cookies written to {CRED}: " + ", ".join(sorted(cookies)))
     print("login cookies: " + ", ".join(f"{n} ({left[n]:.0f} days)" for n in login))
     return 0

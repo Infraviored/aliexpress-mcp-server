@@ -13,6 +13,9 @@ def test_cooldown_blocks_after_bot_check_and_clears(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "bot.json").read_text())["last"] <= time.time()
     m.BOT_CHECK.clear()  # a new process reads the file
     assert m._bot_cooldown_left() > 0
+    (tmp_path / "bot.json").unlink()  # cleared by another process: this one sees it at once
+    assert m._bot_cooldown_left() == 0
+    m._bot_note(True)
     m._bot_note(False)
     assert m._bot_cooldown_left() == 0 and not (tmp_path / "bot.json").exists()
 
@@ -38,3 +41,16 @@ def test_best_offer_packs_rule_and_warning(monkeypatch):
     out = f("1", 5, "black", packs="5 black=5; 1 black=1")
     assert "WARNING" not in out and "5 pcs" in out and "50.00" in out
     assert "Bad packs rule" in f("1", 5, "black", packs="oops")
+
+
+def test_best_offer_packs_mix_bundle_and_single(monkeypatch):
+    offer = {"title": "Filament", "choice": True, "variants": [
+        {"sku_id": "a", "label": "5 Black", "price": 50.0, "pack": 1, "unit": 50.0, "salable": True},
+        {"sku_id": "b", "label": "1 Black", "price": 12.0, "pack": 1, "unit": 12.0, "salable": True}]}
+    monkeypatch.setattr(m, "_pdp_offer", lambda _id: offer)
+    monkeypatch.setattr(m, "_freight", lambda o: None)
+    monkeypatch.setattr(m, "_discounts", lambda *a: [])
+    f = getattr(m.best_offer, "fn", m.best_offer)
+    out = f("1", 6, "black", packs="5 black=5; 1 black=1")
+    assert "62.00" in out
+    assert "pieces >= 1" in f("1", 6, "black", packs="5 black=0")

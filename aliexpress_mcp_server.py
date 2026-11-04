@@ -322,19 +322,19 @@ def _bot_note(blocked: bool) -> None:
 
 
 def _bot_cooldown_left() -> float:
-    """Seconds still to wait after the last bot check: asking again only deepens the block."""
-    if not BOT_CHECK:
-        try:
-            BOT_CHECK.update(json.loads(_BOT_FILE.read_text()))
-        except (OSError, ValueError):
-            return 0.0
+    """Seconds still to wait after the last bot check: asking again only deepens the block.
+    The file is the truth (other processes write and clear it), so it is read every time."""
+    try:
+        BOT_CHECK.update(json.loads(_BOT_FILE.read_text()))
+    except (OSError, ValueError):
+        BOT_CHECK.clear()
+        return 0.0
     return max(0.0, BOT_CHECK.get("last", 0) + BOT_COOLDOWN - time.time())
 
 
 def blocked_msg() -> str:
     """Why a lookup came back empty, when it was the bot check."""
-    _bot_cooldown_left()
-    if not BOT_CHECK:
+    if _bot_cooldown_left() <= 0:
         return ""
     mins = int((time.time() - BOT_CHECK["since"]) / 60)
     return (f" AliExpress bot check (captcha) not passed, blocked for {mins} min."
@@ -636,19 +636,26 @@ def _pdp_disk_load() -> dict:
         return {}
 
 
+_PDP_WRITE_LOCK = threading.Lock()
+
+
 def _pdp_disk_store(item_id: str, resp: dict) -> None:
-    data = {k: v for k, v in _pdp_disk_load().items() if time.time() - v["at"] < PDP_DISK_TTL}
-    data[item_id] = {"at": time.time(), "resp": resp}
-    for k in sorted(data, key=lambda k: data[k]["at"])[:-PDP_DISK_MAX]:
-        del data[k]
-    try:
-        _PDP_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        tmp = _PDP_FILE.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_bytes(gzip.compress(json.dumps(data).encode()))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, _PDP_FILE)
-    except OSError:
-        pass
+    import tempfile
+    with _PDP_WRITE_LOCK:  # threads of this process; other processes only ever replace whole files
+        data = {k: v for k, v in _pdp_disk_load().items() if time.time() - v["at"] < PDP_DISK_TTL}
+        data[item_id] = {"at": time.time(), "resp": resp}
+        for k in sorted(data, key=lambda k: data[k]["at"])[:-PDP_DISK_MAX]:
+            del data[k]
+        tmp = None
+        try:
+            _PDP_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=_PDP_FILE.parent, prefix=_PDP_FILE.name + ".", suffix=".tmp")  # mode 600
+            with os.fdopen(fd, "wb") as f:
+                f.write(gzip.compress(json.dumps(data).encode()))
+            os.replace(tmp, _PDP_FILE)
+        except OSError:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
 
 
 def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
@@ -1273,11 +1280,13 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
         return f"No available variant matches '{match}'."
     for rule in filter(None, (r.strip() for r in packs.split(";"))):
         words, _, n = rule.rpartition("=")
-        if not n.strip().isdigit() or not words.strip():
-            return f"Bad packs rule '{rule}': use 'words=pieces; words=pieces'."
+        if not n.strip().isdigit() or int(n) < 1 or not words.strip():
+            return f"Bad packs rule '{rule}': use 'words=pieces; words=pieces' with pieces >= 1."
         for v in _by_match(vs, words):
             v["pack"] = int(n)
             v["unit"] = v["price"] / v["pack"] if v["price"] else None
+            # "5 Black" and "1 Black" are rungs of one ladder: group them without the pack number
+            v["group"] = re.sub(r"\s+", " ", re.sub(rf"(?<![\w.]){int(n)}(?![\w.])", "", v["label"], count=1)).strip(" /-").lower()
     quote = _freight(offer)
     ways = deals.best_ways(vs, max(1, pieces), quote, offer["choice"] and choice_order_over_threshold,
                            limit=50, duty=DUTY_PER_LINE)
