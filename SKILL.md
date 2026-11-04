@@ -46,4 +46,21 @@ with the Artifact tool, or hand it over as a file if that tool is missing.
 - Hand out the list's checkout link, never "the ticked lines": the cart page
   keeps only 10 ticked, the link has no limit.
 - Ask before `remove_from_cart` on lines the MCP did not add.
-- "Bot check not passed": stop calling for 15–30 min; every call extends it.
+- Offer only what the user asked for. Every word of the request that decides the
+  product ("High Speed", "matt", "black", brand, size) must be in the offer's
+  FULL title or variant; read the title, do not shorten it into something else.
+  Never show an option that is dearer and no better than another one in the same
+  list (same promise, higher price): leave it out. Show 2–4 alternatives that differ in
+  something the user can care about (price per piece, delivery, brand, pack), and say what.
+- Pack sizes: `best_offer` reads "5PCS"/"Stück" from the variant name only. A name like
+  "5 Black" (5-spool bundle) counts as ONE piece unless you pass `packs="5 black=5; 1 black=1"`;
+  without it a request for 5 spools is priced as 5 bundles (25 spools). Check the product
+  page when `best_offer` warns that no pack size was found.
+- Fewer calls, fewer bot checks. The server pauses 2–3.5 s between calls, remembers product
+  pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
+  fast with "bot check active"). Search first, then look closely at 2–4 candidates only,
+  not every hit; never run many `best_offer` calls in a row for the same question.
+- "Bot check not passed": do not keep calling (every call extends it). Fastest way out:
+  `.venv/bin/python import_profile.py --ask` — the user passes the check once in a real Chrome
+  (remote-browser card in the dashboard, run it in the background and tell him), the cookies
+  are imported. Otherwise wait 15–30 min.

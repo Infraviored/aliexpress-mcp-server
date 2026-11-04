@@ -180,6 +180,8 @@ def mtop_call(
     """
     if cookies is None:
         cookies = load_cookies()
+    if captcha and (left := _bot_cooldown_left()) > 0:
+        raise RuntimeError(f"bot check active, paused for another {int(left)} s")
     _mtop_pace()
 
     token = _h5_token_prefix(cookies)
@@ -258,7 +260,7 @@ def mtop_call(
         # on a virtual display, retry once.
         punish_url = (data.get("data") or {}).get("url") if isinstance(data.get("data"), dict) else None
         if "FAIL_SYS_USER_VALIDATE" in ret_str:
-            BOT_CHECK["since"] = BOT_CHECK.get("since") or time.time()
+            _bot_note(True)
         # `action=deny` (after hammering past a solved slider) has no slider: wait it out.
         if captcha and punish_url and "action=captcha" in punish_url:
             import slider
@@ -269,36 +271,75 @@ def mtop_call(
                 logger.warning("slider solver failed: %s", e)
                 solved = False
             if solved:
-                BOT_CHECK.clear()
+                _bot_note(False)
                 # Passing the check sets a new token: allow one token refresh, no second captcha.
                 return mtop_call(api, version, payload, cookies=load_cookies(), retries=1, referer=referer, method=method, captcha=False)
-        elif ret_str.startswith("SUCCESS"):
-            BOT_CHECK.clear()
+        elif ret_str.startswith("SUCCESS") and BOT_CHECK:
+            _bot_note(False)
 
         return data
 
 
 # Set while AliExpress answers with a bot check we could not pass.
 BOT_CHECK: dict[str, float] = {}
-MTOP_MIN_GAP = float(os.environ.get("ALIEXPRESS_MTOP_GAP", "0.8"))
-_last_mtop = [0.0]
+MTOP_MIN_GAP = float(os.environ.get("ALIEXPRESS_MTOP_GAP", "2.0"))
+MTOP_JITTER = float(os.environ.get("ALIEXPRESS_MTOP_JITTER", "1.5"))
+BOT_COOLDOWN = float(os.environ.get("ALIEXPRESS_BOT_COOLDOWN", "600"))
+_PACE_FILE = CREDENTIALS_PATH.parent / "aliexpress-mtop-last"
+_BOT_FILE = CREDENTIALS_PATH.parent / "aliexpress-botcheck.json"
 
 
 def _mtop_pace() -> None:
-    """Keep a small gap between MTOP calls: bursts are what trigger the bot check."""
-    wait = _last_mtop[0] + MTOP_MIN_GAP - time.time()
-    if wait > 0:
-        time.sleep(wait)
-    _last_mtop[0] = time.time()
+    """Keep a gap (plus jitter) between MTOP calls, across all server processes:
+    bursts are what trigger the bot check."""
+    import fcntl
+    import random
+    _PACE_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(_PACE_FILE, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try:
+            last = float(f.read() or 0)
+        except ValueError:
+            last = 0.0
+        wait = last + MTOP_MIN_GAP + random.uniform(0, MTOP_JITTER) - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        f.seek(0)
+        f.truncate()
+        f.write(str(time.time()))
+
+
+def _bot_note(blocked: bool) -> None:
+    """Remember across processes that AliExpress asked for a bot check (or that it passed)."""
+    if blocked:
+        BOT_CHECK["since"] = BOT_CHECK.get("since") or time.time()
+        BOT_CHECK["last"] = time.time()
+        private.write_json(_BOT_FILE, {"since": BOT_CHECK["since"], "last": BOT_CHECK["last"]})
+    else:
+        BOT_CHECK.clear()
+        _BOT_FILE.unlink(missing_ok=True)
+
+
+def _bot_cooldown_left() -> float:
+    """Seconds still to wait after the last bot check: asking again only deepens the block."""
+    if not BOT_CHECK:
+        try:
+            BOT_CHECK.update(json.loads(_BOT_FILE.read_text()))
+        except (OSError, ValueError):
+            return 0.0
+    return max(0.0, BOT_CHECK.get("last", 0) + BOT_COOLDOWN - time.time())
 
 
 def blocked_msg() -> str:
     """Why a lookup came back empty, when it was the bot check."""
+    _bot_cooldown_left()
     if not BOT_CHECK:
         return ""
     mins = int((time.time() - BOT_CHECK["since"]) / 60)
     return (f" AliExpress bot check (captcha) not passed, blocked for {mins} min."
-            " Wait 10-30 min, or pass it once in a browser and re-import cookies.")
+            " Calls are paused for 10 min after a check. Fastest way out: .venv/bin/python import_profile.py --ask"
+            " (the user passes the check in the remote browser card, the cookies are imported).")
 
 
 # ─── Parsing Helpers ────────────────────────────────────────────────────────
@@ -581,6 +622,33 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
 # Product pages repeat within one deal search (variants, pictures, best_offer).
 PDP_TTL = 600
 _PDP_CACHE: dict[str, tuple[float, dict]] = {}
+# Also on disk, so a new server process (or a direct script run) does not fetch the same
+# product pages again: fewer calls, fewer bot checks. Prices change slowly enough for hours.
+PDP_DISK_TTL = float(os.environ.get("ALIEXPRESS_PDP_DISK_TTL", "10800"))
+PDP_DISK_MAX = 40
+_PDP_FILE = CREDENTIALS_PATH.parent / "aliexpress-pdp-cache.json"
+
+
+def _pdp_disk_load() -> dict:
+    try:
+        return json.loads(gzip.decompress(_PDP_FILE.read_bytes()))
+    except (OSError, ValueError, EOFError):
+        return {}
+
+
+def _pdp_disk_store(item_id: str, resp: dict) -> None:
+    data = {k: v for k, v in _pdp_disk_load().items() if time.time() - v["at"] < PDP_DISK_TTL}
+    data[item_id] = {"at": time.time(), "resp": resp}
+    for k in sorted(data, key=lambda k: data[k]["at"])[:-PDP_DISK_MAX]:
+        del data[k]
+    try:
+        _PDP_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = _PDP_FILE.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_bytes(gzip.compress(json.dumps(data).encode()))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _PDP_FILE)
+    except OSError:
+        pass
 
 
 def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
@@ -591,6 +659,10 @@ def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
     hit = _PDP_CACHE.get(item_id)
     if hit and time.time() - hit[0] < PDP_TTL:
         return hit[1]
+    disk = _pdp_disk_load().get(item_id)
+    if disk and time.time() - disk["at"] < PDP_DISK_TTL:
+        _PDP_CACHE[item_id] = (time.time(), disk["resp"])
+        return disk["resp"]
     referer = f"{BASE_URL}/item/{item_id}.html"
     payload = {
         "productId": item_id,
@@ -621,6 +693,7 @@ def _fetch_pdp_mtop(item_id: str) -> Optional[dict]:
             return None
         if ret and any("SUCCESS" in r for r in ret):
             _PDP_CACHE[item_id] = (time.time(), resp)
+            _pdp_disk_store(item_id, resp)
             return resp
         # Some endpoints return data even without SUCCESS::API_SUCCESS in ret
         if resp.get("data") and isinstance(resp["data"], dict) and resp["data"]:
@@ -1170,7 +1243,8 @@ def get_variant_images(item_id: str, match: str = ""):
 
 
 @mcp.tool()
-def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_threshold: bool = True) -> str:
+def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_threshold: bool = True,
+               packs: str = "") -> str:
     """
     Cheapest way to get at least `pieces` pieces from one product: compares
     pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping and the
@@ -1186,13 +1260,24 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
             (e.g. "5V" or "N16R8 soldered").
         choice_order_over_threshold: For Choice items, whether the whole order's
             Choice part already passes the free-shipping threshold.
+        packs: Pieces per variant when its name does not say so ("5PCS" is read
+            automatically, "5 Black" is not). Format "words=pieces; words=pieces",
+            e.g. "5 black=5; 1 black=1" for filament where "5 Black" is a bundle
+            of 5 spools. Without it every such variant counts as ONE piece.
     """
     offer = _pdp_offer(item_id)
     if not offer:
         return f"No variant data for {item_id}." + blocked_msg()
-    vs = [v for v in _by_match(offer["variants"], match) if v["salable"]]
+    vs = [dict(v) for v in _by_match(offer["variants"], match) if v["salable"]]
     if not vs:
         return f"No available variant matches '{match}'."
+    for rule in filter(None, (r.strip() for r in packs.split(";"))):
+        words, _, n = rule.rpartition("=")
+        if not n.strip().isdigit() or not words.strip():
+            return f"Bad packs rule '{rule}': use 'words=pieces; words=pieces'."
+        for v in _by_match(vs, words):
+            v["pack"] = int(n)
+            v["unit"] = v["price"] / v["pack"] if v["price"] else None
     quote = _freight(offer)
     ways = deals.best_ways(vs, max(1, pieces), quote, offer["choice"] and choice_order_over_threshold,
                            limit=50, duty=DUTY_PER_LINE)
@@ -1203,6 +1288,9 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     ways.sort(key=lambda w: (w["net"], -w["pieces"]))
     lines = [f"{offer['title'][:90]} ({item_id})",
              ("Choice" if offer["choice"] else deals.fmt_quote(quote, CURRENCY))]
+    if pieces > 1 and not packs and all(v["pack"] == 1 for v in vs):
+        lines.append("WARNING: no pack size in any variant name, so each variant is counted as ONE piece. "
+                     "If a variant is a multi-piece bundle, check the product page and pass packs=\"name=pieces\".")
     lines += [f"{i}. " + deals.fmt_way(w, CURRENCY)
               + (f" − {w['save']:.2f} ({w['save_how']}) = {w['net']:.2f} net" if w["save"] else "")
               + " · " + ", ".join(f"sku {v['sku_id']}×{q}" for v, q in w["lines"])
