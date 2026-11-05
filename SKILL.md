@@ -50,7 +50,7 @@ with the Artifact tool, or hand it over as a file if that tool is missing.
 `orders.json` and `orders.csv` into the report folder (path in the answer) and a report page with pictures
 (send that page; the chat shows no pictures). Status is normalised (wartet_auf_zahlung, in_bearbeitung,
 versandt, zugestellt, abgeschlossen, storniert, rueckerstattung) next to AliExpress' own text. `details`
-adds delivery date and tracking for open orders. It never pays, confirms or changes anything.
+adds delivery date and tracking for open orders. Cancelled orders are hidden unless `status="storniert"` or `include_cancelled=True`. It never pays, confirms or changes anything.
 
 ## Rules
 

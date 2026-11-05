@@ -2983,7 +2983,7 @@ def _order_csv(rows: list[dict], path: Path) -> None:
 
 @mcp.tool()
 def list_orders(status: str = "", since: str = "", out: str = "", details: str = "open",
-                max_pages: int = 30, report_limit: int = 40) -> str:
+                max_pages: int = 30, report_limit: int = 40, include_cancelled: bool = False) -> str:
     """
     Read "My orders" (read only: nothing is paid, confirmed or changed).
 
@@ -2997,13 +2997,15 @@ def list_orders(status: str = "", since: str = "", out: str = "", details: str =
 
     Args:
         status: Only this state: wartet_auf_zahlung, in_bearbeitung, versandt, zugestellt,
-            abgeschlossen, storniert, rueckerstattung. Empty = all.
+            abgeschlossen, storniert, rueckerstattung. Empty = all except cancelled orders
+            (they are irrelevant and hidden unless asked for).
         since: Only orders placed on/after this date (YYYY-MM-DD).
         out: Path of the JSON file (default <report folder>/orders.json).
         details: "open" = delivery date and tracking for orders that are not completed or
             cancelled (default), "all" = for every order (one call each, slow), "none".
         max_pages: Pages of 10 orders to read at most.
         report_limit: Items shown on the report page (the files have everything).
+        include_cancelled: Also list cancelled orders when `status` is empty (status="storniert" shows them too).
     """
     status = status.strip().lower()
     if status and status not in orderslib.STATES:
@@ -3015,7 +3017,9 @@ def list_orders(status: str = "", since: str = "", out: str = "", details: str =
     try:
         tab = orderslib.TAB_FOR.get(status, "all")
         rows, complete = _fetch_orders(tab, since, max(1, max_pages))
-        rows = [o for o in rows if (not status or o["status"] == status) and (not since or (o["date"] and o["date"] >= since))]
+        hide = not status and not include_cancelled
+        rows = [o for o in rows if (o["status"] == status if status else not (hide and o["status"] == "storniert"))
+                and (not since or (o["date"] and o["date"] >= since))]
         if details in ("open", "all"):
             for o in rows:
                 if details == "open" and o["status"] in ("abgeschlossen", "storniert", "rueckerstattung"):
