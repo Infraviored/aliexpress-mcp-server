@@ -32,6 +32,7 @@ import cart as cartlib
 import checkout as checkoutlib
 import report
 import deals
+import orders as orderslib
 import private
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -2932,6 +2933,169 @@ def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
         return (f"Report not written: {e}. Give each of those cards an item_id or an image "
                 "(URL, local file, data: URI), then call make_report again." + blocked_msg())
     return _write_report(f"{re.sub(r'[^A-Za-z0-9_-]+', '-', name).strip('-') or 'report'}.html", page)
+
+
+# ─── Orders (read only) ─────────────────────────────────────────────────────
+
+ORDERS_REFERER = "https://www.aliexpress.com/p/order/index.html"
+
+
+def _orders_call(payload: dict, post: bool = False, api: str = "") -> dict:
+    resp = mtop_call(api or orderslib.LIST_API, "1.0", payload, referer=ORDERS_REFERER,
+                     method="POST" if post else "GET")
+    ret = " ".join(resp.get("ret") or [])
+    if "SESSION_EXPIRED" in ret:
+        raise PermissionError("auth expired")
+    if "SUCCESS" not in ret:
+        raise RuntimeError(f"Order API returned: {ret or resp}")
+    return resp
+
+
+def _fetch_orders(tab: str, since: str, max_pages: int) -> tuple[list[dict], bool]:
+    """Orders of one tab, newest first, page by page. (orders, complete?)"""
+    resp = _orders_call(orderslib.init_payload(tab))
+    found: dict[str, dict] = {}
+    complete = True
+    for n in range(1, max_pages + 1):
+        page, state = orderslib.parse_list(resp)
+        for o in page:
+            found.setdefault(o["order_id"], o)
+        if not state["has_more"] or not page:
+            break
+        if since and all(o["date"] and o["date"] < since for o in page):
+            break  # the list is newest first: everything after this page is older
+        if n == max_pages:
+            complete = False
+            break
+        resp = _orders_call(orderslib.next_payload(state, tab), post=True)
+    return list(found.values()), complete
+
+
+def _order_csv(rows: list[dict], path: Path) -> None:
+    import csv
+    cols = ["order_id", "date", "status", "status_text", "store", "order_total", "currency", "item_id", "sku_id",
+            "title", "variant", "quantity", "unit_price", "eta", "tracking", "image", "url", "order_url"]
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, cols)
+        w.writeheader()
+        for o in rows:
+            for it in o["items"] or [{}]:
+                w.writerow({"order_id": o["order_id"], "date": o["date"], "status": o["status"],
+                            "status_text": o["status_text"], "store": o["store"], "order_total": o["total"],
+                            "currency": o["currency"], "eta": o.get("eta", ""),
+                            "tracking": " ".join(o.get("tracking") or []), "order_url": o["url"],
+                            **{k: it.get(k, "") for k in ("item_id", "sku_id", "title", "variant", "quantity",
+                                                           "unit_price", "image", "url")}})
+
+
+@mcp.tool()
+def list_orders(status: str = "", since: str = "", out: str = "", details: str = "open",
+                max_pages: int = 30, report_limit: int = 40, include_cancelled: bool = False) -> str:
+    """
+    Read "My orders" (read only: nothing is paid, confirmed or changed).
+
+    Writes machine-readable files and a report page with pictures:
+    orders.json (and orders.csv, one row per ordered item) in the report folder
+    or at `out` (a .json path; the .csv goes next to it). Per order: number, date,
+    total, normalised status plus the original AliExpress text, store, link and
+    the items (item_id, title, variant/sku, quantity, unit price, picture, link);
+    after `details` also expected delivery date, tracking numbers, shipping and
+    import charges. The delivery address is never included.
+
+    Args:
+        status: Only this state: wartet_auf_zahlung, in_bearbeitung, versandt, zugestellt,
+            abgeschlossen, storniert, rueckerstattung. Empty = all except cancelled orders
+            (they are irrelevant and hidden unless asked for).
+        since: Only orders placed on/after this date (YYYY-MM-DD).
+        out: Path of the JSON file (default <report folder>/orders.json).
+        details: "open" = delivery date and tracking for orders that are not completed or
+            cancelled (default), "all" = for every order (one call each, slow), "none".
+        max_pages: Pages of 10 orders to read at most.
+        report_limit: Items shown on the report page (the files have everything).
+        include_cancelled: Also list cancelled orders when `status` is empty (status="storniert" shows them too).
+    """
+    status = status.strip().lower()
+    if status and status not in orderslib.STATES:
+        return f"Unknown status '{status}'. One of: {', '.join(orderslib.STATES)}."
+    if since and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+        return "since must look like 2026-10-01."
+    if not load_cookies():
+        return AUTH_EXPIRED_MSG
+    try:
+        tab = orderslib.TAB_FOR.get(status, "all")
+        rows, complete = _fetch_orders(tab, since, max(1, max_pages))
+        hide = not status and not include_cancelled
+        rows = [o for o in rows if (o["status"] == status if status else not (hide and o["status"] == "storniert"))
+                and (not since or (o["date"] and o["date"] >= since))]
+        if details in ("open", "all"):
+            for o in rows:
+                if details == "open" and o["status"] in ("abgeschlossen", "storniert", "rueckerstattung"):
+                    continue
+                try:
+                    o.update(orderslib.parse_detail(_orders_call(orderslib.detail_payload(o["order_id"]),
+                                                                  api=orderslib.DETAIL_API)))
+                except PermissionError:
+                    raise
+                except Exception as e:  # one broken order must not throw away the list
+                    o["detail_error"] = str(e)
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
+    except Exception as e:
+        return f"Reading the orders failed: {e}" + blocked_msg()
+
+    path = Path(out).expanduser() if out else REPORT_DIR / "orders.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"read_at": time.strftime("%Y-%m-%d %H:%M"), "complete": complete,
+                                "filter": {"status": status, "since": since}, "orders": rows},
+                               ensure_ascii=False, indent=1), encoding="utf-8")
+    csv_path = path.with_suffix(".csv")
+    _order_csv(rows, csv_path)
+
+    counts: dict[str, int] = {}
+    for o in rows:
+        counts[o["status"]] = counts.get(o["status"], 0) + 1
+    lines = [f"{len(rows)} order(s)" + ("" if complete else f" (stopped after {max_pages} pages, more exist)")
+             + (": " + ", ".join(f"{n}× {k}" for k, n in sorted(counts.items())) if counts else ""),
+             f"JSON: {path}", f"CSV: {csv_path}"]
+    for o in rows[:25]:
+        first = (o["items"] or [{}])[0]
+        lines.append(f"- {o['date']} #{o['order_id']} [{o['status']}] {o['total']} {o['currency']} · "
+                     f"{(first.get('title') or '')[:60]}" + (f" +{len(o['items']) - 1}" if len(o["items"]) > 1 else "")
+                     + (f" · ETA {o['eta']}" if o.get("eta") else "") + (f" · {', '.join(o['tracking'])}" if o.get("tracking") else ""))
+    if len(rows) > 25:
+        lines.append(f"… {len(rows) - 25} more in the files")
+    if rows and report_limit > 0 and any(o["items"] for o in rows):
+        lines.append(_orders_report(rows, report_limit))
+    return "\n".join(lines)
+
+
+def _orders_report(rows: list[dict], limit: int) -> str:
+    sections: dict[str, list[dict]] = {}
+    shown = 0
+    for o in rows:
+        for it in o["items"]:
+            if shown >= limit:
+                break
+            shown += 1
+            tags = [o["status_text"] or o["status"], o["date_text"] or o["date"]]
+            if o.get("eta"):
+                tags.append("ETA " + o["eta"])
+            if o.get("tracking"):
+                tags.append("Tracking " + ", ".join(o["tracking"]))
+            unit = it.get("unit_price")
+            sections.setdefault(o["status"], []).append({
+                "title": it["title"][:110], "image": it["image"] or None, "item_id": it["item_id"],
+                "price": f"{it['quantity']} × {unit:.2f} {o['currency']}" if unit is not None else "",
+                "tags": tags, "text": f"{it['variant']} · Order #{o['order_id']} · {o['store']}".strip(" ·"),
+                "url": o["url"], "link_text": "Order"})
+    secs = [{"heading": k.replace("_", " "), "cards": v} for k, v in sections.items()]
+    sums: dict[str, float] = {}
+    for o in rows:
+        sums[o["currency"] or "?"] = sums.get(o["currency"] or "?", 0) + (o["total"] or 0)
+    facts = [{"label": "Orders", "value": str(len(rows))},
+             {"label": "Sum", "value": " + ".join(f"{v:.2f} {c}" for c, v in sums.items())}]
+    notes = [{"text": f"Page shows the first {limit} items; orders.json has all."}] if shown >= limit else []
+    return make_report("orders", "My orders", secs, subtitle=time.strftime("%d.%m.%Y"), facts=facts, notes=notes)
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────

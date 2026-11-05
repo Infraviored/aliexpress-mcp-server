@@ -124,3 +124,20 @@ charges"), **TAX_DISCOUNT_FEE** ("AliExpress duty reduction"), DUTY_REMINDER.
   (32.13); from the 10th line on the duty grows but the "duty reduction"
   grows by the same amount — net stays 32.13. Global seller lines added on
   top pay 3.57 each again (two global lines: 39.29).
+
+## Orders (read only)
+
+`mtop.aliexpress.trade.buyer.order.list` v1.0 is what "My orders" calls, an Ultron page like the cart.
+- First page: GET `{"statusTab": null|"unpaid"|"processing"|"shipped"|"completed", "renderType": "init",
+  "clientPlatform": "pc", "shipToCountry": "DE", "_lang": "de_DE", "timeZone": "GMT+0100"}`.
+  Per order a block `pc_om_list_order_<id>` with `fields` (orderId, statusText, utParams.args.orderStatus,
+  orderDateText, formatPriceInfo "13,53€|13|53", storeName, orderLines[] with productId/skuId/skuAttrs/quantity/
+  itemImgUrl). 10 orders per page; `pc_om_list_body_*.fields.hasMore/pageIndex`.
+- Next page: POST `{"params": json({"data": json({body_block, header_action_block}), "linkage": json({common,
+  input, request, signature}), "hierarchy": json({"structure"}), "endpoint": json(...), "operator": body_key}),
+  "shipToCountry": "DE", "_lang": "de_DE"}` with body `pageIndex` raised by one. Pages overlap by about one
+  order, so dedupe by order id. The list is newest first, roughly (not strictly) by date.
+- `mtop.aliexpress.trade.buyer.order.detail` v1.0, GET `{"tradeOrderId": …}`: `etaAndTrack.expectDeliveryDateTitle`
+  (inside `detail_product_block`), pay/ship/end dates (`detail_simple_order_info_component`, also holds the
+  address: never copied), shipping and import charges (`detail_order_price_block`).
+- `mtop.aliexpress.trade.buyer.order.count` gives unpaid/processing/shipped counts.
