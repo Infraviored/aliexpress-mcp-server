@@ -50,6 +50,9 @@ def status_of(text: str, code: Any = None) -> str:
 
 def iso_date(text: str) -> str:
     """'21. Okt 2026' / 'Oct 21, 2026' -> '2026-10-21' ('' when unreadable)."""
+    iso = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", text or "")
+    if iso:
+        return "-".join(iso.groups())
     m = re.search(r"(\d{1,2})\.?\s+([A-Za-zäÄ]+)\.?,?\s+(\d{4})", text or "")
     if m:
         day, mon, year = m.groups()
@@ -112,7 +115,7 @@ def parse_list(resp: dict) -> tuple[list[dict], dict]:
             "status_code": code,
             "store": f.get("storeName") or "",
             "store_url": _url(f.get("storePageUrl")),
-            "url": f.get("orderDetailUrl") or "",
+            "url": _url(f.get("orderDetailUrl")),
             "items": items,
         })
     body_key = next((k for k in blocks if k.startswith("pc_om_list_body_")), "")
@@ -153,6 +156,7 @@ def detail_payload(order_id: str) -> dict:
 
 
 _TRACK_KEYS = re.compile(r"(tracking|mailno|logisticsno|trackno)", re.I)
+_NOT_TRACK = re.compile(r"(status|title|text|url|desc|name|time|date)", re.I)
 
 
 def _walk(o: Any):
@@ -188,7 +192,8 @@ def parse_detail(resp: dict) -> dict:
                     out["eta"] = title.split(":", 1)[-1].strip()
                     out["eta_iso"] = iso_date(out["eta"])
         for k, v in _walk(f):
-            if _TRACK_KEYS.search(str(k)) and isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9]{8,32}", v):
+            if (_TRACK_KEYS.search(str(k)) and not _NOT_TRACK.search(str(k)) and isinstance(v, str)
+                    and re.fullmatch(r"[A-Za-z0-9]{8,32}", v) and any(c.isdigit() for c in v)):
                 if v not in out["tracking"]:
                     out["tracking"].append(v)
     return out

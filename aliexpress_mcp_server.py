@@ -3024,8 +3024,13 @@ def list_orders(status: str = "", since: str = "", out: str = "", details: str =
             for o in rows:
                 if details == "open" and o["status"] in ("abgeschlossen", "storniert", "rueckerstattung"):
                     continue
-                o.update(orderslib.parse_detail(_orders_call(orderslib.detail_payload(o["order_id"]),
-                                                              api=orderslib.DETAIL_API)))
+                try:
+                    o.update(orderslib.parse_detail(_orders_call(orderslib.detail_payload(o["order_id"]),
+                                                                  api=orderslib.DETAIL_API)))
+                except PermissionError:
+                    raise
+                except Exception as e:  # one broken order must not throw away the list
+                    o["detail_error"] = str(e)
     except PermissionError:
         return AUTH_EXPIRED_MSG
     except Exception as e:
@@ -3052,7 +3057,7 @@ def list_orders(status: str = "", since: str = "", out: str = "", details: str =
                      + (f" · ETA {o['eta']}" if o.get("eta") else "") + (f" · {', '.join(o['tracking'])}" if o.get("tracking") else ""))
     if len(rows) > 25:
         lines.append(f"… {len(rows) - 25} more in the files")
-    if rows:
+    if rows and report_limit > 0 and any(o["items"] for o in rows):
         lines.append(_orders_report(rows, report_limit))
     return "\n".join(lines)
 
@@ -3077,8 +3082,11 @@ def _orders_report(rows: list[dict], limit: int) -> str:
                 "tags": tags, "text": f"{it['variant']} · Order #{o['order_id']} · {o['store']}".strip(" ·"),
                 "url": o["url"], "link_text": "Order"})
     secs = [{"heading": k.replace("_", " "), "cards": v} for k, v in sections.items()]
+    sums: dict[str, float] = {}
+    for o in rows:
+        sums[o["currency"] or "?"] = sums.get(o["currency"] or "?", 0) + (o["total"] or 0)
     facts = [{"label": "Orders", "value": str(len(rows))},
-             {"label": "Sum", "value": f"{sum(o['total'] or 0 for o in rows):.2f} {rows[0]['currency']}"}]
+             {"label": "Sum", "value": " + ".join(f"{v:.2f} {c}" for c, v in sums.items())}]
     notes = [{"text": f"Page shows the first {limit} items; orders.json has all."}] if shown >= limit else []
     return make_report("orders", "My orders", secs, subtitle=time.strftime("%d.%m.%Y"), facts=facts, notes=notes)
 

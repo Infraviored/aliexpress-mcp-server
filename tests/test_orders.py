@@ -90,3 +90,33 @@ def test_parse_detail_has_no_address():
     assert d["shipping"] == "Kostenloser Versand" and d["import_charges"] == "3,57€"
     assert d["tracking"] == ["LP00123456789"]
     assert "Street" not in json.dumps(d) and "Someone" not in json.dumps(d)
+
+
+def test_iso_input_and_tracking_filters():
+    assert orders.iso_date("2026-10-21 15:30:00") == "2026-10-21"
+    resp = {"data": {"data": {"detail_product_block_3": {"fields": {"productVOList": [
+        {"trackingStatus": "DELIVERED", "trackingNumber": "LP00123456789"}]}}}}}
+    assert orders.parse_detail(resp)["tracking"] == ["LP00123456789"]
+
+
+def test_list_orders_hides_cancelled_and_survives_a_broken_detail(monkeypatch, tmp_path):
+    import aliexpress_mcp_server as srv
+    monkeypatch.setattr(srv, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(srv, "load_cookies", lambda: {"x": "y"})
+    base = orders.parse_list(_resp(False))[0][0]
+    rows = [{**base, "order_id": "1", "status": "abgeschlossen", "date": "2026-10-21"},
+            {**base, "order_id": "2", "status": "storniert", "date": "2026-10-20"},
+            {**base, "order_id": "3", "status": "versandt", "date": "2026-10-19"}]
+    monkeypatch.setattr(srv, "_fetch_orders", lambda tab, since, pages: ([dict(r) for r in rows], True))
+
+    def boom(payload, post=False, api=""):
+        raise RuntimeError("gone")
+    monkeypatch.setattr(srv, "_orders_call", boom)
+    monkeypatch.setattr(srv, "make_report", lambda *a, **k: "REPORT")
+    text = srv.list_orders(out=str(tmp_path / "o.json"))
+    data = json.loads((tmp_path / "o.json").read_text())
+    assert [o["order_id"] for o in data["orders"]] == ["1", "3"]              # cancelled hidden
+    assert "detail_error" in data["orders"][1] and (tmp_path / "o.csv").exists()
+    srv.list_orders(status="storniert", out=str(tmp_path / "c.json"), details="none")
+    assert [o["order_id"] for o in json.loads((tmp_path / "c.json").read_text())["orders"]] == ["2"]
+    assert "REPORT" in text and "address" not in (tmp_path / "o.json").read_text().lower()
