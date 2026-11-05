@@ -332,13 +332,17 @@ def _bot_cooldown_left() -> float:
     return max(0.0, BOT_CHECK.get("last", 0) + BOT_COOLDOWN - time.time())
 
 
+REPORT_HINT = ("\n[Not finished: Florian sees no pictures in chat. Pass the finalists to make_report "
+               "(page with pictures, links, prices, variants) and send that page, not this list.]")
+
+
 def blocked_msg() -> str:
     """Why a lookup came back empty, when it was the bot check."""
     if _bot_cooldown_left() <= 0:
         return ""
-    mins = int((time.time() - BOT_CHECK["since"]) / 60)
-    return (f" AliExpress bot check (captcha) not passed, blocked for {mins} min."
-            " Calls are paused for 10 min after a check. Fastest way out: .venv/bin/python import_profile.py --ask"
+    left = max(1, round(_bot_cooldown_left() / 60))
+    return (f" AliExpress bot check (captcha) active: this is NOT an expired session and the product is not gone."
+            f" Calls are paused for about {left} more min. Fastest way out: .venv/bin/python import_profile.py --ask"
             " (the user passes the check in the remote browser card, the cookies are imported).")
 
 
@@ -550,7 +554,7 @@ def search_products(
         if max_price > 0:
             filters.append(f"price ≤ {max_price:.2f}")
         suffix = f" with {', '.join(filters)}" if filters else ""
-        return f"No products found for '{query}'{suffix}."
+        return f"No products found for '{query}'{suffix}." + blocked_msg()
 
     if with_shipping:
         for p in [x for x in products if not x.get("choice")][:8]:
@@ -581,6 +585,7 @@ def search_products(
             line += f"\n  shipping: {p['shipping']}"
         line += f"\n  item_id: {p['item_id']}"
         lines.append(line)
+    lines.append(REPORT_HINT)
     return "\n".join(lines)
 
 
@@ -1178,7 +1183,8 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     """
     offer = _pdp_offer(item_id)
     if not offer:
-        return f"No variant data for {item_id} (session expired or product gone)." + blocked_msg()
+        return (f"No variant data for {item_id}." + blocked_msg()) if _bot_cooldown_left() > 0 else \
+            f"No variant data for {item_id} (session expired or product gone)."
     total = len(offer["variants"])
     rows = _by_match(offer["variants"], match)
     rows.sort(key=lambda r: (not r["salable"], r["unit"] if r["unit"] is not None else 1e9))
@@ -1210,6 +1216,7 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     if len(rows) > limit:
         lines.append(f"… {len(rows) - limit} more (raise limit or narrow match)")
     lines += deals.ladder_lines(rows, CURRENCY)
+    lines.append(REPORT_HINT)
     return "\n".join(lines)
 
 
