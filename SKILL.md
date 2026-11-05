@@ -44,6 +44,14 @@ is in the cart with a "✓ im Korb" tag. The cart and the plan pages
 (`view_cart`, `shop_list`) have their own builders. Publish the file it names
 with the Artifact tool, or hand it over as a file if that tool is missing.
 
+## Orders
+
+`list_orders(status="", since="", details="open")` reads "My orders" (read only). It writes
+`orders.json` and `orders.csv` into the report folder (path in the answer) and a report page with pictures
+(send that page; the chat shows no pictures). Status is normalised (wartet_auf_zahlung, in_bearbeitung,
+versandt, zugestellt, abgeschlossen, storniert, rueckerstattung) next to AliExpress' own text. `details`
+adds delivery date and tracking for open orders. It never pays, confirms or changes anything.
+
 ## Rules
 
 - Choice cheaper than a global seller (goods + shipping + import charge)? Take
