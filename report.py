@@ -203,7 +203,7 @@ def _breakdown(parts: list[tuple[str, float, str]]) -> str:
 
 def _delta(rng) -> tuple[str, str]:
     """('−3,64 bis −7,21 €', 'down') for a (lo, hi) EUR change."""
-    lo, hi = sorted(rng)
+    lo, hi = sorted(rng) if isinstance(rng, (tuple, list)) else (rng, rng)
     sign = lambda x: ("+" if x > 0 else "−" if x < 0 else "±") + eur(abs(x))
     text = sign(lo) if abs(hi - lo) < 0.01 else f"{sign(lo)} bis {sign(hi)}"
     return text, ("up" if lo > 0 else "down" if hi < 0 else "mixed")
@@ -217,8 +217,8 @@ def _decision(d: dict) -> str:
     date = (f'<div class="date">Alles da: <s>{_e(d["date"][0])}</s> → <b>{_e(d["date"][1])}</b></div>'
             if d.get("date") else "")
     facts = "".join(f"<p>{_e(f)}</p>" for f in d.get("facts") or [])
-    link = (f'<a href="{_e(d["link"])}" target="_blank" rel="noopener">{_e((d.get("link_text") or "Angebot")[:70])}</a>'
-            if d.get("link") else "")
+    link = (f'<a href="{_e(_url(d["link"]))}" target="_blank" rel="noopener">{_e((d.get("link_text") or "Angebot")[:70])}</a>'
+            if _url(d.get("link")) else "")
     warn = f'<p class="warn">{_e(d["warn"])}</p>' if d.get("warn") else ""
     img = f'<img src="{_e(d["img"])}" alt="">' if d.get("img") else ""
     return (f'<article class="card {d.get("kind", "")}">{img}<div class="c">'
@@ -242,7 +242,8 @@ def _kind_chip(kind: str) -> str:
 
 def _is_decision(d: dict) -> bool:
     """A real decision changes price or date; everything else is a note."""
-    lo, hi = d.get("price") or (0, 0)
+    p = d.get("price")
+    lo, hi = p if isinstance(p, (tuple, list)) and len(p) == 2 else ((p, p) if isinstance(p, (int, float)) else (0, 0))
     return abs(lo) >= 0.005 or abs(hi) >= 0.005 or bool(d.get("date"))
 
 
@@ -256,18 +257,23 @@ def _cart_row(it: dict) -> str:
     if (it.get("pieces") or 1) > 1:
         extra = f'<small>{it["pieces"]} Stk · {eur(it["unit"])}/Stk</small>' + extra
     return (f'<div class="row">{_img(it.get("img"))}<div class="t">'
-            f'<a class="need" href="{_e(it["url"])}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
+            f'<a class="need" href="{_e(_url(it["url"]))}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
             f'{_e(it["need"])}</a><div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>'
             f'<span>bis {_e(it["until"])}</span>{"".join(chips)}</div></div>'
             f'<div class="money"><b>{eur(it["cost"])}</b>{extra}</div></div>')
 
 
-def _cart_list(L: dict, number_from: int) -> tuple[str, int]:
+def _teile(n: int) -> str:
+    return "1 Teil" if n == 1 else f"{n} Teile"
+
+
+def _cart_list(L: dict, number_from: int, single: bool = False) -> tuple[str, int]:
     """One list as a section of the page. Returns (html, next decision number)."""
     items = L["items"]
     total = L.get("total")
     right = f'<span class="total sm">{eur(total)}</span>' if total is not None else ""
-    out = [f'<div class="lh"><h2>{_e(L["name"])} <span class="eyebrow">{len(items)} Teile</span></h2>{right}</div>']
+    out = [] if single else [
+        f'<div class="lh"><h2>{_e(L["name"])} <span class="eyebrow">{_teile(len(items))}</span></h2>{right}</div>']
     if L.get("latest"):
         out.append(f'<p class="lead">Alles da bis <b>{_e(L["latest"])}</b>'
                    + (f' — am längsten braucht {_e(L["slowest"])}.' if L.get("slowest") else ".") + "</p>")
@@ -277,27 +283,28 @@ def _cart_list(L: dict, number_from: int) -> tuple[str, int]:
     if decs:
         cards = []
         for d in decs:
-            cards.append(_decision(dict(d, title=f"{n}. {d['title']}")))
+            cards.append(_decision(dict(d, title=f"{n}. {d.get('title') or ''}")))
             n += 1
         out.append('<div class="eyebrow">Zu entscheiden — jede Frage liegt als Karte im Chat</div>'
                    '<div class="cards">' + "".join(cards) + "</div>")
     for d in notes:
-        text = " ".join([d["title"]] + list(d.get("facts") or []) + ([d["warn"]] if d.get("warn") else []))
+        text = " ".join(str(x) for x in [d.get("title")] + list(d.get("facts") or []) + [d.get("warn")] if x)
         out.append(f'<div class="note"><p>{_e(text)}</p></div>')
     if L.get("summary"):
         out.append(f'<div class="note"><p>{_e(L["summary"])}</p></div>')
     if L.get("mismatch"):
         out.append(f'<div class="note warn"><p>Zeilen und Kassenseite weichen um {eur(abs(L["mismatch"]))} ab. '
-                   "Meist ist eine Zeile an der Kasse nicht bestellbar, dann zählt sie dort nicht mit. "
+                   "Meist ist eine Zeile an der Kasse nicht bestellbar, oder es kommt Versand je Bestellung dazu. "
                    "Die Kassensumme gilt.</p></div>")
-    for kind in ("Choice", "global"):
+    groups = [k for k in ("Choice", "global") if any(it["kind"] == k for it in items)]
+    for kind in groups:
         rows = [it for it in items if it["kind"] == kind]
         if not rows:
             continue
         label = ("Choice — Versand gemeinsam, Abgabe gemeinsam" if kind == "Choice"
                  else "Globale Händler — Versand und Abgabe je Zeile")
         sub = sum(it["cost"] for it in rows)
-        duty = (L.get("duty_choice") or 0.0) if kind == "Choice" else 0.0
+        duty = (L.get("duty_choice") or 0.0) if kind == groups[0] and (kind == "Choice" or "Choice" not in groups) else 0.0
         tail = ('<div class="row tail"><div></div><div class="t"><span class="meta">Einfuhrabgabe für alle Choice-Zeilen</span></div>'
                 f'<div class="money"><b>{eur(duty)}</b></div></div>' if duty else "")
         out.append(f'<div class="lh g"><span class="eyebrow">{label}</span><span class="num">{eur(sub + duty)}</span></div>'
@@ -305,8 +312,8 @@ def _cart_list(L: dict, number_from: int) -> tuple[str, int]:
     if total is not None:
         out.append(_money(L["goods"], L["ship"], L["duty"], L["discount"]))
         out.append(f'<div class="legend"><span>Kasse: Ware + Versand + Abgabe − Rabatt = <b class="num">{eur(total)}</b></span></div>')
-    out.append(f'<div class="go"><a class="btn" href="{_e(L["checkout_url"])}" target="_blank" rel="noopener">'
-               f'Zur Kasse mit allen {len(items)} Teilen</a><span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
+    out.append(f'<div class="go"><a class="btn" href="{_e(_url(L["checkout_url"]))}" target="_blank" rel="noopener">'
+               f'Zur Kasse mit {"dem Teil" if len(items) == 1 else f"allen {len(items)} Teilen"}</a><span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
     return f'<section class="list">{"".join(out)}</section>', n
 
 
@@ -325,16 +332,16 @@ def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
     totals = [L["total"] for L in lists if L.get("total") is not None]
     grand = sum(totals) if totals and len(totals) == len(lists) else None
     n_items = sum(len(L["items"]) for L in lists)
-    out = [_head(f"Warenkorb · {n_items} Teile auf {len(lists)} Listen" if len(lists) > 1 else f"Warenkorb · {n_items} Teile",
+    out = [_head(f"Warenkorb · {_teile(n_items)} auf {len(lists)} Listen" if len(lists) > 1 else f"Warenkorb · {_teile(n_items)}",
                  lists[0]["name"] if len(lists) == 1 else "Übersicht", "an der Kasse", grand)]
     n = 1
     for L in lists:
-        html, n = _cart_list(L, n)
+        html, n = _cart_list(L, n, single=len(lists) == 1)
         out.append(html)
     if others:
         rows = "".join(
             f'<div class="row">{_img(o.get("img"))}<div class="t">'
-            f'<a class="need" href="{_e(o["url"])}" target="_blank" rel="noopener">{_e(o["title"][:70])}</a>'
+            f'<a class="need" href="{_e(_url(o["url"]))}" target="_blank" rel="noopener">{_e(o["title"][:70])}</a>'
             f'<div class="meta"><span>{o["qty"]}×</span></div></div>'
             f'<div class="money"><b>{eur(o["cost"])}</b></div></div>' for o in others)
         out.append(f'<details class="others"><summary>Sonst im Korb: {len(others)} Zeilen auf keiner Liste</summary>'
@@ -354,7 +361,7 @@ def plan_page(name: str, picks: list[dict], total: dict, stamp: str) -> str:
         diff = (f'<small>{"+" if o["diff"] >= 0 else "−"}{eur(abs(o["diff"]))}</small>' if alt else
                 f'<small>{eur(o["unit"])}/Stk</small>')
         return (f'<div class="row{" alt" if alt else ""}">{_img(o.get("img"))}<div class="t">'
-                f'<a class="title" href="{_e(o["url"])}" target="_blank" rel="noopener">{_e(o["title"])}</a>'
+                f'<a class="title" href="{_e(_url(o["url"]))}" target="_blank" rel="noopener">{_e(o["title"])}</a>'
                 f'<div class="meta"><span>{_e(o["buy"])}</span>'
                 f'{_kind_chip(o["kind"])}'
                 f'<span>{_e(o["days"])}</span></div></div>'

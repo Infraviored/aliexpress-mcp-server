@@ -1883,7 +1883,7 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
     for name, lines in by_list.items():
         p = previews.get(name) or {}
         dec = _decisions(cart, tags, lines, alternatives)
-        for o in options or []:
+        for o in (options or []) if name == next(iter(by_list)) else []:  # agent options: once, on the first list
             dec.append({"kind": "agent", "title": o.get("title", ""), "facts": [o.get("text", "")] if o.get("text") else [],
                         "img": o.get("img"), "link": o.get("link"), "link_text": o.get("link_text") or o.get("link"),
                         "price": (o["delta"], o["delta"]) if isinstance(o.get("delta"), (int, float)) else None,
@@ -1894,8 +1894,9 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
         pieces = {ln["cart_id"]: ln["qty"] * deals.pack_size(ln["variant"]) for ln in lines}
         duty_net = (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0)
         duty_choice = max(0.0, duty_net - DUTY_PER_LINE * sum(1 for ln in lines if not ln["choice"]))
-        rows_sum = sum(cartlib.goods(ln) + (ln["ship"] or 0) + (DUTY_PER_LINE if not ln["choice"] else 0) for ln in lines)
-        mismatch = (rows_sum + duty_choice - (p.get("discounts") or 0.0) - p["total"]) if p.get("total") is not None else 0.0
+        # rows vs checkout on goods + shipping only: independent of how the import charge is split
+        mismatch = (sum(cartlib.goods(ln) + (ln["ship"] or 0) for ln in lines)
+                    - (p.get("subtotal") or 0.0) - (p.get("shipping") or 0.0)) if p.get("total") is not None else 0.0
         lists.append({
             "name": name, "total": p.get("total"), "goods": p.get("subtotal") or 0.0,
             "ship": p.get("shipping") or 0.0, "duty": duty_net, "duty_choice": duty_choice,
@@ -2581,7 +2582,8 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
             page += ("\n\nDecisions on the page, numbered as there. The page has no buttons: add ONE `decide add` card per "
                      "decision (--option per choice, --recommend, effect in euro and days), then tell the user "
                      "\"Die Fragen liegen als Karten bei dir\". What to do per answer:\n" + "\n".join(
-                f"{i}. {d['title']}: " + (f"{d['price'][0]:+.2f}…{d['price'][1]:+.2f} EUR" if d.get("price") else "no price change")
+                f"{i}. {d['title']}: " + (f"{d['price'][0]:+.2f}" + (f"…{d['price'][1]:+.2f}" if abs(d['price'][1] - d['price'][0]) >= 0.005 else "") + " EUR"
+                   if d.get("price") else "no price change")
                 + (f", delivery {d['date'][0]} → {d['date'][1]}" if d.get("date") else "")
                 + (f" — do: {d['do']}" if d.get("do") else "") for i, d in enumerate(real, 1)))
     except Exception as e:
