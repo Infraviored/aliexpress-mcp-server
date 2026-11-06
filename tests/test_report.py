@@ -60,6 +60,50 @@ def test_generic_page_pick_mode_has_radios_codes_and_lightbox():
     assert "clipboard" not in page
 
 
+def _list(name, kind, **kw):
+    it = dict(ITEM, kind=kind, cost=10.0, slowest=False)
+    base = {"name": name, "total": 13.57, "goods": 10.0, "ship": 0.0, "duty": 3.57, "duty_choice": 3.57,
+            "discount": 0.0, "mismatch": 0.0, "latest": "04.12.", "slowest": "Mic", "checkout_url": "https://c",
+            "items": [it], "decisions": []}
+    return dict(base, **kw)
+
+
+def test_cart_page_two_lists_one_page_with_one_header_and_grand_total():
+    page = report.cart_page([_list("Sat", "Choice"), _list("Extras", "global", total=50.0, duty_choice=0.0)], [], "now")
+    assert page.count("<h1>") == 1 and page.count("<header") == 1
+    assert "63,57 €" in page                       # one grand total over both lists
+    assert "Warenkorb · 2 Teile auf 2 Listen" in page
+    assert "Einfuhrabgabe für alle Choice-Zeilen" in page and "Globale Händler" in page
+
+
+def test_cart_page_decision_vs_note_and_mismatch():
+    real = {"kind": "choice", "title": "ESP über Choice", "price": (-1.0, 1.0), "date": None, "facts": []}
+    note = {"kind": "agent", "title": "Nicht nehmen", "price": (0, 0), "date": None, "facts": ["passt nicht"]}
+    page = report.cart_page([_list("Sat", "Choice", decisions=[real, note], mismatch=1.25)], [], "now")
+    assert "Zu entscheiden" in page and "1. ESP über Choice" in page
+    assert page.count('<article') == 1                      # the note is no card
+    assert "Nicht nehmen passt nicht" in page and "weichen um 1,25 €" in page
+
+
+def test_cart_page_survives_odd_decisions_and_blocks_javascript_links():
+    odd = {"kind": "agent", "title": None, "price": 2.5, "date": None, "facts": [None, "x"],
+           "link": "javascript:alert(1)", "link_text": "L"}
+    page = report.cart_page([_list("Sat", "Choice", decisions=[odd, {"title": None, "facts": [None]}],
+                                   items=[dict(ITEM, kind="Choice", cost=1.0, url="javascript:evil()")])], [], "now")
+    assert "javascript:" not in page and "1. " in page      # scalar price counts as a decision, link dropped
+
+
+def test_cart_page_single_list_has_no_repeated_heading_and_singular():
+    page = report.cart_page([_list("Sat", "Choice")], [], "now")
+    assert page.count(">Sat<") == 1 and "1 Teil" in page and "1 Teile" not in page
+    assert "Zur Kasse mit dem Teil" in page
+
+
+def test_cart_page_duty_line_without_choice_group():
+    page = report.cart_page([_list("Sat", "global", duty_choice=5.0)], [], "now")
+    assert "Einfuhrabgabe für alle Choice-Zeilen" in page
+
+
 def test_generic_page_drops_non_http_links():
     page = report.generic_page("T", "", [], [], [{"heading": "H", "intro": "", "cards": [
         _card(title="A", url="javascript:alert(1)")]}], "x")

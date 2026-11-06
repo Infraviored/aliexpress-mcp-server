@@ -1883,7 +1883,7 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
     for name, lines in by_list.items():
         p = previews.get(name) or {}
         dec = _decisions(cart, tags, lines, alternatives)
-        for o in options or []:
+        for o in (options or []) if name == next(iter(by_list)) else []:  # agent options: once, on the first list
             dec.append({"kind": "agent", "title": o.get("title", ""), "facts": [o.get("text", "")] if o.get("text") else [],
                         "img": o.get("img"), "link": o.get("link"), "link_text": o.get("link_text") or o.get("link"),
                         "price": (o["delta"], o["delta"]) if isinstance(o.get("delta"), (int, float)) else None,
@@ -1892,9 +1892,15 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
         dated = [ln for ln in lines if ln["delivery"][1]]
         slow = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None
         pieces = {ln["cart_id"]: ln["qty"] * deals.pack_size(ln["variant"]) for ln in lines}
+        duty_net = (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0)
+        duty_choice = max(0.0, duty_net - DUTY_PER_LINE * sum(1 for ln in lines if not ln["choice"]))
+        # rows vs checkout on goods + shipping only: independent of how the import charge is split
+        mismatch = (sum(cartlib.goods(ln) + (ln["ship"] or 0) for ln in lines)
+                    - (p.get("subtotal") or 0.0) - (p.get("shipping") or 0.0)) if p.get("total") is not None else 0.0
         lists.append({
             "name": name, "total": p.get("total"), "goods": p.get("subtotal") or 0.0,
-            "ship": p.get("shipping") or 0.0, "duty": (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0),
+            "ship": p.get("shipping") or 0.0, "duty": duty_net, "duty_choice": duty_choice,
+            "mismatch": mismatch if abs(mismatch) > 0.05 else 0.0,
             "discount": p.get("discounts") or 0.0,
             "latest": _day(slow["delivery"][1]) if slow else None,
             "slowest": (tags[slow["cart_id"]].get("need") or slow["title"][:30]) if slow else None,
@@ -2571,11 +2577,15 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
     try:
         page, dec = _cart_report(c, tags, priced, summary, options, alternatives)
-        if dec:
-            page += "\n\nDecisions on the page (what to do if the user picks one):\n" + "\n".join(
-                f"- {d['title']}: " + (f"{d['price'][0]:+.2f}…{d['price'][1]:+.2f} EUR" if d.get("price") else "no price change")
+        real = [d for d in dec if report._is_decision(d)]
+        if real:
+            page += ("\n\nDecisions on the page, numbered as there. The page has no buttons: add ONE `decide add` card per "
+                     "decision (--option per choice, --recommend, effect in euro and days), then tell the user "
+                     "\"Die Fragen liegen als Karten bei dir\". What to do per answer:\n" + "\n".join(
+                f"{i}. {d['title']}: " + (f"{d['price'][0]:+.2f}" + (f"…{d['price'][1]:+.2f}" if abs(d['price'][1] - d['price'][0]) >= 0.005 else "") + " EUR"
+                   if d.get("price") else "no price change")
                 + (f", delivery {d['date'][0]} → {d['date'][1]}" if d.get("date") else "")
-                + (f" — do: {d['do']}" if d.get("do") else "") for d in dec)
+                + (f" — do: {d['do']}" if d.get("do") else "") for i, d in enumerate(real, 1)))
     except Exception as e:
         page = f"(page not written: {e})"
     return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced),
