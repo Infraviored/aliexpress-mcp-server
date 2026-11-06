@@ -33,27 +33,27 @@ _CSS = """
   --accent: #8f9bff; --warn: #f0a35c; --warn-bg: #2e2318; --goods: #7fa3ff; --ship: #b49ae0;
   --duty: #e8876a; --off: #7fb09a; color-scheme: dark }
 body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--body); }
-.wrap { max-width: 860px; margin: 0 auto; padding-block: 20px 40px;
+.wrap { max-width: 1040px; margin: 0 auto; padding-block: 20px 40px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
   display: grid; gap: 28px; }
 h1, h2 { font-family: var(--display); font-weight: 600; margin: 0; text-wrap: balance; letter-spacing: .01em; }
-h1 { font-size: 1.9rem; } h2 { font-size: 1.35rem; }
+h1 { font-size: 1.3rem; } h2 { font-size: 1.1rem; }
 .eyebrow { font: 600 .72rem/1 var(--body); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 a { color: var(--accent); }
 a:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 section { display: grid; gap: 14px; }
 .head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
-.total { font: 600 2.4rem/1 var(--mono); font-variant-numeric: tabular-nums; }
+.total { font: 600 1.6rem/1 var(--mono); font-variant-numeric: tabular-nums; }
 .bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--line); }
 .bar span { display: block; height: 100%; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: .9rem; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 .rows { display: grid; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-.row { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center;
-  padding: 10px 14px; border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+  padding: 6px 12px; border-top: 1px solid var(--line); }
 .row:first-child { border-top: 0; }
-.row img, .row .noimg { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; background: var(--line); }
+.row img, .row .noimg { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; background: var(--line); }
 .row .t { min-width: 0; display: grid; gap: 2px; }
 .row .title { color: var(--muted); font-size: .88rem; overflow-wrap: anywhere; }
 .row .meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: .82rem; color: var(--muted); }
@@ -130,6 +130,11 @@ details.nt summary { cursor: pointer; color: var(--muted); font-size: .85rem; pa
 @media (max-width: 520px) { .row.pick { grid-template-columns: 22px 52px minmax(0, 1fr); }
   .row.pick .money { grid-column: 3; text-align: left; } }
 .chip.ok { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+.lh { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.lh.g { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.total.sm { font-size: 1.15rem; }
+section.list { gap: 10px; }
+.row.tail { background: var(--bg); }
 .intro { margin: 0; color: var(--muted); max-width: 65ch; }
 </style>
 """
@@ -235,51 +240,97 @@ def _kind_chip(kind: str) -> str:
     return f'<span class="chip {"choice" if kind == "Choice" else "global"}">{_e(kind)}</span>'
 
 
+def _is_decision(d: dict) -> bool:
+    """A real decision changes price or date; everything else is a note."""
+    lo, hi = d.get("price") or (0, 0)
+    return abs(lo) >= 0.005 or abs(hi) >= 0.005 or bool(d.get("date"))
+
+
+def _cart_row(it: dict) -> str:
+    chips = []
+    if it.get("slowest"):
+        chips.append('<span class="chip global">am langsamsten</span>')
+    if it.get("optional"):
+        chips.append('<span class="chip off">zum Vergleich</span>')
+    extra = f'<small>{_e(it["extra"])}</small>' if it.get("extra") else ""
+    if (it.get("pieces") or 1) > 1:
+        extra = f'<small>{it["pieces"]} Stk · {eur(it["unit"])}/Stk</small>' + extra
+    return (f'<div class="row">{_img(it.get("img"))}<div class="t">'
+            f'<a class="need" href="{_e(it["url"])}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
+            f'{_e(it["need"])}</a><div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>'
+            f'<span>bis {_e(it["until"])}</span>{"".join(chips)}</div></div>'
+            f'<div class="money"><b>{eur(it["cost"])}</b>{extra}</div></div>')
+
+
+def _cart_list(L: dict, number_from: int) -> tuple[str, int]:
+    """One list as a section of the page. Returns (html, next decision number)."""
+    items = L["items"]
+    total = L.get("total")
+    right = f'<span class="total sm">{eur(total)}</span>' if total is not None else ""
+    out = [f'<div class="lh"><h2>{_e(L["name"])} <span class="eyebrow">{len(items)} Teile</span></h2>{right}</div>']
+    if L.get("latest"):
+        out.append(f'<p class="lead">Alles da bis <b>{_e(L["latest"])}</b>'
+                   + (f' — am längsten braucht {_e(L["slowest"])}.' if L.get("slowest") else ".") + "</p>")
+    decs = [d for d in L.get("decisions") or [] if _is_decision(d)]
+    notes = [d for d in L.get("decisions") or [] if not _is_decision(d)]
+    n = number_from
+    if decs:
+        cards = []
+        for d in decs:
+            cards.append(_decision(dict(d, title=f"{n}. {d['title']}")))
+            n += 1
+        out.append('<div class="eyebrow">Zu entscheiden — jede Frage liegt als Karte im Chat</div>'
+                   '<div class="cards">' + "".join(cards) + "</div>")
+    for d in notes:
+        text = " ".join([d["title"]] + list(d.get("facts") or []) + ([d["warn"]] if d.get("warn") else []))
+        out.append(f'<div class="note"><p>{_e(text)}</p></div>')
+    if L.get("summary"):
+        out.append(f'<div class="note"><p>{_e(L["summary"])}</p></div>')
+    if L.get("mismatch"):
+        out.append(f'<div class="note warn"><p>Zeilen und Kassenseite weichen um {eur(abs(L["mismatch"]))} ab. '
+                   "Meist ist eine Zeile an der Kasse nicht bestellbar, dann zählt sie dort nicht mit. "
+                   "Die Kassensumme gilt.</p></div>")
+    for kind in ("Choice", "global"):
+        rows = [it for it in items if it["kind"] == kind]
+        if not rows:
+            continue
+        label = ("Choice — Versand gemeinsam, Abgabe gemeinsam" if kind == "Choice"
+                 else "Globale Händler — Versand und Abgabe je Zeile")
+        sub = sum(it["cost"] for it in rows)
+        duty = (L.get("duty_choice") or 0.0) if kind == "Choice" else 0.0
+        tail = ('<div class="row tail"><div></div><div class="t"><span class="meta">Einfuhrabgabe für alle Choice-Zeilen</span></div>'
+                f'<div class="money"><b>{eur(duty)}</b></div></div>' if duty else "")
+        out.append(f'<div class="lh g"><span class="eyebrow">{label}</span><span class="num">{eur(sub + duty)}</span></div>'
+                   f'<div class="rows">{"".join(_cart_row(it) for it in rows)}{tail}</div>')
+    if total is not None:
+        out.append(_money(L["goods"], L["ship"], L["duty"], L["discount"]))
+        out.append(f'<div class="legend"><span>Kasse: Ware + Versand + Abgabe − Rabatt = <b class="num">{eur(total)}</b></span></div>')
+    out.append(f'<div class="go"><a class="btn" href="{_e(L["checkout_url"])}" target="_blank" rel="noopener">'
+               f'Zur Kasse mit allen {len(items)} Teilen</a><span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
+    return f'<section class="list">{"".join(out)}</section>', n
+
+
 def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
     """
-    lists: [{name, total, goods, ship, duty, discount, latest, slowest, summary,
+    One page for the whole cart: one header, one total, a section per list.
+
+    lists: [{name, total, goods, ship, duty, duty_choice, discount, mismatch, latest, slowest, summary,
              checkout_url, decisions: [{kind, title, img, link, link_text, facts,
              price: (lo, hi) | None, date: (old, new) | None, warn}],
              items: [{img, need, title, url, qty, variant, cost, extra, kind, until,
                       slowest, optional}]}]
     others: [{img, title, url, qty, cost}]
+    Decisions that change neither price nor date are shown as notes, not as questions.
     """
-    out = []
+    totals = [L["total"] for L in lists if L.get("total") is not None]
+    grand = sum(totals) if totals and len(totals) == len(lists) else None
+    n_items = sum(len(L["items"]) for L in lists)
+    out = [_head(f"Warenkorb · {n_items} Teile auf {len(lists)} Listen" if len(lists) > 1 else f"Warenkorb · {n_items} Teile",
+                 lists[0]["name"] if len(lists) == 1 else "Übersicht", "an der Kasse", grand)]
+    n = 1
     for L in lists:
-        top = _head(f'Einkaufsliste · {len(L["items"])} Teile', L["name"], "an der Kasse", L.get("total"))
-        lead = ""
-        if L.get("latest"):
-            lead = (f'<p class="lead">Alles da bis <b>{_e(L["latest"])}</b>'
-                    + (f' — am längsten braucht {_e(L["slowest"])}.' if L.get("slowest") else ".") + "</p>")
-        rec = f'<div class="rec"><div class="eyebrow">Empfehlung</div><p>{_e(L["summary"])}</p></div>' \
-            if L.get("summary") else ""
-        dec = ""
-        if L.get("decisions"):
-            dec = ('<section><h2>Zu entscheiden</h2><div class="cards">'
-                   + "".join(_decision(d) for d in L["decisions"]) + "</div></section>")
-        money = ""
-        if L.get("total") is not None:
-            money = _money(L["goods"], L["ship"], L["duty"], L["discount"])
-        go = (f'<div class="go"><a class="btn" href="{_e(L["checkout_url"])}" target="_blank" rel="noopener">'
-              f'Zur Kasse mit allen {len(L["items"])} Teilen</a><span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
-        rows = []
-        for it in L["items"]:
-            chips = [_kind_chip(it["kind"])]
-            if it.get("slowest"):
-                chips.append('<span class="chip global">am langsamsten</span>')
-            if it.get("optional"):
-                chips.append('<span class="chip off">zum Vergleich</span>')
-            extra = f'<small>{_e(it["extra"])}</small>' if it.get("extra") else ""
-            if (it.get("pieces") or 1) > 1:
-                extra = f'<small>{it["pieces"]} Stk · {eur(it["unit"])}/Stk</small>' + extra
-            rows.append(
-                f'<div class="row">{_img(it.get("img"))}<div class="t">'
-                f'<a class="need" href="{_e(it["url"])}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
-                f'{_e(it["need"])}</a><div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>'
-                f'<span>bis {_e(it["until"])}</span>{"".join(chips)}</div></div>'
-                f'<div class="money"><b>{eur(it["cost"])}</b>{extra}</div></div>')
-        parts = (f'<section><h2>Die Teile</h2>{money}<div class="rows">{"".join(rows)}</div></section>')
-        out.append(top + lead + rec + dec + go + parts)
+        html, n = _cart_list(L, n)
+        out.append(html)
     if others:
         rows = "".join(
             f'<div class="row">{_img(o.get("img"))}<div class="t">'
@@ -288,9 +339,9 @@ def cart_page(lists: list[dict], others: list[dict], stamp: str) -> str:
             f'<div class="money"><b>{eur(o["cost"])}</b></div></div>' for o in others)
         out.append(f'<details class="others"><summary>Sonst im Korb: {len(others)} Zeilen auf keiner Liste</summary>'
                    f'<div class="rows">{rows}</div></details>')
-    out.append(f"<footer>Stand {_e(stamp)}. Preise von der Kassenseite, nichts bestellt. Preis je Teil = Ware + Versand "
-               "+ Einfuhrabgabe (Choice-Teile zahlen ihre Abgabe gemeinsam, siehe oben).</footer>")
-    return _page("Warenkorb " + (lists[0]["name"] if lists else "Übersicht"), "\n".join(out))
+    out.append(f"<footer>Stand {_e(stamp)}. Preise von der Kassenseite, nichts bestellt. Globale Zeilen enthalten ihre "
+               "Einfuhrabgabe, bei Choice steht sie einmal unter der Gruppe.</footer>")
+    return _page("Warenkorb " + (lists[0]["name"] if len(lists) == 1 else "Übersicht"), "\n".join(out))
 
 
 def plan_page(name: str, picks: list[dict], total: dict, stamp: str) -> str:
