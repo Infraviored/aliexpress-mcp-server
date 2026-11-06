@@ -23,6 +23,11 @@ the speed costs.
 
 Cart questions: `view_cart(summary=…, options=…)` — pass your recommendation;
 publish its page the same way. Existing lines onto a list: `set_cart_list`.
+The cart page is one page for all lists (one header, one total, rows grouped by Choice and
+global, a note when the rows do not add up to the checkout). Its numbered "Zu entscheiden"
+items change price or date and have no buttons: add one `decide add` card per item
+(`--option` per choice, `--recommend`), as `view_cart` tells you. Items that change nothing
+are notes; do not turn those into questions. (Product comparisons stay on the pick page below.)
 Real total for any lines: `checkout_preview`. One product, N pieces: `best_offer`.
 
 ## Reports
