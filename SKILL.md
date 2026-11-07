@@ -78,6 +78,9 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
   "5 Black" (5-spool bundle) counts as ONE piece unless you pass `packs="5 black=5; 1 black=1"`;
   without it a request for 5 spools is priced as 5 bundles (25 spools). Check the product
   page when `best_offer` warns that no pack size was found.
+- Need several pieces (8 sensors, 5 buttons)? `search_products(..., pieces=N, match="…")` prices the top hits
+  for exactly N pieces (pack ladders, shipping, import, discounts) and ranks by net total. The plain
+  search price is the cheapest single variant: a dearer-looking item with a "10PCS" variant is often cheaper.
 - Fewer calls, fewer bot checks. The server pauses 2–3.5 s between calls, remembers product
   pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
   fast with "bot check active"). Search first, then look closely at 2–4 candidates only,
