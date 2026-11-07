@@ -43,6 +43,13 @@ def test_combo_text_counts_checked_pieces(monkeypatch):
     assert m._combo_text({}, {"header": {"channels": []}}) == ""
 
 
+def test_view_cart_shows_combo_cart_when_main_cart_is_empty(monkeypatch):
+    empty = {"lines": [], "header": {"count": 0, "channels": [{"business": "nn_mix", "count": 2, "url": "u"}]}}
+    monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
+    monkeypatch.setattr(m, "_read_cart", lambda ck, business="": cartlib.parse([_state()]) if business else empty)
+    assert "Kombi-Knaller cart" in m.view_cart()
+
+
 def test_add_to_cart_combo_posts_business_and_reports_the_line(monkeypatch):
     sent = {}
     monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})

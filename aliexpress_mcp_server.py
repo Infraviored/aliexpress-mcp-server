@@ -2823,7 +2823,8 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
     except Exception as e:
         return f"Cart MTOP call failed: {e}"
     if not c["lines"]:
-        return f"The cart is empty (server count: {c['header'].get('count')})."
+        combo = _combo_text(cookies, c)      # the main cart may be empty while the Kombi-Knaller cart is not
+        return combo or f"The cart is empty (server count: {c['header'].get('count')})."
     tags = _line_store()
     text = cartlib.format_cart(c, show_unchecked=not checked_only, tags=tags)
     priced: dict[str, dict] = {}
@@ -3005,7 +3006,8 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
 def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "",
                 combo: bool = False) -> str:
     """
-    Add a product variant to the AliExpress cart and check it for checkout.
+    Add a product variant to the AliExpress cart and check it for checkout (the
+    Kombi-Knaller cart ticks new lines itself).
     This changes the real cart (it does not buy anything). Adding a variant
     that is already in the cart raises that line's quantity instead.
     Every cart line pays an import charge: prefer a bigger pack in one line.
@@ -3031,13 +3033,16 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
     except Exception as e:
         return f"Add to cart failed: {e}"
     if combo:
+        if list_name:
+            # an add of a variant already there replaces its line under a new id: forget the old id
+            old = [k for k, v in _line_store().items() if v.get("combo") and v.get("sku_id") == str(sku_id)
+                   and v.get("item_id") == str(item_id) and k != cid]
+            _remember_lines({cid: {"list": list_name.strip(), "need": need, "item_id": str(item_id), "sku_id": str(sku_id),
+                                   "own": True, "combo": True}}, drop=old)
         try:
             line = next((ln for ln in _read_cart(cookies, COMBO)["lines"] if ln["cart_id"] == cid), None)
         except Exception as e:
             return f"Added {quantity} × item {item_id} to the Kombi-Knaller cart, cart_id {cid}, but reading it failed: {e}"
-        if list_name:
-            _remember_lines({cid: {"list": list_name.strip(), "need": need, "item_id": str(item_id), "sku_id": str(sku_id),
-                                   "own": True, "combo": True}})
         return (f"Added to the Kombi-Knaller cart: {line['qty']} × {line['title'][:50]} ({line['variant']}), {line['price']} each, "
                 + ("checked" if line["checked"] else "NOT checked") + f", cart_id {cid}. 3+ pieces there pay no import charge."
                 if line else f"Added item {item_id} to the Kombi-Knaller cart, cart_id {cid} (view_cart shows it).")

@@ -50,7 +50,7 @@ def _comp(block: dict) -> str:
     return block.get("compName") or "" if isinstance(block, dict) else ""
 
 
-def _blocks(state: dict, comp: str) -> list[tuple[str, dict]]:
+def _blocks(state: dict, comp: "str | tuple[str, ...]") -> list[tuple[str, dict]]:
     return [(bid, b) for bid, b in (state.get("data") or {}).items() if _comp(b).startswith(comp)]
 
 
@@ -208,7 +208,7 @@ def parse(states: list[dict]) -> dict:
     for state in states:
         for _, b in _blocks(state, PRODUCT):
             ln = _line(b.get("fields") or {})
-            if ln["cart_id"] != "None":          # a block without a cart line (page furniture)
+            if ln["cart_id"] not in ("None", ""):          # a block without a cart line (page furniture)
                 lines[ln["cart_id"]] = ln
         for _, b in _blocks(state, GROUP_TITLE):
             f = b.get("fields") or {}
