@@ -19,6 +19,7 @@ def _html():
 def test_parser_flags_combo_hits():
     hits = m.parse_search_results(_html())
     assert {h["item_id"]: h["combo"] for h in hits} == {"111": True, "222": False}
+    assert "111" in m.COMBO_ITEMS and "222" not in m.COMBO_ITEMS      # the planner learns Kombi items from searches
 
 
 def test_search_marks_and_filters_combo(monkeypatch):

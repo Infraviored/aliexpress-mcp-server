@@ -81,6 +81,16 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
 - Need several pieces (8 sensors, 5 buttons)? `search_products(..., pieces=N, match="…")` prices the top hits
   for exactly N pieces (pack ladders, shipping, import, discounts) and ranks by net total. The plain
   search price is the cheapest single variant: a dearer-looking item with a "10PCS" variant is often cheaper.
+- Any saving counts, even 0.50 €. `search_products(cart_id=…)` ends with a verdict against that cart line;
+  `recheck_cart(list_name=…)` goes through the lines of a list and names every swap that saves money.
+- Kombi-Knaller (Bundle Deals): search hits marked "Kombi" ship in a separate cart (`add_to_cart(combo=True)`,
+  `view_cart` reads it). 3 or more such pieces in the combo order pay NO import charge, which is why they are
+  often much cheaper: prefer them. `shop_list` does this itself: it prices Kombi hits without the charge when the
+  plan reaches 3 combo pieces (and puts the charge back when it does not), reports a "Kombi-Knaller order" apart
+  from the main cart, and `apply=True` puts those lines into the combo cart. The combo cart is ordered on its own
+  checkout page; "Limit exceeded, remove N items" means order it in several rounds, each with 3+ pieces
+  (ALIEXPRESS_COMBO_MAX_LINES sets the limit the plan splits by, 0 = unknown). Adding a variant already in the combo
+  cart REPLACES its line (new cart_id): pass the total quantity. Check the combo cart price against the plan.
 - Fewer calls, fewer bot checks. The server pauses 2–3.5 s between calls, remembers product
   pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
   fast with "bot check active"). Search first, then look closely at 2–4 candidates only,
