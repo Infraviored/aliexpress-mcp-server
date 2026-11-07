@@ -637,6 +637,8 @@ def search_products(
         products = _search(query, sort_by, page, choice_only)
     except PermissionError:
         return AUTH_EXPIRED_MSG
+    except RuntimeError as e:
+        return f"Search not done: {e}" + blocked_msg()
     if combo_only:
         products = [p for p in products if p.get("combo")]
     if min_rating > 0:
@@ -801,6 +803,10 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
     return "\n".join(out)
 
 
+SEARCH_TTL = float(os.environ.get("ALIEXPRESS_SEARCH_TTL", "1800"))
+_SEARCH_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+
+
 def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only: bool = False) -> list[dict]:
     """
     Search results as dicts (item_id, title, price, rating, orders, choice, ...).
@@ -823,15 +829,30 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
     if choice_only:
         params["SearchText"] = query
         params["selectedSwitches"] = "filterCode:choice_atm"
+    key = (query.strip().lower(), sort_by, page, choice_only)
+    hit = _SEARCH_CACHE.get(key)
+    if hit and time.time() - hit[0] < SEARCH_TTL:
+        return [dict(h) for h in hit[1]]
+    if (left := _bot_cooldown_left()) > 0:        # asking again during a block only deepens it
+        raise RuntimeError(f"bot check active, paused for another {int(left)} s")
+    _mtop_pace()                                   # a search page is as much a request as an mtop call
     client = get_client()
     try:
         resp = client.get(url_path, params=params)
         if check_auth_redirect(resp):
             raise PermissionError("auth expired")
+        found = parse_search_results(resp.text)
+        if "punish" in str(resp.url).lower() or "_____tmd_____" in str(resp.url) or (
+                not found and re.search(r"x5secdata|_____tmd_____|punish", resp.text[:20000])):
+            _bot_note(True)
+            raise RuntimeError("bot check: AliExpress asked for a slider on the search page; "
+                               f"calls pause for {int(BOT_COOLDOWN)} s")
         resp.raise_for_status()
         # The filter lets the odd hit through whose card lacks the Choice
         # badge; the product page decides (shop_list checks it there).
-        return parse_search_results(resp.text)
+        if found:
+            _SEARCH_CACHE[key] = (time.time(), found)
+        return [dict(h) for h in found]
     finally:
         client.close()
 
@@ -2726,6 +2747,9 @@ def _edit_delete(fields):
     fields["operationType"] = "delete"
 
 
+LINE_NOT_FOUND = "not found in cart"      # the one message _cart_action_any reacts to
+
+
 def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
                       merged: Optional[dict] = None, business: str = "") -> tuple[list[str], dict[str, str]]:
     """
@@ -2742,7 +2766,7 @@ def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
         cid = str(cid).strip()
         bid = cartlib.item_blocks(merged).get(cid)
         if bid is None:
-            failed[cid] = "not found in cart"
+            failed[cid] = LINE_NOT_FOUND
             continue
         block = json.loads(json.dumps(merged["data"][bid]))
         edit(block.setdefault("fields", {}))
@@ -2985,6 +3009,129 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
     return "\n".join(out)
 
 
+def _kombi_orders(picks: list[dict], limit: int) -> list[list[dict]]:
+    """Split the Kombi picks into orders of at most `limit` lines; each order needs 3+ pieces (a short last one joins the one before)."""
+    orders: list[list[dict]] = []
+    for p in sorted(picks, key=lambda x: -x["pieces"]):
+        orders.append([p]) if not orders or len(orders[-1]) >= limit else orders[-1].append(p)
+    pcs = lambda o: sum(p["pieces"] for p in o)
+    while len(orders) > 1 and min(map(pcs, orders)) < COMBO_MIN_PIECES:     # an order below 3 pieces saves nothing:
+        orders.sort(key=pcs)                                                # join the two smallest (limit is soft then)
+        small = orders.pop(0)
+        orders[0] += small
+    return orders
+
+
+def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        c = _read_cart(cookies)
+    except Exception as e:
+        return f"Cart MTOP call failed: {e}"
+    tags = _line_store()
+    todo = [ln for ln in c["lines"] if (tags.get(ln["cart_id"]) or {}).get("list")
+            and (not list_name or tags[ln["cart_id"]]["list"] == list_name)]
+    if not todo:
+        return "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + "; nothing to compare."
+    chunk = todo[max(0, skip): max(0, skip) + max(1, max_lines)]
+    moves, none, unsure, failed = [], [], [], []
+    for n_done, ln in enumerate(chunk):
+        t = tags[ln["cart_id"]]
+        name = t.get("need") or ln["title"][:50]
+        progress(n_done, len(chunk), name[:40])
+        pieces = max(1, ln["qty"] * deals.pack_size(ln["variant"]))
+        query = t.get("query") or t.get("need") or ln["title"][:60]
+        try:
+            hits = [h for h in _search(query) if h.get("combo")]
+            if not hits:
+                none.append(f"- {name} ({ln['cart_id']}): no Kombi-Knaller offer in the hits of '{query}'")
+                continue
+            rows, _, _ = _price_hits(hits, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False)
+            cur = _current_way(ln, pieces)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            failed.append(f"{name} ({ln['cart_id']}): {e}")
+            continue
+        rows = [(w, h) for w, h in rows if w["pieces"] >= pieces]
+        if not cur or not rows:
+            failed.append(f"{name} ({ln['cart_id']}): Kombi offers or the line could not be priced")
+            continue
+        # With 3+ pieces in the combo order the import charge of a Kombi line is gone.
+        best = min(rows, key=lambda r: r[0]["net"] - (0 if r[0].get("combo_free") else r[0].get("duty_back", 0.0)))
+        w, h = best
+        kombi_net = w["net"] - (0 if w.get("combo_free") else w.get("duty_back", 0.0))
+        gain = cur["net"] - kombi_net
+        entry = {"name": name, "cart_id": ln["cart_id"], "pieces": w["pieces"], "gain": gain, "kombi_net": kombi_net,
+                 "now": cur["net"], "item_id": h["item_id"], "title": h["title"][:70], "way": w,
+                 "do": ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])}
+        if gain <= 0.004:
+            none.append(f"- {name} ({ln['cart_id']}): Kombi is not cheaper ({kombi_net:.2f} vs {cur['net']:.2f} net)")
+        elif not t.get("match"):
+            unsure.append(f"- {name} ({ln['cart_id']}): Kombi {h['title'][:60]} ({h['item_id']}) would save {gain:.2f} - UNVERIFIED, "
+                          "no match words on this line; check that it is the same article first")
+        else:
+            moves.append(entry)
+    out = [f"Kombi-Knaller check of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, discounts; Kombi without "
+           "import charge, which needs 3+ Kombi pieces in the order):"]
+    if moves:
+        pcs = sum(m_["pieces"] for m_ in moves)
+        out.append(f"KOMBI IS CHEAPER for {len(moves)} line(s), total {sum(m_['gain'] for m_ in moves):.2f} {CURRENCY}, {pcs} Kombi pieces:")
+        for m_ in sorted(moves, key=lambda x: -x["gain"]):
+            out.append(f"- {m_['name']} x{m_['pieces']} (cart_id {m_['cart_id']}): now {m_['now']:.2f} -> Kombi {m_['kombi_net']:.2f}, "
+                       f"SAVES {m_['gain']:.2f}\n  {m_['title']}\n  do: add_to_cart item {m_['item_id']} {m_['do']} combo=True, "
+                       f"then remove_from_cart {m_['cart_id']}")
+        limit = COMBO_MAX_LINES or 10
+        orders = _kombi_orders(moves, limit) if pcs >= COMBO_MIN_PIECES else []
+        if not orders:
+            out.append(f"Only {pcs} Kombi piece(s): below {COMBO_MIN_PIECES}, so no import charge is saved. Leave it.")
+        else:
+            out.append(f"Orders ({len(orders)}; up to {limit} lines each"
+                       + ("" if COMBO_MAX_LINES else ", the real limit is not measured: if the checkout says 'Limit exceeded' use more rounds")
+                       + "):")
+            for i, o in enumerate(orders, 1):
+                out.append(f"  Order {i}: " + ", ".join(f"{x['name']} x{x['pieces']}" for x in o)
+                           + f" = {sum(x['pieces'] for x in o)} pcs")
+            out.append("Everything else stays in the main cart (its import charges drop with each line that moves).")
+    else:
+        out.append("No line is cheaper as Kombi.")
+    if unsure:
+        out += ["UNSURE - not moves:"] + unsure
+    if none:
+        out += ["No Kombi advantage:"] + none
+    if failed:
+        out += ["Could not check:"] + failed
+    nxt = max(0, skip) + len(chunk)
+    out.append(f"{len(todo) - nxt} lines left: run kombi_check again with skip={nxt}." if nxt < len(todo) else "All listed lines are done.")
+    return "\n".join(out)
+
+
+@tool(slow=True)
+def kombi_check(list_name: str = "", rank_top: int = 6, max_lines: int = 12, skip: int = 0, job_id: str = "") -> str:
+    """
+    Where would the Kombi-Knaller (Bundle Deals) be cheaper? For each cart line of
+    a shopping list: searches its need, takes only the hits flagged Kombi, prices them
+    for the same number of pieces WITHOUT import charge (3+ Kombi pieces in the
+    combo order) and compares with the line as it stands (shipping, import,
+    discounts). Result: the lines where Kombi wins, with the saving, the add/remove
+    steps, and the Kombi lines spread over orders (the combo checkout has a line
+    limit; several orders cost nothing extra). Lines without match words are only
+    UNSURE. Read-only. Cheap: one search per line (cached 30 min) plus the few
+    Kombi hits. Runs as a background job like recheck_cart: after a minute it answers
+    with progress and a job_id; call again with job_id to pick it up.
+
+    Args:
+        list_name: only lines of this shopping list (empty: all listed lines).
+        rank_top: Kombi hits priced per line (max 25).
+        max_lines: lines per call; continue with skip.
+        skip: lines to skip first.
+        job_id: pick up a running or finished check.
+    """
+    return _job_result(job_id, "kombi", lambda progress: _kombi_run(list_name, rank_top, max_lines, skip, progress))
+
+
 _JOBS: dict[str, dict] = {}
 JOB_WAIT_S = float(os.environ.get("ALIEXPRESS_JOB_WAIT", "60"))
 
@@ -3131,20 +3278,30 @@ def select_cart_items(cart_ids: list[str], only: bool = False, selected: bool = 
             more than 10, the first 10 stay checked).
         only: uncheck every other line first, so the cart shows exactly these.
         selected: False unchecks the given lines instead.
+
+    A cart_id that is not in the main cart is looked up in the Kombi-Knaller
+    cart (view_cart lists both); `only` then applies to each cart on its own.
     """
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
     try:
-        return _select(cookies, [str(c).strip() for c in cart_ids], only=only, selected=selected)[0]
+        ids = [str(c).strip() for c in cart_ids if str(c).strip()]
+        lost: list[str] = []
+        text = _select(cookies, ids, only=only, selected=selected, unknown_out=lost)[0]
+        if lost:
+            text += "\n\nKombi-Knaller cart (ids not in the main cart):\n" + _select(
+                cookies, lost, only=only, selected=selected, business=COMBO)[0]
+        return text
     except Exception as e:
         return f"Cart call failed: {e}"
 
 
 def _select(cookies: dict[str, str], want: list[str], only: bool = False,
-            selected: bool = True) -> tuple[str, dict]:
-    """Check / uncheck lines in one pass; returns the report and the cart afterwards."""
-    merged, pages = _cart_pages(cookies)
+            selected: bool = True, business: str = "", unknown_out: Optional[list] = None) -> tuple[str, dict]:
+    """Check / uncheck lines in one pass; returns the report and the cart afterwards.
+    `unknown_out` collects the ids not in this cart. `business`: COMBO for the Kombi-Knaller cart (own page, no 10-line limit known, no checkout link)."""
+    merged, pages = _cart_pages(cookies, business)
     before = cartlib.parse(pages)
     titles = {ln["cart_id"]: f"{ln['title'][:40]} ({ln['variant']})" for ln in before["lines"]}
     state_of = {ln["cart_id"]: ln["checked"] for ln in before["lines"]}
@@ -3152,35 +3309,56 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False,
     want = [c for c in want if c in state_of]
     out = []
     if not selected:
-        done, failed = _cart_line_action(cookies, {c: _edit_check(False) for c in want if state_of[c]}, merged)
+        done, failed = _cart_line_action(cookies, {c: _edit_check(False) for c in want if state_of[c]}, merged, business)
         out.append(f"Unchecked {len(done)} line(s).")
     else:
         # Uncheck first: AliExpress keeps only MAX_CHECKED lines checked.
         off = [c for c, on in state_of.items() if on and c not in want] if only else []
-        keep = want[:cartlib.MAX_CHECKED]
+        keep = want if business else want[:cartlib.MAX_CHECKED]
         on = [c for c in keep if not state_of[c]]
         done, failed = _cart_line_action(
-            cookies, {**{c: _edit_check(False) for c in off}, **{c: _edit_check(True) for c in on}}, merged)
+            cookies, {**{c: _edit_check(False) for c in off}, **{c: _edit_check(True) for c in on}}, merged, business)
         out.append(f"Checked {sum(1 for c in on if c in done)} line(s); {len(keep) - len(on)} were already checked.")
         if any(c in done for c in off):
             out.append("Unchecked (not in the list): " + "; ".join(titles[c] for c in off if c in done))
-        if len(want) > cartlib.MAX_CHECKED:
+        if not business and len(want) > cartlib.MAX_CHECKED:
             out.append(f"AliExpress keeps only {cartlib.MAX_CHECKED} lines checked on the cart page; "
                        f"the other {len(want) - cartlib.MAX_CHECKED} stay unchecked there "
                        f"but are included in the checkout link below.")
     for c, why in failed.items():
         out.append(f"Failed {titles.get(c, c)}: {why}")
-    if unknown:
+    if unknown_out is not None:
+        unknown_out.extend(unknown)
+    elif unknown:
         out.append("Not in cart: " + ", ".join(unknown))
-    after = _read_cart(cookies)
+    after = _read_cart(cookies, business)
     s = after["summary"]
-    if s.get("total") is not None:
+    if business:
+        pick = [ln for ln in after["lines"] if ln["valid"] and ln["checked"]]
+        pieces = sum(ln["qty"] for ln in pick)
+        out.append(f"Kombi-Knaller cart now: {len(pick)} line(s) checked = {pieces} pcs, goods "
+                   f"{sum((ln['price'] or 0) * ln['qty'] for ln in pick):.2f} {CURRENCY}; "
+                   + ("3+ pieces: no import charge." if pieces >= 3 else "fewer than 3 pieces: the import charge is NOT covered.")
+                   + " It is ordered on its own page (view_cart shows the link).")
+    elif s.get("total") is not None:
         out.append(f"Cart page now: {sum(1 for ln in after['lines'] if ln['checked'])} line(s) checked, "
                    f"goods {s.get('subtotal') or 0:.2f} + shipping {s.get('shipping') or 0:.2f} = "
                    f"{s['total']:.2f} {s.get('currency') or CURRENCY}")
-    if selected and want:
+    if selected and want and not business:
         out.append(f"Checkout link ({len(want)} line(s)): {cartlib.checkout_url(want)}")
     return "\n".join(out), after
+
+
+def _cart_action_any(cookies: dict[str, str], edits: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    """Run line actions on the main cart; lines it does not have are tried in the Kombi-Knaller cart."""
+    done, failed = _cart_line_action(cookies, edits)
+    lost = {c: e for c, e in edits.items() if failed.get(c) == LINE_NOT_FOUND}
+    if lost:
+        d2, f2 = _cart_line_action(cookies, lost, business=COMBO)
+        failed = {**{c: w for c, w in failed.items() if c not in lost}, **f2}
+        done = done + d2
+    return done, failed
+
 
 
 # Cart lines the MCP knows about: {cart_id: {item_id, sku_id, added, list,
@@ -3355,7 +3533,7 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
         return "quantity must be at least 1 (use remove_from_cart to delete a line)."
 
     try:
-        done, failed = _cart_line_action(cookies, {str(cart_id).strip(): _edit_qty(quantity)})
+        done, failed = _cart_action_any(cookies, {str(cart_id).strip(): _edit_qty(quantity)})
     except Exception as e:
         return f"Cart call failed: {e}"
     if failed:
@@ -3378,7 +3556,7 @@ def remove_from_cart(cart_ids: list[str]) -> str:
         return AUTH_EXPIRED_MSG
 
     try:
-        done, failed = _cart_line_action(cookies, {str(c).strip(): _edit_delete for c in cart_ids if str(c).strip()})
+        done, failed = _cart_action_any(cookies, {str(c).strip(): _edit_delete for c in cart_ids if str(c).strip()})
     except Exception as e:
         return f"Cart call failed: {e}"
     _remember_lines(drop=done)

@@ -91,6 +91,11 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
   checkout page; "Limit exceeded, remove N items" means order it in several rounds, each with 3+ pieces
   (ALIEXPRESS_COMBO_MAX_LINES sets the limit the plan splits by, 0 = unknown). Adding a variant already in the combo
   cart REPLACES its line (new cart_id): pass the total quantity. Check the combo cart price against the plan.
+- Kombi lines are handled like main cart lines: `select_cart_items`, `remove_from_cart` and `update_cart_quantity`
+  take their cart_id too (an id the main cart lacks is tried in the Kombi-Knaller cart). `kombi_check(list_name=…)`
+  (background job like `recheck_cart`) names the lines of a list that are cheaper as Kombi-Knaller, without import
+  charge, and spreads them over orders. Searches go through the same pacing gap as every call and are cached for
+  30 min; during a bot check they stop with a message instead of deepening it.
 - Fewer calls, fewer bot checks. The server pauses 2–3.5 s between calls, remembers product
   pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
   fast with "bot check active"). Search first, then look closely at 2–4 candidates only,
