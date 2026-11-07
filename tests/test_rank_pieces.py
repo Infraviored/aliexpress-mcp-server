@@ -116,7 +116,7 @@ def test_recheck_cart_lists_swaps_and_cheapest(monkeypatch):
     lines = [_line(), _line(cart_id="10", item_id="X", title="Taster")]
     monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
     monkeypatch.setattr(m, "_read_cart", lambda c: {"lines": lines})
-    monkeypatch.setattr(m, "_line_store", lambda: {"9": {"list": "L", "need": "SHT41"}, "10": {"list": "L", "need": "Taster"}})
+    monkeypatch.setattr(m, "_line_store", lambda: {"9": {"list": "L", "need": "SHT41", "match": "GY-302"}, "10": {"list": "L", "need": "Taster"}})
     monkeypatch.setattr(m, "_search", lambda *a, **k: _hits())
     monkeypatch.setattr(m.time, "sleep", lambda s: None)
 
@@ -129,3 +129,61 @@ def test_recheck_cart_lists_swaps_and_cheapest(monkeypatch):
     assert "SAVES 0.50" in out and "remove_from_cart 9" in out
     assert "Taster (10): already cheapest" in out and "All listed lines are done." in out
     assert "skip=1" in m.recheck_cart(max_lines=1)
+
+
+def test_recheck_without_match_words_is_unsure_not_a_swap(monkeypatch):
+    monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
+    monkeypatch.setattr(m, "_read_cart", lambda c: {"lines": [_line()]})
+    monkeypatch.setattr(m, "_line_store", lambda: {"9": {"list": "L", "need": "PSU 30W"}})
+    monkeypatch.setattr(m, "_search", lambda *a, **k: _hits())
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    monkeypatch.setattr(m, "_ways_for", lambda i, spec, dc: ([_way(5, 16.61 if spec.get("sku_id") else 9.0)], []))
+    out = m.recheck_cart()
+    assert "SWAP LIST: empty" in out and "UNSURE" in out and "remove_from_cart" not in out
+
+
+def test_job_runs_in_background_and_is_picked_up(monkeypatch):
+    import threading
+    gate = threading.Event()
+    monkeypatch.setattr(m, "JOB_WAIT_S", 0.3)
+
+    def work(progress):
+        progress(1, 2, "x")
+        gate.wait(5)
+        return "RESULT"
+    first = m._job_result("", "t", work)
+    assert "Still running" in first and "1 of 2 lines done" in first
+    jid = first.split("job ")[1].split(",")[0]
+    gate.set()
+    done = m._job_result(jid, "t", work)
+    assert done.startswith("RESULT") and "AliExpress call(s)" in done
+    assert "No job" in m._job_result("nope", "t", work)
+
+
+def test_tools_run_in_threads_and_report_time():
+    import asyncio, threading, time
+    seen = {}
+
+    @m.tool()
+    def probe_tool(x: int = 1) -> str:
+        seen["thread"] = threading.current_thread().name
+        time.sleep(1.1)
+        return "ok"
+    out = asyncio.run(m.mcp.call_tool("probe_tool", {"x": 2}))
+    text = str(out)
+    assert "ok" in text and "(took 1 s" in text
+    assert seen["thread"] != threading.main_thread().name
+
+
+def test_slow_tool_with_background_job_does_not_wait_for_itself(monkeypatch):
+    import asyncio, time
+    monkeypatch.setattr(m, "_mtop_pace_locked", lambda *a: None)
+    monkeypatch.setattr(m, "JOB_WAIT_S", 5)
+
+    @m.tool(slow=True)
+    def deadlock_probe() -> str:
+        return m._job_result("", "t", lambda progress: (m._mtop_pace(), "RESULT")[1])
+    t0 = time.time()
+    out = asyncio.run(m.mcp.call_tool("deadlock_probe", {}))
+    assert "RESULT" in str(out) and time.time() - t0 < 3
+    assert out[0][0].text.count("AliExpress call(s)") == 1      # one footer, from the job
