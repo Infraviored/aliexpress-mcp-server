@@ -565,8 +565,8 @@ def search_products(
             cached for hours; the rest are not looked at).
         cart_id: A line already in the cart for this need: it is priced the
             same way and the result ends with "CHEAPER THAN CART LINE by X"
-            or "already the cheapest". pieces defaults to that line's
-            quantity x pack size; match/avoid default to the line's list tags.
+            or "already the cheapest". pieces is taken from that line
+            (quantity x pack size); match/avoid default to the line's list tags.
         combo_only: Only "Kombi-Knaller" (Bundle Deals) hits: 3 or more such
             items in the combo cart (a separate channel cart, see view_cart)
             are ordered without import charge. This IS the search inside the
@@ -586,13 +586,18 @@ def search_products(
         line = None
         if cart_id:
             cookies = load_cookies()
-            line = next((x for x in _read_cart(cookies)["lines"] if x["cart_id"] == str(cart_id)), None) if cookies else None
+            if not cookies:
+                return AUTH_EXPIRED_MSG
+            try:
+                line = next((x for x in _read_cart(cookies)["lines"] if x["cart_id"] == str(cart_id)), None)
+            except Exception as e:
+                return f"Cart MTOP call failed: {e}"
             if not line:
                 return f"cart_id {cart_id} is not in the cart (view_cart lists the ids)."
             tag = _line_store().get(line["cart_id"], {})
             match, avoid = match or tag.get("match", ""), avoid or tag.get("avoid", "")
-            if pieces <= 1:
-                pieces = line["qty"] * deals.pack_size(line["variant"])
+            # the line is compared like for like: its own quantity x pack, whatever `pieces` says
+            pieces = line["qty"] * deals.pack_size(line["variant"])
         return _rank_for_pieces(query, products, max(1, pieces), match, avoid, rank_top, choice_only, line)
 
     if not products:
@@ -676,6 +681,7 @@ def _current_way(ln: dict, pieces: int) -> Optional[dict]:
 
 def _saving(rows: list[tuple[dict, dict]], cur: Optional[dict]) -> tuple[float, Optional[tuple[dict, dict]]]:
     """(saving in net EUR, the cheaper row) of the best hit against the cart line; 0 and None if the line wins."""
+    rows = [r for r in rows if cur and r[0]["pieces"] >= cur["pieces"]]   # fewer pieces is no saving
     if not rows or not cur:
         return 0.0, None
     gain = cur["net"] - rows[0][0]["net"]
@@ -714,7 +720,13 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
     out.append("Variants priced by name only: check get_variant_images on the pick; bait variants are skipped when far cheaper than the rest.")
     out += notes[:5]
     if line:
-        cur = _current_way(line, pieces)
+        try:
+            cur = _current_way(line, pieces)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            logger.debug("cart line %s not priced: %s", line["cart_id"], e)
+            cur = None
         gain, best = _saving(rows, cur)
         if not cur:
             out.append(f"CART LINE {line['cart_id']}: could not be priced, compare by hand.")
@@ -2706,7 +2718,9 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     except Exception as e:
         return f"Cart MTOP call failed: {e}"
     tags = _line_store()
-    todo = [ln for ln in c["lines"] if ln["cart_id"] in tags and (not list_name or tags[ln["cart_id"]].get("list") == list_name)]
+    skip = max(0, skip)
+    todo = [ln for ln in c["lines"] if (tags.get(ln["cart_id"]) or {}).get("list")      # only lines that belong to a list
+            and (not list_name or tags[ln["cart_id"]]["list"] == list_name)]
     if not todo:
         return "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + "; nothing to recheck."
     chunk = todo[skip: skip + max(1, max_lines)]

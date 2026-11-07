@@ -75,6 +75,43 @@ def test_search_with_cart_id_ends_with_verdict(monkeypatch):
     assert "not in the cart" in m.search_products("SHT41", cart_id="404")
 
 
+def test_fewer_pieces_is_no_saving():
+    one_piece = (_way(1, 3.5), {"item_id": "B"})
+    assert m._saving([one_piece], _way(5, 10.0)) == (0.0, None)
+
+
+def test_cart_id_compares_the_lines_own_quantity_and_survives_auth_and_cart_errors(monkeypatch):
+    monkeypatch.setattr(m, "_search", lambda *a, **k: _hits())
+    monkeypatch.setattr(m, "load_cookies", lambda: None)
+    assert m.search_products("x", cart_id="9") == m.AUTH_EXPIRED_MSG
+    monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
+
+    def boom(c):
+        raise RuntimeError("deny")
+    monkeypatch.setattr(m, "_read_cart", boom)
+    assert "Cart MTOP call failed" in m.search_products("x", cart_id="9")
+    seen = []
+    monkeypatch.setattr(m, "_read_cart", lambda c: {"lines": [_line()]})
+    monkeypatch.setattr(m, "_line_store", lambda: {})
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    monkeypatch.setattr(m, "_rank_for_pieces", lambda q, p, pieces, *a: seen.append(pieces) or "R")
+    m.search_products("x", cart_id="9", pieces=10)
+    assert seen == [5]                                               # the line's 5 x 1, not the 10 asked for
+
+
+def test_recheck_cart_skips_unlisted_lines_and_negative_skip(monkeypatch):
+    lines = [_line(), _line(cart_id="10", item_id="X")]
+    monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
+    monkeypatch.setattr(m, "_read_cart", lambda c: {"lines": lines})
+    monkeypatch.setattr(m, "_line_store", lambda: {"10": {"item_id": "X", "added": 1}})   # added, no list
+    assert "nothing to recheck" in m.recheck_cart()
+    monkeypatch.setattr(m, "_line_store", lambda: {"9": {"list": "L"}})
+    monkeypatch.setattr(m, "_search", lambda *a, **k: _hits())
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    monkeypatch.setattr(m, "_ways_for", lambda i, spec, dc: ([_way(5, 9.0)], []))
+    assert "skip=-" not in m.recheck_cart(skip=-3)
+
+
 def test_recheck_cart_lists_swaps_and_cheapest(monkeypatch):
     lines = [_line(), _line(cart_id="10", item_id="X", title="Taster")]
     monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
