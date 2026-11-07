@@ -96,6 +96,10 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
   (background job like `recheck_cart`) names the lines of a list that are cheaper as Kombi-Knaller, without import
   charge, and spreads them over orders. Searches go through the same pacing gap as every call and are cached for
   30 min; during a bot check they stop with a message instead of deepening it.
+- Call budget: at most 12 AliExpress calls per minute over everything (25 per minute ended in a bot
+  check, seen in the call log). A quick `search_products` with `pieces` prices at most 4 NEW product pages
+  per request and names the rest as "not priced": ask again, the first ones are cached and cost nothing.
+  Long jobs (`recheck_cart`, `kombi_check`) run slower instead of skipping. Do not run two of them at once.
 - Fewer calls, fewer bot checks. The server pauses 2–3.5 s between calls, remembers product
   pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
   fast with "bot check active"). Search first, then look closely at 2–4 candidates only,

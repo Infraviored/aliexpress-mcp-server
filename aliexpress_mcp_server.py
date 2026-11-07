@@ -289,6 +289,10 @@ def mtop_call(
 BOT_CHECK: dict[str, float] = {}
 MTOP_MIN_GAP = float(os.environ.get("ALIEXPRESS_MTOP_GAP", "2.0"))
 MTOP_JITTER = float(os.environ.get("ALIEXPRESS_MTOP_JITTER", "1.5"))
+# At most this many AliExpress calls per minute over all processes (25 per minute in a row ended in a bot check).
+MTOP_PER_MINUTE = int(os.environ.get("ALIEXPRESS_MTOP_PER_MINUTE", "12"))
+# A quick tool call (not a background job) prices at most this many uncached product pages; the rest waits for the next call.
+FRESH_PAGES_QUICK = int(os.environ.get("ALIEXPRESS_FRESH_PAGES", "4"))
 BOT_COOLDOWN = float(os.environ.get("ALIEXPRESS_BOT_COOLDOWN", "600"))
 _PACE_FILE = CREDENTIALS_PATH.parent / "aliexpress-mtop-last"
 _BOT_FILE = CREDENTIALS_PATH.parent / "aliexpress-botcheck.json"
@@ -344,15 +348,20 @@ def _mtop_pace_locked(fcntl, random) -> None:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
         try:
-            last = float(f.read() or 0)
-        except ValueError:
-            last = 0.0
-        wait = last + MTOP_MIN_GAP + random.uniform(0, MTOP_JITTER) - time.time()
+            times = [float(x) for x in json.loads(f.read() or "[]")]
+        except (ValueError, TypeError):
+            times = []                                      # empty, damaged or the old single-number format
+        now = time.time()
+        times = [x for x in times if now - 60 < x <= now]
+        wait = (times[-1] + MTOP_MIN_GAP + random.uniform(0, MTOP_JITTER) - now) if times else 0.0
+        if MTOP_PER_MINUTE > 0 and len(times) >= MTOP_PER_MINUTE:
+            wait = max(wait, times[-MTOP_PER_MINUTE] + 60 - now)     # the window is full: wait until its oldest call is a minute old
         if wait > 0:
             time.sleep(wait)
+        times.append(time.time())
         f.seek(0)
         f.truncate()
-        f.write(str(time.time()))
+        f.write(json.dumps(times[-max(1, MTOP_PER_MINUTE):]))
 
 
 def _bot_note(blocked: bool) -> None:
@@ -743,8 +752,14 @@ def _price_hits(products: list[dict], pieces: int, match: str, avoid: str, rank_
     hits = sorted(hits, key=lambda h: not h.get("choice"))[: max(1, min(int(rank_top), 25))]
     spec = {"pieces": pieces, "match": match, "avoid": avoid, "seller": "choice" if choice_only else "any"}
     rows, notes = [], []
+    fresh = 0
     for h in hits:
         cached = h["item_id"] in _PDP_CACHE
+        if not cached and not getattr(_CALL, "background", False) and FRESH_PAGES_QUICK > 0:
+            if fresh >= FRESH_PAGES_QUICK:
+                notes.append(f"{h['item_id']}: not priced (call limit per request, to avoid the bot check; ask again for more)")
+                continue
+            fresh += 1
         try:
             ways, n = _ways_for(h["item_id"], spec, 0.0)
         except PermissionError:
