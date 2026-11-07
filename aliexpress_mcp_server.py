@@ -1876,64 +1876,60 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
 
 
 def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], summary: str = "",
-                 options: Optional[list[dict]] = None, alternatives: bool = True) -> tuple[str, list[dict]]:
-    lists = []
+                 options: Optional[list[dict]] = None, alternatives: bool = True,
+                 combined: Optional[dict] = None) -> tuple[str, list[dict]]:
+    """One page for every listed line (`combined` = the checkout preview over all of them)."""
     by_list, rest = cartlib.by_list(cart, tags)
-    all_dec = []
-    for name, lines in by_list.items():
-        p = previews.get(name) or {}
-        dec = _decisions(cart, tags, lines, alternatives)
-        for o in (options or []) if name == next(iter(by_list)) else []:  # agent options: once, on the first list
-            dec.append({"kind": "agent", "title": o.get("title", ""), "facts": [o.get("text", "")] if o.get("text") else [],
-                        "img": o.get("img"), "link": o.get("link"), "link_text": o.get("link_text") or o.get("link"),
-                        "price": (o["delta"], o["delta"]) if isinstance(o.get("delta"), (int, float)) else None,
-                        "date": None, "do": o.get("do")})
-        all_dec += dec
-        dated = [ln for ln in lines if ln["delivery"][1]]
-        slow = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None
-        pieces = {ln["cart_id"]: ln["qty"] * deals.pack_size(ln["variant"]) for ln in lines}
-        duty_net = (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0)
-        duty_choice = max(0.0, duty_net - DUTY_PER_LINE * sum(1 for ln in lines if not ln["choice"]))
-        # rows vs checkout on goods + shipping only: independent of how the import charge is split
-        mismatch = (sum(cartlib.goods(ln) + (ln["ship"] or 0) for ln in lines)
-                    - (p.get("subtotal") or 0.0) - (p.get("shipping") or 0.0)) if p.get("total") is not None else 0.0
-        lists.append({
-            "name": name, "total": p.get("total"), "goods": p.get("subtotal") or 0.0,
-            "ship": p.get("shipping") or 0.0, "duty": duty_net, "duty_choice": duty_choice,
-            "mismatch": mismatch if abs(mismatch) > 0.05 else 0.0,
-            "discount": p.get("discounts") or 0.0,
-            "latest": _day(slow["delivery"][1]) if slow else None,
-            "slowest": (tags[slow["cart_id"]].get("need") or slow["title"][:30]) if slow else None,
-            "summary": summary, "decisions": dec,
-            "checkout_url": cartlib.checkout_url([ln["cart_id"] for ln in lines]),
-            "items": [{
-                "img": ln.get("image"), "need": tags[ln["cart_id"]].get("need") or ln["title"][:40],
-                "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html", "qty": ln["qty"],
-                "variant": ln["variant"] or "Standard",
-                "cost": cartlib.goods(ln) + (ln["ship"] or 0)
-                        + (DUTY_PER_LINE if not ln["choice"] else 0),
-                "extra": (f"inkl. {report.eur(ln['ship'] or 0)} Versand + {report.eur(DUTY_PER_LINE)} Abgabe"
-                          if not ln["choice"] else ""),
-                "pieces": pieces[ln["cart_id"]],
-                "unit": cartlib.goods(ln) / max(1, pieces[ln["cart_id"]]),
-                "kind": "Choice" if ln["choice"] else "global",
-                "until": _day(ln["delivery"][1]), "slowest": slow is ln,
-                "optional": bool(tags[ln["cart_id"]].get("optional")),
-            } for ln in sorted(lines, key=lambda x: (x["choice"], -cartlib.goods(x)))],
+    listed = [(name, ln) for name, lns in by_list.items() for ln in lns]
+    lines = [ln for _, ln in listed]
+    dec = _decisions(cart, tags, lines, alternatives) if lines else []
+    for o in options or []:
+        dec.append({"kind": "agent", "title": o.get("title", ""), "facts": [o.get("text", "")] if o.get("text") else [],
+                    "img": o.get("img"), "link": o.get("link"), "link_text": o.get("link_text") or o.get("link"),
+                    "price": (o["delta"], o["delta"]) if isinstance(o.get("delta"), (int, float)) else None,
+                    "date": None, "do": o.get("do")})
+    p = combined or {}
+    dated = [ln for ln in lines if ln["delivery"][1]]
+    slow = max(dated, key=lambda ln: ln["delivery"][1]) if dated else None
+    # rows vs checkout on goods + shipping only: independent of how the import charge is split
+    mismatch = (sum(cartlib.goods(ln) + (ln["ship"] or 0) for ln in lines)
+                - (p.get("subtotal") or 0.0) - (p.get("shipping") or 0.0)) if p.get("total") is not None else 0.0
+    names = list(by_list)
+    items = []
+    for name, ln in sorted(listed, key=lambda x: (x[1]["choice"], -cartlib.goods(x[1]))):
+        pieces = ln["qty"] * deals.pack_size(ln["variant"])
+        items.append({
+            "img": ln.get("image"), "need": tags[ln["cart_id"]].get("need") or ln["title"][:40],
+            "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html", "qty": ln["qty"],
+            "variant": ln["variant"] or "Standard", "cost": cartlib.goods(ln) + (ln["ship"] or 0),
+            "extra": f"inkl. {report.eur(ln['ship'])} Versand" if ln["ship"] else "",
+            "pieces": pieces, "unit": cartlib.goods(ln) / max(1, pieces),
+            "kind": "Choice" if ln["choice"] else "global", "list": name if len(names) > 1 else "",
+            "until": _day(ln["delivery"][1]), "slowest": slow is ln,
+            "optional": bool(tags[ln["cart_id"]].get("optional")),
         })
-    others = [{"img": ln.get("image"), "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html",
-               "qty": ln["qty"], "cost": cartlib.goods(ln)} for ln in rest]
-    urls = [it["img"] for L in lists for it in L["items"]] + [o["img"] for o in others] \
-        + [d.get("img") for d in all_dec]
+    unlisted = [{"img": ln.get("image"), "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html",
+                 "qty": ln["qty"], "cost": cartlib.goods(ln)} for ln in rest]
+    page = {
+        "name": names[0] if len(names) == 1 else "Übersicht", "total": p.get("total"),
+        "goods": p.get("subtotal") or 0.0, "ship": p.get("shipping") or 0.0,
+        "duty": (p.get("duty") or 0.0) - (p.get("duty_off") or 0.0), "discount": p.get("discounts") or 0.0,
+        "mismatch": mismatch if abs(mismatch) > 0.05 else 0.0,
+        "latest": _day(slow["delivery"][1]) if slow else None,
+        "slowest": (tags[slow["cart_id"]].get("need") or slow["title"][:30]) if slow else None,
+        "summary": summary, "decisions": dec, "items": items, "unlisted": unlisted,
+        "checkout_url": cartlib.checkout_url([ln["cart_id"] for ln in lines]),
+        "checkout_all_url": cartlib.checkout_url([ln["cart_id"] for ln in lines + rest]),
+    }
+    urls = [it["img"] for it in items] + [o["img"] for o in unlisted] + [d.get("img") for d in dec]
     imgs = report.inline_images(urls, _fetch_image)
-    for L in lists:
-        for it in L["items"]:
-            it["img"] = imgs.get(it["img"])
-        for d in L["decisions"]:
-            d["img"] = imgs.get(d.get("img")) if d.get("img") else None
-    for o in others:
+    for it in items:
+        it["img"] = imgs.get(it["img"])
+    for d in dec:
+        d["img"] = imgs.get(d.get("img")) if d.get("img") else None
+    for o in unlisted:
         o["img"] = imgs.get(o["img"])
-    return _write_report("cart.html", report.cart_page(lists, others, time.strftime("%d.%m.%Y %H:%M"))), all_dec
+    return _write_report("cart.html", report.cart_page(page, time.strftime("%d.%m.%Y %H:%M"))), dec
 
 
 def _plan_report(plan: dict) -> str:
@@ -1973,10 +1969,14 @@ def _cart_notes(cart: dict, tags: dict[str, dict], lines: list[dict]) -> list[st
     return notes
 
 
-def _chat_cart(cart: dict, tags: dict[str, dict], previews: dict[str, dict]) -> str:
-    """A few speakable lines per list: what checkout charges, the hints. Pictures and links are on the page."""
+def _chat_cart(cart: dict, tags: dict[str, dict], previews: dict[str, dict], combined: Optional[dict] = None) -> str:
+    """A few speakable lines: the one total, then per list what checkout charges and the hints. Pictures and links are on the page."""
     out = []
     by_list, rest = cartlib.by_list(cart, tags)
+    if combined and combined.get("total") is not None and len(by_list) > 1:
+        out.append(f"Alles zusammen an der Kasse {report.eur(combined['total'])}"
+                   + (f", alles da bis {_day(combined['latest'])}" if combined.get("latest") else "")
+                   + ". Die Zahlen je Liste unten sind einzelne Kassen und ergeben zusammen etwas anderes (gemeinsame Abgabe).")
     for name, lines in by_list.items():
         p = previews.get(name)
         line = f"Liste „{name}“: {len(lines)} Teile"
@@ -2575,8 +2575,16 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                             + checkoutlib.format_preview(priced[name], len(ids), cartlib.checkout_url(ids), DUTY_PER_LINE))
         except Exception as e:
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
+    n_lists = len(cartlib.by_list(c, tags)[0])
+    combined = next(iter(priced.values())) if n_lists == 1 and priced else None
+    all_ids = [ln["cart_id"] for lns in cartlib.by_list(c, tags)[0].values() for ln in lns]
+    if checkout and n_lists > 1 and all_ids:
+        try:
+            combined = _render_order(cookies, all_ids)
+        except Exception as e:
+            previews.append(f"## Combined checkout: preview failed ({e})")
     try:
-        page, dec = _cart_report(c, tags, priced, summary, options, alternatives)
+        page, dec = _cart_report(c, tags, priced, summary, options, alternatives, combined)
         real = [d for d in dec if report._is_decision(d)]
         if real:
             page += ("\n\nDecisions on the page, numbered as there. The page has no buttons: add ONE `decide add` card per "
@@ -2588,7 +2596,7 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                 + (f" — do: {d['do']}" if d.get("do") else "") for i, d in enumerate(real, 1)))
     except Exception as e:
         page = f"(page not written: {e})"
-    return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced),
+    return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined),
                          page, "## Details (for you)\n" + text] + previews)
 
 
