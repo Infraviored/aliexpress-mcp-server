@@ -520,6 +520,7 @@ def search_products(
     match: str = "",
     avoid: str = "",
     rank_top: int = 12,
+    cart_id: str = "",
 ) -> str:
     """
     Search AliExpress for products (60 results per page; the first 25 are listed).
@@ -527,6 +528,11 @@ def search_products(
     The price shown is the CHEAPEST variant, which is often bait: an
     accessory, a bare chip or 1 piece of a pack (ESP32-S3 "6.19 €" was a
     breakout board; the dev board was 12.19 €). Judge with best_offer.
+    THE POINT OF THIS SERVER IS THE CHEAPEST DEAL: any saving is a reason to
+    switch, also 0.10 EUR. There is no "not worth it" threshold; only bait
+    variants and wrong articles (check get_variant_images) rule an offer out.
+    To compare with a line already in the cart pass `cart_id`; to recheck the
+    whole cart use recheck_cart.
     NEED MORE THAN ONE PIECE? Pass `pieces`: the search then prices the top
     hits for exactly that many pieces (pack sizes, shipping, import charge,
     store discounts) and ranks them by what the order really costs, not by the single
@@ -554,6 +560,10 @@ def search_products(
         avoid: With pieces: words that rule a hit or variant out.
         rank_top: With pieces: how many hits to price (product-page calls,
             cached for hours; the rest are not looked at).
+        cart_id: A line already in the cart for this need: it is priced the
+            same way and the result ends with "CHEAPER THAN CART LINE by X"
+            or "already the cheapest". pieces defaults to that line's
+            quantity x pack size; match/avoid default to the line's list tags.
     """
     try:
         products = _search(query, sort_by, page, choice_only)
@@ -563,8 +573,18 @@ def search_products(
         products = [p for p in products if p.get("rating") and p["rating"] >= min_rating]
     if max_price > 0:
         products = [p for p in products if p.get("price") is not None and p["price"] <= max_price]
-    if pieces > 1 and products:
-        return _rank_for_pieces(query, products, pieces, match, avoid, rank_top, choice_only)
+    if (pieces > 1 or cart_id) and products:
+        line = None
+        if cart_id:
+            cookies = load_cookies()
+            line = next((x for x in _read_cart(cookies)["lines"] if x["cart_id"] == str(cart_id)), None) if cookies else None
+            if not line:
+                return f"cart_id {cart_id} is not in the cart (view_cart lists the ids)."
+            tag = _line_store().get(line["cart_id"], {})
+            match, avoid = match or tag.get("match", ""), avoid or tag.get("avoid", "")
+            if pieces <= 1:
+                pieces = line["qty"] * deals.pack_size(line["variant"])
+        return _rank_for_pieces(query, products, max(1, pieces), match, avoid, rank_top, choice_only, line)
 
     if not products:
         filters = []
@@ -608,9 +628,9 @@ def search_products(
     return "\n".join(lines)
 
 
-def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, avoid: str,
-                     rank_top: int, choice_only: bool) -> str:
-    """The top search hits priced for `pieces` (best pack mix, shipping, import, discounts), cheapest net first."""
+def _price_hits(products: list[dict], pieces: int, match: str, avoid: str, rank_top: int,
+                choice_only: bool) -> tuple[list[tuple[dict, dict]], int, list[str]]:
+    """Top hits priced for `pieces`: ([(best way, hit)] cheapest net first, hits looked at, notes)."""
     avoid_w, match_w = _words(avoid), _words(match)
     hits = [h for h in products if not any(w in (h.get("title") or "").lower() for w in avoid_w)]
     named = [h for h in hits if all(w in (h.get("title") or "").lower() for w in match_w)]
@@ -624,7 +644,7 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
         try:
             ways, n = _ways_for(h["item_id"], spec, 0.0)
         except PermissionError:
-            return AUTH_EXPIRED_MSG
+            raise
         except Exception as e:
             logger.debug("ranking %s failed: %s", h["item_id"], e)
             continue
@@ -633,27 +653,65 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
         notes += n[:1] if not ways else []
         if ways:
             rows.append((ways[0], h))
+    rows.sort(key=lambda r: (r[0]["net"], -r[0]["pieces"]))
+    return rows, len(hits), notes
+
+
+def _current_way(ln: dict, pieces: int) -> Optional[dict]:
+    """What the cart line costs now, priced like the hits (same shipping, import, discounts)."""
+    ways, _ = _ways_for(ln["item_id"], {"pieces": pieces, "sku_id": ln["sku_id"], "qty": ln["qty"]}, 0.0)
+    return ways[0] if ways else None
+
+
+def _saving(rows: list[tuple[dict, dict]], cur: Optional[dict]) -> tuple[float, Optional[tuple[dict, dict]]]:
+    """(saving in net EUR, the cheaper row) of the best hit against the cart line; 0 and None if the line wins."""
+    if not rows or not cur:
+        return 0.0, None
+    gain = cur["net"] - rows[0][0]["net"]
+    return (gain, rows[0]) if gain > 0.004 else (0.0, None)
+
+
+def _way_text(w: dict) -> str:
+    line = deals.fmt_way(w, CURRENCY)
+    if w["save"]:
+        line += f" - {w['save']:.2f} ({w['save_how']})"
+    return line + f" = {w['net']:.2f} net ({w['net'] / max(1, w['pieces']):.2f}/pc)" + (f" - ~{w['days']} days" if w.get("days") else "")
+
+
+def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, avoid: str,
+                     rank_top: int, choice_only: bool, line: Optional[dict] = None) -> str:
+    """The top search hits priced for `pieces` (best pack mix, shipping, import, discounts), cheapest net first.
+    With `line` (a cart line) it ends with the verdict against that line."""
+    try:
+        rows, looked, notes = _price_hits(products, pieces, match, avoid, rank_top, choice_only)
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
     if not rows:
         return (f"No hit of '{query}' could be priced for {pieces} pieces." + blocked_msg()
                 + ("".join(f"\n{n}" for n in notes[:5])))
-    rows.sort(key=lambda r: (r[0]["net"], -r[0]["pieces"]))
-    out = [f"{len(rows)} of the top {len(hits)} hits for '{query}' priced for {pieces} pieces "
+    out = [f"{len(rows)} of the top {looked} hits for '{query}' priced for {pieces} pieces "
            f"(net incl. shipping, {CURRENCY} {DUTY_PER_LINE:.2f} import per line, discounts; ranked by what the order costs, at least {pieces} pcs):"]
     for i, (w, h) in enumerate(rows, 1):
-        line = f"{i}. {h['title'][:80]}" + (" · Choice" if w["offer"]["choice"] else "")
+        head = f"{i}. {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
         if h.get("orders") is not None:
-            line += f" · {h['orders']} orders"
+            head += f" - {h['orders']} orders"
         if h.get("rating"):
-            line += f" ★{h['rating']}"
-        line += f"\n   {deals.fmt_way(w, CURRENCY)}"
-        if w["save"]:
-            line += f" − {w['save']:.2f} ({w['save_how']})"
-        line += f" = {w['net']:.2f} net ({w['net'] / max(1, w['pieces']):.2f}/pc)"
-        if w.get("days"):
-            line += f" · ~{w['days']} days"
-        out.append(line + f"\n   item_id: {h['item_id']}")
+            head += f" *{h['rating']}"
+        out.append(head + f"\n   {_way_text(w)}\n   item_id: {h['item_id']}")
     out.append("Variants priced by name only: check get_variant_images on the pick; bait variants are skipped when far cheaper than the rest.")
     out += notes[:5]
+    if line:
+        cur = _current_way(line, pieces)
+        gain, best = _saving(rows, cur)
+        if not cur:
+            out.append(f"CART LINE {line['cart_id']}: could not be priced, compare by hand.")
+        elif best:
+            w, h = best
+            out.append(f"CHEAPER THAN CART LINE {line['cart_id']} by {gain:.2f} {CURRENCY} net "
+                       f"(line now {cur['net']:.2f}, #1 {w['net']:.2f}, item {h['item_id']}). Any saving is a reason to switch: "
+                       "there is no trivial-saving threshold. Only a bait variant or the wrong article rules it out (get_variant_images).")
+        else:
+            out.append(f"CART LINE {line['cart_id']} is already the cheapest of the {len(rows)} priced ({cur['net']:.2f} net).")
     return "\n".join(out)
 
 
@@ -1328,7 +1386,8 @@ def get_variant_images(item_id: str, match: str = ""):
 def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_threshold: bool = True,
                packs: str = "") -> str:
     """
-    Cheapest way to get at least `pieces` pieces from one product: compares
+    Cheapest way to get at least `pieces` pieces from one product (any saving
+    over what you have is a reason to switch, no trivial-saving threshold): compares
     pack sizes and mixes (10×1, 2×5, 1×10 …) including shipping and the
     store's discounts/coupons and the import charge per cart line (ranked by
     net price; lists every discount). Non-Choice shipping is measured as
@@ -2606,10 +2665,90 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
 
 
 @mcp.tool()
+def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, skip: int = 0) -> str:
+    """
+    Is there anything cheaper than what is in the cart? For each cart line that
+    belongs to a shopping list (tags from shop_list/set_cart_list), searches
+    its need, prices the top hits (Choice first) for the same number of
+    pieces like search_products(pieces=N) and returns a SWAP LIST: line,
+    cheaper offer, saving in net EUR (shipping, import, discounts included),
+    biggest saving first, plus the lines that are already cheapest.
+    ANY saving is a reason to swap, also 0.10 EUR: no threshold. Only a bait
+    variant or a wrong article (get_variant_images on the pick) rules an offer out.
+    Read-only; slow (product pages are cached for hours, the server paces its
+    calls): work through a big cart with max_lines/skip and run it again with
+    skip=<next_skip> until it says all lines are done.
+
+    Args:
+        list_name: only lines of this shopping list (empty: all listed lines).
+        rank_top: hits priced per line (max 25).
+        max_lines: lines checked per call.
+        skip: lines to skip first (continue where the last call stopped).
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        c = _read_cart(cookies)
+    except Exception as e:
+        return f"Cart MTOP call failed: {e}"
+    tags = _line_store()
+    todo = [ln for ln in c["lines"] if ln["cart_id"] in tags and (not list_name or tags[ln["cart_id"]].get("list") == list_name)]
+    if not todo:
+        return "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + "; nothing to recheck."
+    chunk = todo[skip: skip + max(1, max_lines)]
+    swaps, same, failed = [], [], []
+    for ln in chunk:
+        t = tags[ln["cart_id"]]
+        pieces = max(1, ln["qty"] * deals.pack_size(ln["variant"]))
+        query = t.get("query") or t.get("need") or ln["title"][:60]
+        name = t.get("need") or ln["title"][:50]
+        try:
+            products = _search(query)
+            rows, _, _ = _price_hits(products, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False)
+            cur = _current_way(ln, pieces)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            failed.append(f"{name} ({ln['cart_id']}): {e}")
+            continue
+        gain, best = _saving(rows, cur)
+        if best:
+            w, h = best
+            swaps.append((gain, f"- {name} x{pieces} (cart_id {ln['cart_id']}): now {cur['net']:.2f} net -> {w['net']:.2f} net, "
+                                f"SAVES {gain:.2f} {CURRENCY}"
+                                + ("" if t.get("match") else "  [NO MATCH WORDS on this line: the article may be a different one, "
+                                                              "check title/variant before swapping]")
+                                + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
+                                + f"\n  {_way_text(w)}\n  do: item {h['item_id']} "
+                                + ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])
+                                + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}"))
+        elif cur and not rows:
+            failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced (bot check or no hit with the match words)"
+                          f" - search by hand; the line itself costs {cur['net']:.2f} net")
+        elif cur:
+            same.append(f"- {name} ({ln['cart_id']}): already cheapest of {len(rows)} priced ({cur['net']:.2f} net)")
+        else:
+            failed.append(f"{name} ({ln['cart_id']}): line could not be priced")
+    out = [f"Recheck of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, import, discounts):"]
+    out.append(f"SWAP LIST ({len(swaps)}, total saving {sum(g for g, _ in swaps):.2f} {CURRENCY}) - swap all of them, any saving counts; "
+               "check bait/wrong article via get_variant_images first:" if swaps else "SWAP LIST: empty, every checked line is already the cheapest.")
+    out += [t for _, t in sorted(swaps, key=lambda x: -x[0])]
+    if same:
+        out += ["Already cheapest:"] + same
+    if failed:
+        out += ["Could not check (compare by hand):"] + failed
+    nxt = skip + len(chunk)
+    out.append(f"{len(todo) - nxt} lines left: run recheck_cart again with skip={nxt}." if nxt < len(todo) else "All listed lines are done.")
+    return "\n".join(out)
+
+
+@mcp.tool()
 def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = "",
               options: Optional[list[dict]] = None, alternatives: bool = True) -> str:
     """
-    The cart, read-only: each shopping list with its lines, its checkout
+    The cart, read-only (it does not look for cheaper offers: recheck_cart does;
+    any saving, also 0.10 EUR, is a reason to switch): each shopping list with its lines, its checkout
     total and checkout link, leftovers flagged; then the other lines and a
     shipping analysis. Writes the overview page (cart.html) with the
     decisions (global lines → Choice offers, optional parts, leftovers).

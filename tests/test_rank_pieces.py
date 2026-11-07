@@ -3,7 +3,7 @@ import aliexpress_mcp_server as m
 
 
 def _way(pieces, net, choice=True):
-    return {"lines": [({"label": f"{pieces}PCS"}, 1)], "pieces": pieces, "goods": net - 3.57, "ship": 0.0,
+    return {"lines": [({"label": f"{pieces}PCS", "sku_id": "s1"}, 1)], "pieces": pieces, "goods": net - 3.57, "ship": 0.0,
             "duty": 3.57, "total": net, "net": net, "save": 0.0, "save_how": "", "days": 8,
             "offer": {"choice": choice}}
 
@@ -44,3 +44,51 @@ def test_bigger_pack_with_higher_total_does_not_win_on_unit_price(monkeypatch):
     monkeypatch.setattr(m.time, "sleep", lambda s: None)
     out = m._rank_for_pieces("x", _hits(), 8, "GY-302", "bad", 12, False)
     assert out.index("item_id: A") < out.index("item_id: B")
+
+
+def _line(**kw):
+    return dict({"cart_id": "9", "item_id": "A", "sku_id": "s", "qty": 5, "variant": "1PCS", "title": "SHT41 sensor"}, **kw)
+
+
+def test_saving_of_fifty_cents_is_reported_and_equal_is_not():
+    row = (_way(5, 16.11), {"item_id": "B"})
+    gain, best = m._saving([row], _way(5, 16.61))
+    assert round(gain, 2) == 0.50 and best is row
+    assert m._saving([row], _way(5, 16.11)) == (0.0, None)
+    assert m._saving([], _way(5, 1.0)) == (0.0, None)
+
+
+def test_search_with_cart_id_ends_with_verdict(monkeypatch):
+    monkeypatch.setattr(m, "_search", lambda *a, **k: _hits())
+    monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
+    monkeypatch.setattr(m, "_read_cart", lambda c: {"lines": [_line()]})
+    monkeypatch.setattr(m, "_line_store", lambda: {})
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+
+    def ways(i, spec, dc):
+        if spec.get("sku_id"):
+            return [_way(5, 16.61)], []
+        return {"A": [_way(5, 16.61)], "B": [_way(5, 16.11)]}.get(i, []), []
+    monkeypatch.setattr(m, "_ways_for", ways)
+    out = m.search_products("SHT41", cart_id="9")
+    assert "CHEAPER THAN CART LINE 9 by 0.50" in out and "no trivial-saving threshold" in out
+    assert "not in the cart" in m.search_products("SHT41", cart_id="404")
+
+
+def test_recheck_cart_lists_swaps_and_cheapest(monkeypatch):
+    lines = [_line(), _line(cart_id="10", item_id="X", title="Taster")]
+    monkeypatch.setattr(m, "load_cookies", lambda: {"x": "y"})
+    monkeypatch.setattr(m, "_read_cart", lambda c: {"lines": lines})
+    monkeypatch.setattr(m, "_line_store", lambda: {"9": {"list": "L", "need": "SHT41"}, "10": {"list": "L", "need": "Taster"}})
+    monkeypatch.setattr(m, "_search", lambda *a, **k: _hits())
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+
+    def ways(i, spec, dc):
+        if spec.get("sku_id"):
+            return [_way(5, 10.0 if i == "X" else 16.61)], []
+        return {"A": [_way(5, 16.61)], "B": [_way(5, 16.11)]}.get(i, []), []
+    monkeypatch.setattr(m, "_ways_for", ways)
+    out = m.recheck_cart(max_lines=5)
+    assert "SAVES 0.50" in out and "remove_from_cart 9" in out
+    assert "Taster (10): already cheapest" in out and "All listed lines are done." in out
+    assert "skip=1" in m.recheck_cart(max_lines=1)
