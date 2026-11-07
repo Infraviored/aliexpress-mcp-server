@@ -14,6 +14,8 @@ import gzip
 import json
 import os
 import re
+import asyncio
+import functools
 import threading
 import time
 import uuid
@@ -290,11 +292,27 @@ _PACE_FILE = CREDENTIALS_PATH.parent / "aliexpress-mtop-last"
 _BOT_FILE = CREDENTIALS_PATH.parent / "aliexpress-botcheck.json"
 
 
+_CALL = threading.local()      # per tool call: AliExpress calls, seconds spent pacing, background flag
+_FOREGROUND = 0                # quick tool calls running now (they go before background jobs)
+_FG_LOCK = threading.Lock()
+
+
 def _mtop_pace() -> None:
     """Keep a gap (plus jitter) between MTOP calls, across all server processes:
-    bursts are what trigger the bot check."""
+    bursts are what trigger the bot check. Background jobs let quick tool calls go first."""
     import fcntl
     import random
+    t0 = time.time()
+    _CALL.calls = getattr(_CALL, "calls", 0) + 1
+    while getattr(_CALL, "background", False) and _FOREGROUND > 0:
+        time.sleep(0.2)
+    try:
+        _mtop_pace_locked(fcntl, random)
+    finally:
+        _CALL.waited = getattr(_CALL, "waited", 0.0) + time.time() - t0
+
+
+def _mtop_pace_locked(fcntl, random) -> None:
     _PACE_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with open(_PACE_FILE, "a+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -519,7 +537,38 @@ def parse_search_results(html: str) -> list[dict]:
 mcp = FastMCP("aliexpress", dependencies=["httpx", "beautifulsoup4"])
 
 
-@mcp.tool()
+def tool(slow: bool = False):
+    """Register a tool that runs in its own thread, so a slow call never holds up a quick one
+    (FastMCP runs plain functions inside its event loop), and ends its text with how long it took.
+    `slow` tools are served after quick ones when both wait for the pacing gap."""
+    def deco(fn):
+        @functools.wraps(fn)
+        async def run(*args, **kwargs):
+            def call():
+                global _FOREGROUND
+                _CALL.calls, _CALL.waited, _CALL.background = 0, 0.0, slow
+                if not slow:
+                    with _FG_LOCK:
+                        _FOREGROUND += 1
+                t0 = time.time()
+                try:
+                    out = fn(*args, **kwargs)
+                finally:
+                    if not slow:
+                        with _FG_LOCK:
+                            _FOREGROUND -= 1
+                took = time.time() - t0
+                if isinstance(out, str) and took >= 1.0:
+                    out += (f"\n\n(took {took:.0f} s: {_CALL.calls} AliExpress call(s), {_CALL.waited:.0f} s of it waiting "
+                            "for the pacing gap between calls)")
+                return out
+            return await asyncio.to_thread(call)
+        mcp.add_tool(run, name=fn.__name__, description=fn.__doc__)
+        return fn
+    return deco
+
+
+@tool()
 def search_products(
     query: str,
     min_rating: float = 0,
@@ -1060,7 +1109,7 @@ def _extract_pdp_fields(mtop_resp: dict, item_id: str) -> dict:
     return d
 
 
-@mcp.tool()
+@tool()
 def get_product_details(item_id: str = "", url: str = "") -> str:
     """
     Get detailed info for a specific AliExpress product.
@@ -1325,7 +1374,7 @@ def _fmt_shipping(sh: dict) -> str:
     return f"shipping to {sh.get('ship_to')}: {fee} ({sh.get('company')}){when}"
 
 
-@mcp.tool()
+@tool()
 def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     """
     List the variants (SKUs) of a product with price, price per piece,
@@ -1389,7 +1438,7 @@ def _fetch_image(url: str) -> Optional[bytes]:
         return None
 
 
-@mcp.tool()
+@tool()
 def get_variant_images(item_id: str, match: str = ""):
     """
     Show every variant's picture in ONE image (numbered grid with name and
@@ -1417,7 +1466,7 @@ def get_variant_images(item_id: str, match: str = ""):
     return ["\n".join(table), Image(data=png, format="jpeg")]
 
 
-@mcp.tool()
+@tool()
 def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_threshold: bool = True,
                packs: str = "") -> str:
     """
@@ -1488,7 +1537,7 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
     return "\n".join(lines)
 
 
-@mcp.tool()
+@tool()
 def get_discounts(item_id: str, subtotal: float = 0) -> str:
     """
     The product's "Discounts & coupon codes": automatic store discount tiers,
@@ -1522,7 +1571,7 @@ def _collect(item_id: str, coupons: list[dict]) -> dict[str, str]:
     return res
 
 
-@mcp.tool()
+@tool()
 def collect_coupon(item_id: str, subtotal: float) -> str:
     """
     Collect the store coupon worth having for an order of `subtotal` in this
@@ -1550,7 +1599,7 @@ def collect_coupon(item_id: str, subtotal: float) -> str:
     return f"Coupon {c['off']:.2f} off over {c['min']:.2f}: {res.get(c['campaign_id'])}{code}."
 
 
-@mcp.tool()
+@tool()
 def get_product_reviews(item_id: str, pages: int = 2, only_low: bool = False, keyword: str = "") -> str:
     """
     Read buyer reviews of a product: star distribution plus review texts
@@ -2421,7 +2470,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     return "\n".join(out)
 
 
-@mcp.tool()
+@tool(slow=True)
 def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST, choice_only: bool = False,
               list_name: str = "") -> str:
     """
@@ -2519,7 +2568,7 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
         return text + f"\n\nApplying failed: {e}"
 
 
-@mcp.tool()
+@tool()
 def get_shipping_estimate(item_id: str) -> str:
     """
     Check shipping time and cost for a product to the configured country
@@ -2736,7 +2785,7 @@ def _checkout_preview_text(cookies: dict[str, str], cart_ids: list[str]) -> str:
     return checkoutlib.format_preview(p, len(cart_ids), cartlib.checkout_url(cart_ids), DUTY_PER_LINE)
 
 
-@mcp.tool()
+@tool()
 def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") -> str:
     """
     What checkout would really charge — read from AliExpress's own checkout
@@ -2770,7 +2819,7 @@ def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") 
         return f"Checkout preview failed: {e}"
 
 
-@mcp.tool()
+@tool()
 def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: str = "", match: str = "",
                   avoid: str = "", optional: Optional[bool] = None) -> str:
     """
@@ -2831,8 +2880,9 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
     return out
 
 
-@mcp.tool()
-def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, skip: int = 0) -> str:
+@tool()
+def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, skip: int = 0,
+                 job_id: str = "") -> str:
     """
     Is there anything cheaper than what is in the cart? For each cart line that
     belongs to a shopping list (tags from shop_list/set_cart_list), searches
@@ -2842,7 +2892,10 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     biggest saving first, plus the lines that are already cheapest.
     ANY saving is a reason to swap, also 0.10 EUR: no threshold. Only a bait
     variant or a wrong article (get_variant_images on the pick) rules an offer out.
-    Read-only; slow (product pages are cached for hours, the server paces its
+    Read-only; slow. It runs as a background job: the call waits up to a minute; if the
+    check is not finished it answers with progress and a job_id: call recheck_cart(job_id=...) again
+    later (other tools stay usable meanwhile). Lines without match words are only reported as UNSURE.
+    Slow because (product pages are cached for hours, the server paces its
     calls): work through a big cart with max_lines/skip and run it again with
     skip=<next_skip> until it says all lines are done.
 
@@ -2851,7 +2904,12 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
         rank_top: hits priced per line (max 25).
         max_lines: lines checked per call.
         skip: lines to skip first (continue where the last call stopped).
+        job_id: pick up a running or finished check (see below).
     """
+    return _job_result(job_id, "recheck", lambda progress: _recheck_run(list_name, rank_top, max_lines, skip, progress))
+
+
+def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -2866,8 +2924,9 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     if not todo:
         return "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + "; nothing to recheck."
     chunk = todo[skip: skip + max(1, max_lines)]
-    swaps, same, failed = [], [], []
-    for ln in chunk:
+    swaps, same, failed, unsure = [], [], [], []
+    for n_done, ln in enumerate(chunk):
+        progress(n_done, len(chunk), (tags[ln["cart_id"]].get("need") or ln["title"])[:40])
         t = tags[ln["cart_id"]]
         pieces = max(1, ln["qty"] * deals.pack_size(ln["variant"]))
         query = t.get("query") or t.get("need") or ln["title"][:60]
@@ -2882,12 +2941,15 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
             failed.append(f"{name} ({ln['cart_id']}): {e}")
             continue
         gain, best = _saving(rows, cur)
-        if best:
+        if best and not t.get("match"):
+            # Without match words nothing says the offer is the same article (a 120 W charging station is no 30 W PSU).
+            w, h = best
+            unsure.append(f"- {name} (cart_id {ln['cart_id']}): cheapest hit {h['title'][:70]} ({h['item_id']}) would be {gain:.2f} "
+                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked")
+        elif best:
             w, h = best
             swaps.append((gain, f"- {name} x{pieces} (cart_id {ln['cart_id']}): now {cur['net']:.2f} net -> {w['net']:.2f} net, "
                                 f"SAVES {gain:.2f} {CURRENCY}"
-                                + ("" if t.get("match") else "  [NO MATCH WORDS on this line: the article may be a different one, "
-                                                              "check title/variant before swapping]")
                                 + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
                                 + f"\n  {_way_text(w)}\n  do: item {h['item_id']} "
                                 + ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])
@@ -2903,6 +2965,9 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     out.append(f"SWAP LIST ({len(swaps)}, total saving {sum(g for g, _ in swaps):.2f} {CURRENCY}) - swap all of them, any saving counts; "
                "check bait/wrong article via get_variant_images first:" if swaps else "SWAP LIST: empty, every checked line is already the cheapest.")
     out += [t for _, t in sorted(swaps, key=lambda x: -x[0])]
+    if unsure:
+        out += ["UNSURE - NOT swaps (these lines have no match words; check that the offer is the same article, e.g. power, pole "
+                "count, length, plug type, female/male; then set_cart_list(match=..., avoid=...) and recheck):"] + unsure
     if same:
         out += ["Already cheapest:"] + same
     if failed:
@@ -2910,6 +2975,44 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     nxt = skip + len(chunk)
     out.append(f"{len(todo) - nxt} lines left: run recheck_cart again with skip={nxt}." if nxt < len(todo) else "All listed lines are done.")
     return "\n".join(out)
+
+
+_JOBS: dict[str, dict] = {}
+JOB_WAIT_S = float(os.environ.get("ALIEXPRESS_JOB_WAIT", "60"))
+
+
+def _job_result(job_id: str, kind: str, work) -> str:
+    """Run `work(progress)` as a background job (or pick one up by id); wait up to JOB_WAIT_S for it."""
+    if job_id:
+        job = _JOBS.get(job_id)
+        if not job:
+            return f"No job '{job_id}' (the server restarted, or it was never started)."
+    else:
+        job_id = f"{kind}-{int(time.time()) % 100000}"
+        job = {"id": job_id, "t0": time.time(), "done": False, "result": None, "progress": "starting"}
+        _JOBS[job_id] = job
+
+        def progress(i, n, what):
+            job["progress"] = f"{i} of {n} lines done, now: {what}"
+
+        def run():
+            _CALL.calls, _CALL.waited, _CALL.background = 0, 0.0, True
+            try:
+                job["result"] = work(progress)
+            except Exception as e:
+                job["result"] = f"Job failed: {e}"
+            job["calls"], job["waited"] = _CALL.calls, _CALL.waited
+            job["done"], job["took"] = True, time.time() - job["t0"]
+
+        threading.Thread(target=run, daemon=True, name=job_id).start()
+    deadline = time.time() + JOB_WAIT_S
+    while not job["done"] and time.time() < deadline:
+        time.sleep(0.5)
+    if not job["done"]:
+        return (f"Still running (job {job_id}, {time.time() - job['t0']:.0f} s so far): {job['progress']}. "
+                f"Call again with job_id='{job_id}' to wait for the result; other tools work meanwhile.")
+    return (job["result"] + f"\n\n(job {job_id}: {job['took']:.0f} s, {job.get('calls', 0)} AliExpress call(s), "
+            f"{job.get('waited', 0):.0f} s of it waiting for the pacing gap between calls)")
 
 
 def _combo_text(cookies: dict[str, str], cart: dict) -> str:
@@ -2934,7 +3037,7 @@ def _combo_text(cookies: dict[str, str], cart: dict) -> str:
     return "\n".join(out)
 
 
-@mcp.tool()
+@tool()
 def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = "",
               options: Optional[list[dict]] = None, alternatives: bool = True) -> str:
     """
@@ -3001,7 +3104,7 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                          page, "## Details (for you)\n" + text, _combo_text(cookies, c)] + previews).replace("\n\n\n\n", "\n\n")
 
 
-@mcp.tool()
+@tool()
 def select_cart_items(cart_ids: list[str], only: bool = False, selected: bool = True) -> str:
     """
     Check (or uncheck) cart lines for checkout, and return the checkout link
@@ -3141,7 +3244,7 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
     return cid
 
 
-@mcp.tool()
+@tool()
 def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "",
                 combo: bool = False) -> str:
     """
@@ -3222,7 +3325,7 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
     return out
 
 
-@mcp.tool()
+@tool()
 def update_cart_quantity(cart_id: str, quantity: int) -> str:
     """
     Set the quantity of one cart line. This changes the real cart.
@@ -3246,7 +3349,7 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
     return f"cart_id {cart_id}: quantity now {quantity}."
 
 
-@mcp.tool()
+@tool()
 def remove_from_cart(cart_ids: list[str]) -> str:
     """
     Remove items from the AliExpress cart. This changes the real cart.
@@ -3335,7 +3438,7 @@ def _report_image(card: dict) -> Optional[str]:
         return None
 
 
-@mcp.tool()
+@tool()
 def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
                 facts: list[dict] = None, notes: list[dict] = None) -> str:
     """
@@ -3431,7 +3534,7 @@ def _order_csv(rows: list[dict], path: Path) -> None:
                                                            "unit_price", "image", "url")}})
 
 
-@mcp.tool()
+@tool()
 def list_orders(status: str = "", since: str = "", out: str = "", details: str = "open",
                 max_pages: int = 30, report_limit: int = 40, include_cancelled: bool = False) -> str:
     """
