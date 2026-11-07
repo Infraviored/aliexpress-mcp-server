@@ -2240,8 +2240,9 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
 
 def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], summary: str = "",
                  options: Optional[list[dict]] = None, alternatives: bool = True,
-                 combined: Optional[dict] = None) -> tuple[str, list[dict]]:
-    """One page for every listed line (`combined` = the checkout preview over all of them)."""
+                 combined: Optional[dict] = None, combo_lines: Optional[list[dict]] = None) -> tuple[str, list[dict]]:
+    """One page for every listed line (`combined` = the checkout preview over all of them);
+    `combo_lines` = the Kombi-Knaller cart, shown as its own basket."""
     by_list, rest = cartlib.by_list(cart, tags)
     listed = [(name, ln) for name, lns in by_list.items() for ln in lns]
     lines = [ln for _, ln in listed]
@@ -2283,8 +2284,10 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
         "summary": summary, "decisions": dec, "items": items, "unlisted": unlisted,
         "checkout_url": cartlib.checkout_url([ln["cart_id"] for ln in lines]),
         "checkout_all_url": cartlib.checkout_url([ln["cart_id"] for ln in lines + rest]),
+        "combo": _combo_page(cart, combo_lines, tags, names),
     }
-    urls = [it["img"] for it in items] + [o["img"] for o in unlisted] + [d.get("img") for d in dec]
+    urls = ([it["img"] for it in items] + [o["img"] for o in unlisted] + [d.get("img") for d in dec]
+            + [r.get("img") for r in (page["combo"] or {}).get("rows", [])])
     imgs = report.inline_images(urls, _fetch_image)
     for it in items:
         it["img"] = imgs.get(it["img"])
@@ -2292,6 +2295,8 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
         d["img"] = imgs.get(d.get("img")) if d.get("img") else None
     for o in unlisted:
         o["img"] = imgs.get(o["img"])
+    for r_ in (page["combo"] or {}).get("rows", []):
+        r_["img"] = imgs.get(r_.get("img"))
     return _write_report("cart.html", report.cart_page(page, time.strftime("%d.%m.%Y %H:%M"))), dec
 
 
@@ -3235,13 +3240,7 @@ def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
     have = {(ln["item_id"], ln["sku_id"]): ln for ln in cart if ln["valid"]}
 
     def state(r: dict) -> str:
-        keys = [(p["item_id"], ln["sku_id"]) for p in r["picks"] for ln in p["lines"]]
-        n = sum(1 for k in keys if k in have)
-        if n == len(keys):
-            return "in the combo cart"
-        if n:
-            return f"partly in the combo cart ({n} of {len(keys)} lines)"
-        return "gone from the cart (ordered or removed)" if r["added"] else "not put in yet"
+        return _round_state(r, have)
     rounds = plan["rounds"]
     out = [f"Plan {plan_id} ({plan['list'] or 'no list'}): {len(rounds)} Kombi round(s)"]
     for i, r in enumerate(rounds, 1):
@@ -3315,15 +3314,63 @@ def _job_result(job_id: str, kind: str, work) -> str:
             f"{job.get('waited', 0):.0f} s of it waiting for the pacing gap between calls)")
 
 
-def _combo_text(cookies: dict[str, str], cart: dict) -> str:
+def _combo_channel(cart: dict) -> Optional[dict]:
+    return next((x for x in cart["header"].get("channels") or [] if x.get("business") == COMBO and x.get("count")), None)
+
+
+def _combo_lines(cookies: dict[str, str], cart: dict) -> Optional[list[dict]]:
+    """The lines of the Kombi-Knaller cart; None when there is none, [] when it could not be read."""
+    if not _combo_channel(cart):
+        return None
+    try:
+        return _read_cart(cookies, COMBO)["lines"]
+    except Exception as e:
+        logger.debug("combo cart not readable: %s", e)
+        return []
+
+
+def _round_state(r: dict, have: dict) -> str:
+    keys = [(p["item_id"], ln["sku_id"]) for p in r["picks"] for ln in p["lines"]]
+    n = sum(1 for k in keys if k in have)
+    if n == len(keys):
+        return "in the combo cart"
+    if n:
+        return f"partly in the combo cart ({n} of {len(keys)} lines)"
+    return "gone from the cart (ordered or removed)" if r["added"] else "not put in yet"
+
+
+def _combo_page(cart: dict, lines: Optional[list[dict]], tags: dict, names: list[str]) -> Optional[dict]:
+    """The Kombi-Knaller basket as the cart page shows it: rows, checked pieces, rounds of the stored plans."""
+    ch = _combo_channel(cart)
+    if not ch or not lines:
+        return None
+    ok = [ln for ln in lines if ln["valid"]]
+    rows = [{"img": ln.get("image"), "need": (tags.get(ln["cart_id"]) or {}).get("need") or ln["title"][:40],
+             "title": ln["title"], "url": f"{BASE_URL}/item/{ln['item_id']}.html", "qty": ln["qty"],
+             "variant": ln["variant"] or "Standard", "cost": (ln["price"] or 0) * ln["qty"], "checked": ln["checked"]}
+            for ln in ok]
+    pick = [ln for ln in ok if ln["checked"]]
+    have = {(ln["item_id"], ln["sku_id"]): ln for ln in ok}
+    rounds = []
+    store = _plan_store()
+    for pid in sorted(store, key=lambda k: store[k]["at"], reverse=True):
+        if store[pid]["list"] in names and len(store[pid]["rounds"]) > 0:
+            rounds = [{"n": i, "names": ", ".join(f"{p['need']} x{p['pieces']}" for p in rd["picks"]),
+                       "state": _round_state(rd, have)} for i, rd in enumerate(store[pid]["rounds"], 1)]
+            break
+    return {"rows": rows, "pieces": sum(ln["qty"] for ln in pick), "goods": sum((ln["price"] or 0) * ln["qty"] for ln in pick),
+            "url": ch.get("url"), "rounds": rounds}
+
+
+def _combo_text(cookies: dict[str, str], cart: dict, lines: Optional[list[dict]] = None) -> str:
     """The Kombi-Knaller cart (channel cart nn_mix): its lines, what is checked, and whether the import charge is covered."""
-    ch = next((x for x in cart["header"].get("channels") or [] if x.get("business") == COMBO and x.get("count")), None)
+    ch = _combo_channel(cart)
     if not ch:
         return ""
-    try:
-        lines = _read_cart(cookies, COMBO)["lines"]
-    except Exception as e:
-        return f"## Kombi-Knaller cart ({ch['count']} items): not readable ({e})"
+    if lines is None:
+        lines = _combo_lines(cookies, cart)
+    if not lines:
+        return f"## Kombi-Knaller cart ({ch['count']} items): not readable"
     ok = [ln for ln in lines if ln["valid"]]
     pick = [ln for ln in ok if ln["checked"]]
     pieces = sum(ln["qty"] for ln in pick)
@@ -3364,8 +3411,9 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
         c = _read_cart(cookies)
     except Exception as e:
         return f"Cart MTOP call failed: {e}"
+    combo_lines = _combo_lines(cookies, c)
     if not c["lines"]:
-        combo = _combo_text(cookies, c)      # the main cart may be empty while the Kombi-Knaller cart is not
+        combo = _combo_text(cookies, c, combo_lines)      # the main cart may be empty while the Kombi-Knaller cart is not
         return combo or f"The cart is empty (server count: {c['header'].get('count')})."
     tags = _line_store()
     text = cartlib.format_cart(c, show_unchecked=not checked_only, tags=tags)
@@ -3388,7 +3436,7 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
         except Exception as e:
             previews.append(f"## Combined checkout: preview failed ({e})")
     try:
-        page, dec = _cart_report(c, tags, priced, summary, options, alternatives, combined)
+        page, dec = _cart_report(c, tags, priced, summary, options, alternatives, combined, combo_lines)
         real = [d for d in dec if report._is_decision(d)]
         if real:
             page += ("\n\nDecisions on the page, numbered as there. The page has no buttons: add ONE `decide add` card per "
@@ -3401,7 +3449,7 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
     except Exception as e:
         page = f"(page not written: {e})"
     return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined),
-                         page, "## Details (for you)\n" + text, _combo_text(cookies, c)] + previews).replace("\n\n\n\n", "\n\n")
+                         page, "## Details (for you)\n" + text, _combo_text(cookies, c, combo_lines)] + previews).replace("\n\n\n\n", "\n\n")
 
 
 @tool()
