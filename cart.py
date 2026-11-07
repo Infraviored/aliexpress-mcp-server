@@ -30,7 +30,9 @@ import json
 import re
 from typing import Any, Optional
 
-PRODUCT = "app_cart_product_component"
+# the main cart names its product blocks app_cart_product_component…, the combo cart (Kombi-Knaller,
+# business nn_mix) activity_cart_group_item… / activity_cart_invalid_product…; same fields inside
+PRODUCT = ("app_cart_product_component", "activity_cart_group_item", "activity_cart_invalid_product")
 GROUP_TITLE = "app_cart_group_title_component"
 SUMMARY = "app_cart_summary_component"
 HEADER = "app_cart_head_component"
@@ -48,7 +50,7 @@ def _comp(block: dict) -> str:
     return block.get("compName") or "" if isinstance(block, dict) else ""
 
 
-def _blocks(state: dict, comp: str) -> list[tuple[str, dict]]:
+def _blocks(state: dict, comp: "str | tuple[str, ...]") -> list[tuple[str, dict]]:
     return [(bid, b) for bid, b in (state.get("data") or {}).items() if _comp(b).startswith(comp)]
 
 
@@ -206,7 +208,8 @@ def parse(states: list[dict]) -> dict:
     for state in states:
         for _, b in _blocks(state, PRODUCT):
             ln = _line(b.get("fields") or {})
-            lines[ln["cart_id"]] = ln
+            if ln["cart_id"] not in ("None", ""):          # a block without a cart line (page furniture)
+                lines[ln["cart_id"]] = ln
         for _, b in _blocks(state, GROUP_TITLE):
             f = b.get("fields") or {}
             gid = f.get("id") or f.get("ceilingTag") or "?"
