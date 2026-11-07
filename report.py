@@ -3,8 +3,8 @@ The cart and a shopping-list comparison as one self-contained HTML page.
 
 The chat cannot embed pictures, so view_cart and shop_list also write a page
 (pictures inlined as data: URIs, nothing loaded from AliExpress) that the
-assistant publishes as an artifact. Same file path every time, so the
-artifact keeps its link.
+MCP serves on the local network (reportserver.py). Same file name every time, so the
+address stays the same.
 
 The functions take plain row dicts (built in the server) and return HTML.
 """
