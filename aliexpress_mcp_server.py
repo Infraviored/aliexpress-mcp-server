@@ -15,6 +15,7 @@ import json
 import os
 import re
 import asyncio
+import uuid
 import functools
 import threading
 import time
@@ -304,7 +305,8 @@ def _mtop_pace() -> None:
     import random
     t0 = time.time()
     _CALL.calls = getattr(_CALL, "calls", 0) + 1
-    while getattr(_CALL, "background", False) and _FOREGROUND > 0:
+    give_up = time.time() + 6.0      # quick calls go first, but never starve a background job
+    while getattr(_CALL, "background", False) and _FOREGROUND > 0 and time.time() < give_up:
         time.sleep(0.2)
     try:
         _mtop_pace_locked(fcntl, random)
@@ -558,7 +560,7 @@ def tool(slow: bool = False):
                         with _FG_LOCK:
                             _FOREGROUND -= 1
                 took = time.time() - t0
-                if isinstance(out, str) and took >= 1.0:
+                if isinstance(out, str) and took >= 1.0 and "AliExpress call(s)" not in out[-300:]:
                     out += (f"\n\n(took {took:.0f} s: {_CALL.calls} AliExpress call(s), {_CALL.waited:.0f} s of it waiting "
                             "for the pacing gap between calls)")
                 return out
@@ -1566,7 +1568,8 @@ def _collect(item_id: str, coupons: list[dict]) -> dict[str, str]:
     res = browser_actions.collect_coupons(item_id, [c["campaign_id"] for c in coupons], CREDENTIALS_PATH)
     got = {cid for cid, r in res.items() if r == "collected"}
     if got:
-        private.write_json(COUPONS_FILE, {**_coupon_stamps(), **{cid: time.time() for cid in got}})
+        with _STATE_LOCK:
+            private.write_json(COUPONS_FILE, {**_coupon_stamps(), **{cid: time.time() for cid in got}})
     _DISC_CACHE.pop(item_id, None)
     return res
 
@@ -2607,12 +2610,16 @@ CART_CALL_DELAY_S = float(os.environ.get("ALIEXPRESS_CART_DELAY", "2"))
 _last_cart_call = 0.0
 
 
+_CART_PACE_LOCK = threading.Lock()
+
+
 def _cart_pace() -> None:
     global _last_cart_call
-    wait = _last_cart_call + CART_CALL_DELAY_S - time.time()
-    if wait > 0:
-        time.sleep(wait)
-    _last_cart_call = time.time()
+    with _CART_PACE_LOCK:      # tools run in threads: one cart call at a time passes the gap
+        wait = _last_cart_call + CART_CALL_DELAY_S - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _last_cart_call = time.time()
 
 
 COMBO = "nn_mix"   # the Kombi-Knaller cart ("Combo Blast cart"): 3+ items, no import charge
@@ -2880,7 +2887,7 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
     return out
 
 
-@tool()
+@tool(slow=True)
 def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, skip: int = 0,
                  job_id: str = "") -> str:
     """
@@ -2963,7 +2970,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
             failed.append(f"{name} ({ln['cart_id']}): line could not be priced")
     out = [f"Recheck of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, import, discounts):"]
     out.append(f"SWAP LIST ({len(swaps)}, total saving {sum(g for g, _ in swaps):.2f} {CURRENCY}) - swap all of them, any saving counts; "
-               "check bait/wrong article via get_variant_images first:" if swaps else "SWAP LIST: empty, every checked line is already the cheapest.")
+               "check bait/wrong article via get_variant_images first:" if swaps else ("SWAP LIST: empty (lines under UNSURE are not verified swaps)." if unsure
+                                 else "SWAP LIST: empty, every checked line is already the cheapest."))
     out += [t for _, t in sorted(swaps, key=lambda x: -x[0])]
     if unsure:
         out += ["UNSURE - NOT swaps (these lines have no match words; check that the offer is the same article, e.g. power, pole "
@@ -2988,7 +2996,9 @@ def _job_result(job_id: str, kind: str, work) -> str:
         if not job:
             return f"No job '{job_id}' (the server restarted, or it was never started)."
     else:
-        job_id = f"{kind}-{int(time.time()) % 100000}"
+        for jid in [k for k, j in _JOBS.items() if j["done"] and time.time() - j["t0"] > 3600][:50]:
+            _JOBS.pop(jid, None)
+        job_id = f"{kind}-{uuid.uuid4().hex[:6]}"
         job = {"id": job_id, "t0": time.time(), "done": False, "result": None, "progress": "starting"}
         _JOBS[job_id] = job
 
@@ -3189,13 +3199,17 @@ def _line_store() -> dict[str, dict]:
         return {}
 
 
+_STATE_LOCK = threading.RLock()     # read-modify-write of the small state files (tools run in threads)
+
+
 def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None = None) -> None:
-    lines = _line_store()
-    for cid, info in (add or {}).items():
-        lines[str(cid)] = {**lines.get(str(cid), {}), **info}
-    for cid in drop or []:
-        lines.pop(str(cid), None)
-    private.write_json(MCP_LINES_FILE, lines)
+    with _STATE_LOCK:
+        lines = _line_store()
+        for cid, info in (add or {}).items():
+            lines[str(cid)] = {**lines.get(str(cid), {}), **info}
+        for cid in drop or []:
+            lines.pop(str(cid), None)
+        private.write_json(MCP_LINES_FILE, lines)
 
 
 def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,

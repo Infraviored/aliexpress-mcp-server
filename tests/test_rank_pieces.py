@@ -173,3 +173,17 @@ def test_tools_run_in_threads_and_report_time():
     text = str(out)
     assert "ok" in text and "(took 1 s" in text
     assert seen["thread"] != threading.main_thread().name
+
+
+def test_slow_tool_with_background_job_does_not_wait_for_itself(monkeypatch):
+    import asyncio, time
+    monkeypatch.setattr(m, "_mtop_pace_locked", lambda *a: None)
+    monkeypatch.setattr(m, "JOB_WAIT_S", 5)
+
+    @m.tool(slow=True)
+    def deadlock_probe() -> str:
+        return m._job_result("", "t", lambda progress: (m._mtop_pace(), "RESULT")[1])
+    t0 = time.time()
+    out = asyncio.run(m.mcp.call_tool("deadlock_probe", {}))
+    assert "RESULT" in str(out) and time.time() - t0 < 3
+    assert out[0][0].text.count("AliExpress call(s)") == 1      # one footer, from the job
