@@ -516,6 +516,10 @@ def search_products(
     page: int = 1,
     with_shipping: bool = False,
     choice_only: bool = False,
+    pieces: int = 1,
+    match: str = "",
+    avoid: str = "",
+    rank_top: int = 12,
 ) -> str:
     """
     Search AliExpress for products (60 results per page; the first 25 are listed).
@@ -523,6 +527,11 @@ def search_products(
     The price shown is the CHEAPEST variant, which is often bait: an
     accessory, a bare chip or 1 piece of a pack (ESP32-S3 "6.19 €" was a
     breakout board; the dev board was 12.19 €). Judge with best_offer.
+    NEED MORE THAN ONE PIECE? Pass `pieces`: the search then prices the top
+    hits for exactly that many pieces (pack sizes, shipping, import charge,
+    store discounts) and ranks them by what the order really costs, not by the single
+    piece price a pack ladder hides ("10PCS" in another item can be cheaper
+    per piece AND in total).
     Each hit also shows orders, rating and the
     shipping line ("Kostenloser Versand ab 10,00€" = free above that cart value).
     Pack sizes (1/5/10 pcs) are variants with their own prices:
@@ -538,6 +547,13 @@ def search_products(
             first 8 non-Choice hits (one product-page call each, slower).
         choice_only: Only "Shipped by AliExpress" (Choice) offers: about a
             week to DE, free shipping above the Choice threshold.
+        pieces: How many pieces you need. Above 1 the top hits are priced
+            for that quantity and ranked by net total (see above).
+        match: With pieces: words every variant (or the title) must contain,
+            e.g. "GY-302" or "N16R8".
+        avoid: With pieces: words that rule a hit or variant out.
+        rank_top: With pieces: how many hits to price (product-page calls,
+            cached for hours; the rest are not looked at).
     """
     try:
         products = _search(query, sort_by, page, choice_only)
@@ -547,6 +563,8 @@ def search_products(
         products = [p for p in products if p.get("rating") and p["rating"] >= min_rating]
     if max_price > 0:
         products = [p for p in products if p.get("price") is not None and p["price"] <= max_price]
+    if pieces > 1 and products:
+        return _rank_for_pieces(query, products, pieces, match, avoid, rank_top, choice_only)
 
     if not products:
         filters = []
@@ -588,6 +606,55 @@ def search_products(
         lines.append(line)
     lines.append(REPORT_HINT)
     return "\n".join(lines)
+
+
+def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, avoid: str,
+                     rank_top: int, choice_only: bool) -> str:
+    """The top search hits priced for `pieces` (best pack mix, shipping, import, discounts), cheapest net first."""
+    avoid_w, match_w = _words(avoid), _words(match)
+    hits = [h for h in products if not any(w in (h.get("title") or "").lower() for w in avoid_w)]
+    named = [h for h in hits if all(w in (h.get("title") or "").lower() for w in match_w)]
+    hits = named or hits
+    # Search order (its price is only a hint), Choice first: shared shipping, about a week to DE.
+    hits = sorted(hits, key=lambda h: not h.get("choice"))[: max(1, min(int(rank_top), 25))]
+    spec = {"pieces": pieces, "match": match, "avoid": avoid, "seller": "choice" if choice_only else "any"}
+    rows, notes = [], []
+    for h in hits:
+        cached = h["item_id"] in _PDP_CACHE
+        try:
+            ways, n = _ways_for(h["item_id"], spec, 0.0)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            logger.debug("ranking %s failed: %s", h["item_id"], e)
+            continue
+        if not cached:
+            time.sleep(0.5)
+        notes += n[:1] if not ways else []
+        if ways:
+            rows.append((ways[0], h))
+    if not rows:
+        return (f"No hit of '{query}' could be priced for {pieces} pieces." + blocked_msg()
+                + ("".join(f"\n{n}" for n in notes[:5])))
+    rows.sort(key=lambda r: (r[0]["net"], -r[0]["pieces"]))
+    out = [f"{len(rows)} of the top {len(hits)} hits for '{query}' priced for {pieces} pieces "
+           f"(net incl. shipping, {CURRENCY} {DUTY_PER_LINE:.2f} import per line, discounts; ranked by what the order costs, at least {pieces} pcs):"]
+    for i, (w, h) in enumerate(rows, 1):
+        line = f"{i}. {h['title'][:80]}" + (" · Choice" if w["offer"]["choice"] else "")
+        if h.get("orders") is not None:
+            line += f" · {h['orders']} orders"
+        if h.get("rating"):
+            line += f" ★{h['rating']}"
+        line += f"\n   {deals.fmt_way(w, CURRENCY)}"
+        if w["save"]:
+            line += f" − {w['save']:.2f} ({w['save_how']})"
+        line += f" = {w['net']:.2f} net ({w['net'] / max(1, w['pieces']):.2f}/pc)"
+        if w.get("days"):
+            line += f" · ~{w['days']} days"
+        out.append(line + f"\n   item_id: {h['item_id']}")
+    out.append("Variants priced by name only: check get_variant_images on the pick; bait variants are skipped when far cheaper than the rest.")
+    out += notes[:5]
+    return "\n".join(out)
 
 
 def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only: bool = False) -> list[dict]:
@@ -1474,7 +1541,10 @@ def _candidate_ids(spec: dict) -> list[str]:
     # page decides.
     named = [h for h in hits if all(w in (h.get("title") or "").lower() for w in match)]
     hits = sorted(named or hits, key=lambda h: h.get("price") if h.get("price") is not None else 1e9)
-    for h in hits[: int(spec.get("candidates", 5))]:
+    # More than one piece: the cheapest single piece is no guide (a "10PCS" ladder in a
+    # dearer-looking item wins), so look at more items.
+    default = 10 if int(spec.get("pieces", 1) or 1) > 1 else 5
+    for h in hits[: int(spec.get("candidates", default))]:
         if h["item_id"] not in ids:
             ids.append(h["item_id"])
     return ids
@@ -2148,8 +2218,8 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     Each item is a dict:
         need:      what it is, for the report ("ESP32-S3 N16R8 dev board")
         pieces:    how many pieces are needed (packs are counted in pieces)
-        query:     search term — of its 60 hits, the `candidates` (default 5)
-                   cheapest whose title has the match words compete
+        query:     search term — of its 60 hits, the `candidates` (default 5, 10 when
+                   pieces > 1) cheapest whose title has the match words compete
         item_ids:  candidate products (compete with the search hits, if any)
         match:     words the chosen variant name or the product title must
                    contain ("N16R8 Module")
