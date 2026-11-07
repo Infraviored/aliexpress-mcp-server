@@ -492,6 +492,8 @@ def _parse_search_json(html: str) -> list[dict]:
             "shipping": next((t for t in texts if re.search(r"versand|shipping|delivery", t, re.I)), None),
             "choice": any("platformFreeShipping" in x or "choice" in x.lower() for x in sources),
             "ship_from": cdi.get("shipFrom"),
+            # "Kombi-Knaller" / Bundle Deals: 3+ such items in the combo cart, no import charge
+            "combo": (it.get("rainbow") or {}).get("rainbowType") == "channelProduct" or "npieces" in sources,
             "url": f"{BASE_URL}/item/{pid}.html",
         })
     return out
@@ -521,6 +523,7 @@ def search_products(
     avoid: str = "",
     rank_top: int = 12,
     cart_id: str = "",
+    combo_only: bool = False,
 ) -> str:
     """
     Search AliExpress for products (60 results per page; the first 25 are listed).
@@ -564,11 +567,17 @@ def search_products(
             same way and the result ends with "CHEAPER THAN CART LINE by X"
             or "already the cheapest". pieces defaults to that line's
             quantity x pack size; match/avoid default to the line's list tags.
+        combo_only: Only "Kombi-Knaller" (Bundle Deals) hits: 3 or more such
+            items in the combo cart (a separate channel cart, see view_cart)
+            are ordered without import charge. This IS the search inside the
+            Kombi-Knaller; every hit is flagged "Kombi" anyway.
     """
     try:
         products = _search(query, sort_by, page, choice_only)
     except PermissionError:
         return AUTH_EXPIRED_MSG
+    if combo_only:
+        products = [p for p in products if p.get("combo")]
     if min_rating > 0:
         products = [p for p in products if p.get("rating") and p["rating"] >= min_rating]
     if max_price > 0:
@@ -620,6 +629,8 @@ def search_products(
             line += f" · {p['sold_count']}"
         if p.get("choice"):
             line += " · Choice"
+        if p.get("combo"):
+            line += " · Kombi (3+ in the combo cart: no import charge)"
         if p.get("shipping"):
             line += f"\n  shipping: {p['shipping']}"
         line += f"\n  item_id: {p['item_id']}"
@@ -693,6 +704,8 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
            f"(net incl. shipping, {CURRENCY} {DUTY_PER_LINE:.2f} import per line, discounts; ranked by what the order costs, at least {pieces} pcs):"]
     for i, (w, h) in enumerate(rows, 1):
         head = f"{i}. {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
+        if h.get("combo"):
+            head += f" - KOMBI (with 3+ combo items {w['net'] - (w.get('duty') or 0):.2f} net, no import charge)"
         if h.get("orders") is not None:
             head += f" - {h['orders']} orders"
         if h.get("rating"):
