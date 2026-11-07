@@ -441,6 +441,14 @@ def _parse_search_cards(html: str) -> list[dict]:
     return products
 
 
+# Items seen as "Kombi-Knaller" in a search: the planner prices them without import
+# charge when 3+ pieces of such items go into the combo cart together.
+COMBO_ITEMS: set[str] = set()
+COMBO_MIN_PIECES = 3
+# Lines the combo checkout takes per order ("Limit exceeded, remove N items"); 0 = not measured.
+COMBO_MAX_LINES = int(os.environ.get("ALIEXPRESS_COMBO_MAX_LINES", "0"))
+
+
 def _parse_search_json(html: str) -> list[dict]:
     """
     The whole result page (60 hits) from the page's embedded `itemList`
@@ -496,6 +504,8 @@ def _parse_search_json(html: str) -> list[dict]:
             "combo": (it.get("rainbow") or {}).get("rainbowType") == "channelProduct" or "npieces" in sources,
             "url": f"{BASE_URL}/item/{pid}.html",
         })
+        if out[-1]["combo"]:
+            COMBO_ITEMS.add(str(pid))
     return out
 
 
@@ -1634,6 +1644,18 @@ def _candidate_ids(spec: dict) -> list[str]:
     return ids
 
 
+def _combo_free(w: dict, on: bool) -> None:
+    """Take the import charge off a Kombi way (3+ combo pieces in the combo order), or put it back."""
+    if not w.get("combo") or bool(w.get("combo_free")) == on:
+        return
+    d = -w["duty_back"] if on else w["duty_back"]
+    for k in ("total", "net", "score"):
+        if k in w:
+            w[k] += d
+    w["duty"] = 0.0 if on else w["duty_back"]
+    w["combo_free"] = on
+
+
 def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], list[str]]:
     """Ranked ways to cover `spec` from one product, and notes about it."""
     offer = _pdp_offer(item_id)
@@ -1691,6 +1713,10 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
         w["days"] = dmax
         w["score"] = w["net"] + day_cost * (dmax if dmax is not None else UNKNOWN_DAYS)
         w.update(offer=offer, quote=quote, disc=disc)
+        if item_id in COMBO_ITEMS:
+            w["combo"], w["duty_back"] = True, w.get("duty") or 0.0
+            if w["pieces"] >= COMBO_MIN_PIECES:     # 3+ pieces of this item alone carry the combo order
+                _combo_free(w, True)
     ways.sort(key=lambda w: (w["score"], len(w["lines"])))
     notes = []
     # A winner far cheaper than every other variant is usually another
@@ -1709,7 +1735,7 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
 
 def _choice_basket(picks: list[dict], extra_choice: float = 0.0) -> tuple[float, float, float]:
     """(Choice goods of the picks, threshold, fee to pay) — `extra_choice` = other Choice goods in the same order."""
-    choice = [p for p in picks if p["way"]["offer"]["choice"]]
+    choice = [p for p in picks if p["way"]["offer"]["choice"] and not p["way"].get("combo_free")]
     goods = sum(p["way"]["goods"] for p in choice)
     threshold = max((p["way"]["offer"]["shipping"].get("choice_threshold") or 0 for p in choice), default=0)
     fee = 0.0
@@ -1746,32 +1772,56 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
             continue
         picks.append({"need": need, "spec": spec, "options": options})
 
-    # The parcel is complete when its slowest part arrives: a faster offer is
-    # only worth more where it would otherwise be the slowest part. Floors come
-    # from every part's own best before any re-scoring (order-independent);
-    # unknown delivery times do not set a floor.
-    first_days = [p["options"][0]["days"] for p in picks]
-    for i, p in enumerate(picks):
-        floor = max((d for j, d in enumerate(first_days) if j != i and d), default=0)
-        for w in p["options"]:
-            w["score"] = w["net"] + day_cost * max(w["days"] or UNKNOWN_DAYS, floor)
-        p["options"].sort(key=lambda w: (w["score"], w["days"] or UNKNOWN_DAYS, len(w["lines"])))
-        best = p["options"][0]
-        seen = {best["offer"]["item_id"]}
-        p["others"] = []
-        for w in p["options"][1:]:
-            if w["offer"]["item_id"] not in seen and len(p["others"]) < 2:
-                seen.add(w["offer"]["item_id"])
-                p["others"].append(w)
-        p["way"] = best
+    def select() -> None:
+        # The parcel is complete when its slowest part arrives: a faster offer is
+        # only worth more where it would otherwise be the slowest part. Floors come
+        # from every part's own best before any re-scoring (order-independent);
+        # unknown delivery times do not set a floor.
+        for p in picks:
+            for w in p["options"]:
+                w["score"] = w["net"] + day_cost * (w["days"] if w["days"] is not None else UNKNOWN_DAYS)
+            p["options"].sort(key=lambda w: w["score"])
+        first_days = [p["options"][0]["days"] for p in picks]
+        for i, p in enumerate(picks):
+            floor = max((d for j, d in enumerate(first_days) if j != i and d), default=0)
+            for w in p["options"]:
+                w["score"] = w["net"] + day_cost * max(w["days"] or UNKNOWN_DAYS, floor)
+            p["options"].sort(key=lambda w: (w["score"], w["days"] or UNKNOWN_DAYS, len(w["lines"])))
+            best = p["options"][0]
+            seen = {best["offer"]["item_id"]}
+            p["others"] = []
+            for w in p["options"][1:]:
+                if w["offer"]["item_id"] not in seen and len(p["others"]) < 2:
+                    seen.add(w["offer"]["item_id"])
+                    p["others"].append(w)
+            p["way"] = best
+
+    def combo_all(on: bool) -> None:
+        for p in picks:
+            for w in p["options"]:
+                if on or w["pieces"] < COMBO_MIN_PIECES:     # a way of 3+ pieces carries the combo order by itself
+                    _combo_free(w, on)
+
+    # Kombi-Knaller: 3+ combo pieces in the combo order carry no import charge. Price
+    # the Kombi offers that way when the best Kombi offers of the list reach 3 pieces,
+    # and take the charge back when the picks end up with fewer.
+    reach = sum(max((w["pieces"] for w in p["options"] if w.get("combo")), default=0) for p in picks)
+    combo_all(reach >= COMBO_MIN_PIECES)
+    select()
+    if reach >= COMBO_MIN_PIECES and sum(p["way"]["pieces"] for p in picks if p["way"].get("combo")) < COMBO_MIN_PIECES:
+        combo_all(False)
+        select()
+    for p in picks:
+        if p["way"].get("combo") and not p["way"].get("combo_free"):
+            p["way"]["combo"] = False       # too few Kombi pieces: a normal cart line, import charge included
 
     choice_goods, threshold, choice_fee = _choice_basket(picks, extra_choice)
     if choice_fee:
         # Below the threshold, Choice is not free: charge each Choice pick its
         # share of the fee and let a global offer win where it now is cheaper.
-        share = choice_fee / max(1, sum(1 for p in picks if p["way"]["offer"]["choice"]))
+        share = choice_fee / max(1, sum(1 for p in picks if p["way"]["offer"]["choice"] and not p["way"].get("combo_free")))
         for p in picks:
-            if not p["way"]["offer"]["choice"]:
+            if not p["way"]["offer"]["choice"] or p["way"].get("combo_free"):
                 continue
             alt = next((w for w in p["options"] if not w["offer"]["choice"]), None)
             if alt and alt["score"] < p["way"]["score"] + share:
@@ -1783,12 +1833,13 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
     # global line still pays its own: switch a global pick to its best Choice
     # offer where that is cheaper once the duty is left out.
     def n_lines(choice):
-        return sum(len(p["way"]["lines"]) for p in picks if bool(p["way"]["offer"]["choice"]) == choice)
+        return sum(len(p["way"]["lines"]) for p in picks
+                   if bool(p["way"]["offer"]["choice"]) == choice and not p["way"].get("combo_free"))
     if n_lines(True) >= checkoutlib.CHOICE_DUTY_LINES:
         for p in picks:
-            if p["way"]["offer"]["choice"]:
+            if p["way"]["offer"]["choice"] or p["way"].get("combo_free"):
                 continue
-            alt = next((w for w in p["options"] if w["offer"]["choice"]), None)
+            alt = next((w for w in p["options"] if w["offer"]["choice"] and not w.get("combo_free")), None)
             if alt and alt["score"] - alt.get("duty", 0.0) < p["way"]["score"]:
                 p["others"] = [p["way"]] + [w for w in p["others"] if w is not alt][:1]
                 p["way"] = alt
@@ -1814,7 +1865,11 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
     duty = checkoutlib.duty_for(n_lines(True), n_lines(False), DUTY_PER_LINE)
     dated = [p for p in picks if p["way"]["days"]]
     slowest = max(dated, key=lambda p: p["way"]["days"]) if dated else None
+    kombi = [p for p in picks if p["way"].get("combo_free")]
     return {
+        "combo_picks": kombi, "combo_pieces": sum(p["way"]["pieces"] for p in kombi),
+        "combo_lines": sum(len(p["way"]["lines"]) for p in kombi),
+        "combo_goods": sum(p["way"]["goods"] for p in kombi),
         "picks": picks, "notes": notes, "candidates": candidates,
         "choice_goods": choice_goods, "threshold": threshold, "choice_fee": choice_fee,
         "cart_choice": extra_choice,
@@ -1834,6 +1889,20 @@ def _cart_choice_goods(cookies: dict[str, str], exclude: set[str] = frozenset())
                      if ln["checked"] and ln["choice"] and ln["item_id"] not in exclude), 2)
 
 
+def _combo_order_text(plan: dict) -> str:
+    """The Kombi-Knaller part of a plan: its own order in the combo cart, import charge-free from 3 pieces."""
+    n, lines = plan["combo_pieces"], plan["combo_lines"]
+    text = (f"Kombi-Knaller order (combo cart, add_to_cart combo=True): {lines} line(s), {n} pcs, "
+            f"{plan['combo_goods']:.2f} {CURRENCY} goods, no import charge (3+ pieces). It is ordered on its own checkout page, "
+            "apart from the main cart (shipping and Choice threshold count there separately).")
+    if COMBO_MAX_LINES and lines > COMBO_MAX_LINES:
+        rounds = -(-lines // COMBO_MAX_LINES)
+        text += f" More than {COMBO_MAX_LINES} lines: order it in {rounds} rounds."
+    else:
+        text += " If its checkout says 'Limit exceeded, remove N items', order it in several rounds (each with 3+ pieces)."
+    return text + " The Kombi price on the product page is a hint: apply compares it with the combo cart."
+
+
 def _fmt_plan(plan: dict) -> str:
     cur = CURRENCY
     out = [f"Plan: {len(plan['picks'])} item(s), "
@@ -1841,6 +1910,8 @@ def _fmt_plan(plan: dict) -> str:
     for i, p in enumerate(plan["picks"], 1):
         w, o = p["way"], p["way"]["offer"]
         kind = "Choice" if o["choice"] else f"global seller, {len(w['lines'])} line(s) × own shipping"
+        if w.get("combo_free"):
+            kind = "KOMBI-KNALLER (combo cart, no import charge)"
         parts = _way_view(w)["buy"]
         ship = "free" if o["choice"] else f"{w['ship']:.2f}"
         out.append(f"{i}. {p['need']}: {parts} = {w['pieces']} pcs — {o['title'][:60]} ({o['item_id']})")
@@ -1857,6 +1928,8 @@ def _fmt_plan(plan: dict) -> str:
                        f"{alt['days'] or '?'} days{' Choice' if ao['choice'] else ''}"
                        f" → {alt['score'] - w['score']:+.2f} incl. delivery time")
     out.append("")
+    if plan.get("combo_picks"):
+        out.append(_combo_order_text(plan))
     if plan["threshold"]:
         if not plan["choice_fee"] and plan["cart_choice"] and plan["choice_goods"] < plan["threshold"]:
             st = (f"free shipping only together with the checked Choice lines already in the cart "
@@ -2153,16 +2226,63 @@ def _chat_plan(plan: dict) -> str:
     for p in plan["picks"]:
         w, o = p["way"], p["way"]["offer"]
         kind = "Choice" if o["choice"] else "globaler Händler"
+        if w.get("combo_free"):
+            kind = "Kombi-Knaller, keine Einfuhrabgabe"
         line = (f"- {p['need']}: {o['title'][:40]}, {report.eur(w['net'])} ({kind}, "
                 f"{w['days'] or '?'} Tage)")
         if p["others"]:
             nxt = p["others"][0]
             line += f"; nächstbestes {report.eur(nxt['net'])} (+{report.eur(nxt['net'] - w['net'])})"
         out.append(line)
+    if plan.get("combo_picks"):
+        out.append(f"Davon Kombi-Knaller: {plan['combo_lines']} Zeilen, {plan['combo_pieces']} Stück, eigene Bestellung im Kombi-Korb.")
     out.append(f"Gesamt {report.eur(plan['total'])}: Ware {report.eur(plan['goods'])}, Versand {report.eur(plan['ship'])}"
                + (f", Einfuhrabgaben {report.eur(plan['duty'])}" if plan.get("duty") else "")
                + (f", Rabatte −{report.eur(plan['saved'])}" if plan["saved"] else "") + ".")
     return "\n".join(out)
+
+
+def _apply_combo(cookies: dict[str, str], name: str, kombi: dict[tuple, dict]) -> list[str]:
+    """Put the plan's Kombi lines into the combo cart (it ticks new lines itself); compare price and quantity."""
+    log = []
+    try:
+        every = _read_cart(cookies, COMBO)["lines"]
+    except Exception as e:
+        return [f"FAILED to read the Kombi-Knaller cart: {e} - no Kombi line added"]
+    have = {(ln["item_id"], ln["sku_id"]): ln for ln in every if ln["valid"]}
+    known = {ln["cart_id"] for ln in every}
+    for (iid, sku), e in kombi.items():
+        ln = have.get((iid, sku))
+        if ln and ln["qty"] >= e["qty"] and ln["checked"]:
+            cid = ln["cart_id"]
+            log.append(f"Kombi: {e['need']} already in the combo cart ({ln['qty']}x, cart_id {cid})")
+        else:
+            qty = max(e["qty"], ln["qty"] if ln else 0)    # adding a variant that is there replaces its line: give the total
+            try:
+                cid = _cart_add(cookies, iid, sku, qty, known=known, business=COMBO)
+                known.add(cid)
+            except Exception as ex:
+                log.append(f"FAILED to add Kombi {e['need']} ({e['label']}): {ex}")
+                continue
+            log.append(f"Kombi: added {qty}x {e['label']} to the combo cart: {e['need']} (cart_id {cid})")
+            if ln:
+                _remember_lines({}, drop=[ln["cart_id"]])
+        if name:
+            _remember_lines({cid: {"list": name, "need": e["need"], "item_id": iid, "sku_id": sku, "own": True, "combo": True}})
+    try:
+        now = {(ln["item_id"], ln["sku_id"]): ln for ln in _read_cart(cookies, COMBO)["lines"]}
+    except Exception as e:
+        return log + [f"Kombi: cart not re-read ({e})"]
+    for key, e in kombi.items():
+        ln = now.get(key)
+        if not ln:
+            log.append(f"Kombi {e['need']}: not in the combo cart afterwards")
+        elif ln["price"] is not None and e["price"] and abs(ln["price"] - e["price"]) > 0.05:
+            log.append(f"Kombi {e['need']}: {ln['price']:.2f} each in the combo cart, {e['price']:.2f} planned from the product page")
+    pick = [ln for ln in now.values() if ln["valid"] and ln["checked"]]
+    log.append(f"Kombi cart now: {len(pick)} checked line(s) = {sum(ln['qty'] for ln in pick)} pcs "
+               "(a checked Kombi line of another list ships in the same order)")
+    return log
 
 
 def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
@@ -2174,9 +2294,15 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
     mine = {k for k, v in store.items() if not v.get("own")}
     # One cart line per item+sku: add up what several picks want of it.
     wanted: dict[tuple, dict] = {}
+    kombi: dict[tuple, dict] = {}
     for p in plan["picks"]:
         w = p["way"]
         for (v, q), ship in zip(w["lines"], w["line_ship"]):
+            if w.get("combo_free"):
+                key = (w["offer"]["item_id"], v["sku_id"])
+                e = kombi.setdefault(key, {"need": p["need"], "label": v["label"], "qty": 0, "price": v["price"]})
+                e["qty"] += q
+                continue
             key = (w["offer"]["item_id"], v["sku_id"])
             e = wanted.setdefault(key, {"need": p["need"], "label": v["label"], "qty": 0, "ship": 0.0,
                                         "days": w["days"], "choice": w["offer"]["choice"], "price": v["price"]})
@@ -2224,7 +2350,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
                 tag.update(item_id=iid, sku_id=sku, own=True)
             tags[cid] = tag
         # The user's own lines that were on this list and are no longer: untag.
-        drop_tags = [c for c, v in store.items() if v.get("own") and v.get("list") == name and c not in want]
+        drop_tags = [c for c, v in store.items() if v.get("own") and not v.get("combo") and v.get("list") == name and c not in want]
     drop = [ln for ln in cart["lines"]
             if ln["cart_id"] in mine and ln["cart_id"] not in want
             and (ln["item_id"] in plan["candidates"] or (name and store.get(ln["cart_id"], {}).get("list") == name))]
@@ -2248,6 +2374,12 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         except Exception as e:
             res = f"failed: {e}"
         log.append(f"coupon {c['off']:.2f} off over {c['min']:.2f} at {st['name']}: {res}")
+    combo_log = _apply_combo(cookies, plan.get("list") or "", kombi) if kombi else []
+    if not want:
+        # Nothing for the main cart: leave its selection alone (an empty `only` would uncheck every line there).
+        return ("Applied:\n" + "\n".join(f"- {x}" for x in log + combo_log)
+                + "\n\nNothing of this plan goes into the main cart, its selection is unchanged. Order the Kombi-Knaller "
+                  "cart on its own checkout page (view_cart shows the link).")
     sel, after = _select(cookies, want, only=True)
     lines = {ln["cart_id"]: ln for ln in after["lines"]}
     diffs = []
@@ -2265,7 +2397,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         days = ln["days"][1]
         if days and e["days"] and abs(int(days) - int(e["days"])) > 3:
             diffs.append(f"{e['need']}: {days} days in the cart, planned {e['days']}")
-    out = ["Applied:"] + [f"- {x}" for x in log] + ["", sel, ""]
+    out = ["Applied:"] + [f"- {x}" for x in log + combo_log] + ["", sel, ""]
     out.append("Plan vs cart: " + ("matches (price, shipping within 0.50, delivery within 3 days)." if not diffs
                                    else "differs:\n" + "\n".join(f"- {d}" for d in diffs)))
     # The checkout link holds every plan line, also those beyond the 10 the
@@ -2328,6 +2460,13 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
 
     Every cart line pays an import charge (about 3.57 € to DE) whatever its
     quantity; the plan counts it, so one bigger pack beats two lines.
+
+    Kombi-Knaller hits (marked in search_products, so search the part first) go
+    into the combo cart: 3+ pieces there pay no import charge. The plan prices
+    them that way once its Kombi picks reach 3 pieces (otherwise the charge
+    stays), lists them as their own order and apply puts them into the combo
+    cart. Their checkout is a separate page, in several rounds if it says
+    "Limit exceeded".
 
     Args:
         items: The shopping list (see above).
