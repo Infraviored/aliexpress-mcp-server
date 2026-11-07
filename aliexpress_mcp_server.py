@@ -1962,6 +1962,33 @@ def _cart_choice_goods(cookies: dict[str, str], exclude: set[str] = frozenset())
                      if ln["checked"] and ln["choice"] and ln["item_id"] not in exclude), 2)
 
 
+PLANS_FILE = CREDENTIALS_PATH.parent / "aliexpress-plans.json"
+
+
+def _attach_rounds(plan: dict) -> None:
+    """Spread the Kombi picks over orders (rounds) and store them under a plan id for combo_round."""
+    kombi = plan.get("combo_picks") or []
+    plan["rounds"] = []
+    if not kombi:
+        return
+    items = [{"pieces": p["way"]["pieces"], "pick": p} for p in kombi]
+    plan["rounds"] = [[i["pick"] for i in o] for o in _kombi_orders(items, COMBO_MAX_LINES or 10)]
+    plan["id"] = f"plan-{uuid.uuid4().hex[:6]}"
+    rounds = [{"added": False, "picks": [
+        {"need": p["need"], "item_id": p["way"]["offer"]["item_id"], "pieces": p["way"]["pieces"],
+         "lines": [{"sku_id": v["sku_id"], "label": v["label"], "qty": q, "price": v["price"]} for v, q in p["way"]["lines"]]}
+        for p in r]} for r in plan["rounds"]]
+    with _STATE_LOCK:
+        try:
+            store = json.loads(PLANS_FILE.read_text())
+        except (OSError, ValueError):
+            store = {}
+        store[plan["id"]] = {"list": plan.get("list") or "", "at": time.time(), "rounds": rounds}
+        for old in sorted(store, key=lambda k: store[k]["at"])[:-20]:
+            store.pop(old)
+        private.write_json(PLANS_FILE, store)
+
+
 def _combo_order_text(plan: dict) -> str:
     """The Kombi-Knaller part of a plan: its own order in the combo cart, import charge-free from 3 pieces."""
     n, lines = plan["combo_pieces"], plan["combo_lines"]
@@ -1973,6 +2000,13 @@ def _combo_order_text(plan: dict) -> str:
         text += f" More than {COMBO_MAX_LINES} lines: order it in {rounds} rounds."
     else:
         text += " If its checkout says 'Limit exceeded, remove N items', order it in several rounds (each with 3+ pieces)."
+    rounds = plan.get("rounds") or []
+    if rounds:
+        text += f"\nPlan {plan.get('id')}: {len(rounds)} round(s) of Kombi orders (each needs 3+ pieces; apply puts round 1 into the combo cart):"
+        for i, r in enumerate(rounds, 1):
+            text += f"\n  Round {i}: " + ", ".join(f"{p['need']} x{p['way']['pieces']}" for p in r)
+        if len(rounds) > 1:
+            text += f"\nAfter ordering a round: combo_round('{plan.get('id')}') puts the next round in and checks only it."
     return text + " The Kombi price on the product page is a hint: apply compares it with the combo cart."
 
 
@@ -2372,6 +2406,8 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         w = p["way"]
         for (v, q), ship in zip(w["lines"], w["line_ship"]):
             if w.get("combo_free"):
+                if len(plan.get("rounds") or []) > 1 and p not in plan["rounds"][0]:
+                    continue                    # a later round: combo_round puts it in when its turn comes
                 key = (w["offer"]["item_id"], v["sku_id"])
                 e = kombi.setdefault(key, {"need": p["need"], "label": v["label"], "qty": 0, "price": v["price"]})
                 e["qty"] += q
@@ -2565,6 +2601,7 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     except PermissionError:
         return AUTH_EXPIRED_MSG
     plan["list"] = list_name.strip()
+    _attach_rounds(plan)
     if plan["picks"]:
         try:
             page = _plan_report(plan)
@@ -3130,6 +3167,76 @@ def kombi_check(list_name: str = "", rank_top: int = 6, max_lines: int = 12, ski
         job_id: pick up a running or finished check.
     """
     return _job_result(job_id, "kombi", lambda progress: _kombi_run(list_name, rank_top, max_lines, skip, progress))
+
+
+def _plan_store() -> dict:
+    try:
+        return json.loads(PLANS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+@tool()
+def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
+    """
+    The next Kombi-Knaller order of a shop_list plan. The combo checkout takes only so many
+    lines, so shop_list spreads the Kombi lines over rounds and stores them under a plan id;
+    apply puts round 1 into the combo cart. After you have ordered it, call this again: it puts
+    the next round (or `round_no`) into the combo cart and checks ONLY those lines, so the
+    checkout page shows exactly that order. No other tool needed. Never orders anything.
+
+    Args:
+        plan_id: the id shop_list printed ("plan-ab12cd").
+        round_no: which round (1, 2, ...); 0 = the first round not put in yet.
+        add: False only shows the state of every round.
+    """
+    store = _plan_store()
+    plan = store.get(plan_id)
+    if not plan:
+        return f"No plan '{plan_id}' (ids come from shop_list; the last 20 are kept)."
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        cart = _read_cart(cookies, COMBO)["lines"]
+    except Exception as e:
+        return f"Kombi-Knaller cart not readable: {e}"
+    have = {(ln["item_id"], ln["sku_id"]): ln for ln in cart if ln["valid"]}
+
+    def state(r: dict) -> str:
+        keys = [(p["item_id"], ln["sku_id"]) for p in r["picks"] for ln in p["lines"]]
+        n = sum(1 for k in keys if k in have)
+        if n == len(keys):
+            return "in the combo cart"
+        if n:
+            return f"partly in the combo cart ({n} of {len(keys)} lines)"
+        return "gone from the cart (ordered or removed)" if r["added"] else "not put in yet"
+    rounds = plan["rounds"]
+    out = [f"Plan {plan_id} ({plan['list'] or 'no list'}): {len(rounds)} Kombi round(s)"]
+    for i, r in enumerate(rounds, 1):
+        out.append(f"  Round {i}: " + ", ".join(f"{p['need']} x{p['pieces']}" for p in r["picks"]) + f" - {state(r)}")
+    if not add:
+        return "\n".join(out)
+    n = round_no or next((i for i, r in enumerate(rounds, 1) if not r["added"]), 0)
+    if not n or n > len(rounds):
+        return "\n".join(out + ["Every round has been put in. Nothing left."])
+    r = rounds[n - 1]
+    kombi = {(p["item_id"], ln["sku_id"]): {"need": p["need"], "label": ln["label"], "qty": ln["qty"], "price": ln["price"]}
+             for p in r["picks"] for ln in p["lines"]}
+    log = _apply_combo(cookies, plan["list"], kombi)
+    try:
+        now = {(ln["item_id"], ln["sku_id"]): ln["cart_id"] for ln in _read_cart(cookies, COMBO)["lines"] if ln["valid"]}
+        ids = [now[k] for k in kombi if k in now]
+        text, _ = _select(cookies, ids, only=True, business=COMBO)
+    except Exception as e:
+        return "\n".join(out + [f"Round {n}:"] + [f"- {x}" for x in log] + [f"Checking the round failed: {e}"])
+    r["added"] = True
+    with _STATE_LOCK:
+        cur = _plan_store()
+        if plan_id in cur:
+            cur[plan_id]["rounds"][n - 1]["added"] = True
+            private.write_json(PLANS_FILE, cur)
+    return "\n".join(out + [f"Round {n} put in:"] + [f"- {x}" for x in log] + ["", text])
 
 
 _JOBS: dict[str, dict] = {}
