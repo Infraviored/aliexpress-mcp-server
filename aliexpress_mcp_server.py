@@ -1778,6 +1778,8 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
         # from every part's own best before any re-scoring (order-independent);
         # unknown delivery times do not set a floor.
         for p in picks:
+            for w in p["options"]:
+                w["score"] = w["net"] + day_cost * (w["days"] if w["days"] is not None else UNKNOWN_DAYS)
             p["options"].sort(key=lambda w: w["score"])
         first_days = [p["options"][0]["days"] for p in picks]
         for i, p in enumerate(picks):
@@ -1797,12 +1799,13 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
     def combo_all(on: bool) -> None:
         for p in picks:
             for w in p["options"]:
-                _combo_free(w, on)
+                if on or w["pieces"] < COMBO_MIN_PIECES:     # a way of 3+ pieces carries the combo order by itself
+                    _combo_free(w, on)
 
     # Kombi-Knaller: 3+ combo pieces in the combo order carry no import charge. Price
     # the Kombi offers that way when the best Kombi offers of the list reach 3 pieces,
     # and take the charge back when the picks end up with fewer.
-    reach = sum(next((w["pieces"] for w in p["options"] if w.get("combo")), 0) for p in picks)
+    reach = sum(max((w["pieces"] for w in p["options"] if w.get("combo")), default=0) for p in picks)
     combo_all(reach >= COMBO_MIN_PIECES)
     select()
     if reach >= COMBO_MIN_PIECES and sum(p["way"]["pieces"] for p in picks if p["way"].get("combo")) < COMBO_MIN_PIECES:
@@ -1816,7 +1819,7 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
     if choice_fee:
         # Below the threshold, Choice is not free: charge each Choice pick its
         # share of the fee and let a global offer win where it now is cheaper.
-        share = choice_fee / max(1, sum(1 for p in picks if p["way"]["offer"]["choice"]))
+        share = choice_fee / max(1, sum(1 for p in picks if p["way"]["offer"]["choice"] and not p["way"].get("combo_free")))
         for p in picks:
             if not p["way"]["offer"]["choice"] or p["way"].get("combo_free"):
                 continue
@@ -1836,7 +1839,7 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
         for p in picks:
             if p["way"]["offer"]["choice"] or p["way"].get("combo_free"):
                 continue
-            alt = next((w for w in p["options"] if w["offer"]["choice"]), None)
+            alt = next((w for w in p["options"] if w["offer"]["choice"] and not w.get("combo_free")), None)
             if alt and alt["score"] - alt.get("duty", 0.0) < p["way"]["score"]:
                 p["others"] = [p["way"]] + [w for w in p["others"] if w is not alt][:1]
                 p["way"] = alt
@@ -2243,9 +2246,11 @@ def _apply_combo(cookies: dict[str, str], name: str, kombi: dict[tuple, dict]) -
     """Put the plan's Kombi lines into the combo cart (it ticks new lines itself); compare price and quantity."""
     log = []
     try:
-        have = {(ln["item_id"], ln["sku_id"]): ln for ln in _read_cart(cookies, COMBO)["lines"] if ln["valid"]}
+        every = _read_cart(cookies, COMBO)["lines"]
     except Exception as e:
         return [f"FAILED to read the Kombi-Knaller cart: {e} - no Kombi line added"]
+    have = {(ln["item_id"], ln["sku_id"]): ln for ln in every if ln["valid"]}
+    known = {ln["cart_id"] for ln in every}
     for (iid, sku), e in kombi.items():
         ln = have.get((iid, sku))
         if ln and ln["qty"] >= e["qty"] and ln["checked"]:
@@ -2254,7 +2259,8 @@ def _apply_combo(cookies: dict[str, str], name: str, kombi: dict[tuple, dict]) -
         else:
             qty = max(e["qty"], ln["qty"] if ln else 0)    # adding a variant that is there replaces its line: give the total
             try:
-                cid = _cart_add(cookies, iid, sku, qty, business=COMBO)
+                cid = _cart_add(cookies, iid, sku, qty, known=known, business=COMBO)
+                known.add(cid)
             except Exception as ex:
                 log.append(f"FAILED to add Kombi {e['need']} ({e['label']}): {ex}")
                 continue
@@ -2344,7 +2350,7 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
                 tag.update(item_id=iid, sku_id=sku, own=True)
             tags[cid] = tag
         # The user's own lines that were on this list and are no longer: untag.
-        drop_tags = [c for c, v in store.items() if v.get("own") and v.get("list") == name and c not in want]
+        drop_tags = [c for c, v in store.items() if v.get("own") and not v.get("combo") and v.get("list") == name and c not in want]
     drop = [ln for ln in cart["lines"]
             if ln["cart_id"] in mine and ln["cart_id"] not in want
             and (ln["item_id"] in plan["candidates"] or (name and store.get(ln["cart_id"], {}).get("list") == name))]
@@ -2369,6 +2375,11 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
             res = f"failed: {e}"
         log.append(f"coupon {c['off']:.2f} off over {c['min']:.2f} at {st['name']}: {res}")
     combo_log = _apply_combo(cookies, plan.get("list") or "", kombi) if kombi else []
+    if not want:
+        # Nothing for the main cart: leave its selection alone (an empty `only` would uncheck every line there).
+        return ("Applied:\n" + "\n".join(f"- {x}" for x in log + combo_log)
+                + "\n\nNothing of this plan goes into the main cart, its selection is unchanged. Order the Kombi-Knaller "
+                  "cart on its own checkout page (view_cart shows the link).")
     sel, after = _select(cookies, want, only=True)
     lines = {ln["cart_id"]: ln for ln in after["lines"]}
     diffs = []

@@ -78,3 +78,27 @@ def test_combo_lines_split_into_rounds_when_a_limit_is_set(monkeypatch):
     monkeypatch.setattr(m, "COMBO_MAX_LINES", 1)
     plan = m._plan([{"need": "a", "item_ids": ["A"], "pieces": 3}, {"need": "b", "item_ids": ["B"], "pieces": 3}], 0.0)
     assert "2 rounds" in m._combo_order_text(plan)
+
+
+def test_three_pack_stays_free_when_a_single_piece_variant_comes_first(monkeypatch):
+    offer = _offer("P", 2.0)
+    offer["variants"].append({"label": "3PCS", "sku_id": "sP3", "price": 5.0, "salable": True, "pack": 3, "ambiguous": False})
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: offer)
+    m.COMBO_ITEMS.add("P")
+    plan = m._plan([{"need": "p", "item_ids": ["P"], "pieces": 3}], 0.0)
+    w = plan["picks"][0]["way"]
+    assert w["pieces"] >= 3 and w.get("combo_free") and plan["duty"] == 0
+
+
+def test_apply_with_only_combo_lines_leaves_the_main_cart_selection_alone(monkeypatch):
+    m.COMBO_ITEMS.update({"A", "B"})
+    plan = m._plan([{"need": "a", "item_ids": ["A"], "pieces": 2}, {"need": "b", "item_ids": ["B"], "pieces": 1}], 0.0)
+    plan["list"] = "L"
+    calls = []
+    monkeypatch.setattr(m, "_read_cart", lambda c, business="": {"lines": [], "header": {}})
+    monkeypatch.setattr(m, "_line_store", lambda: {})
+    monkeypatch.setattr(m, "_remember_lines", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_cart_add", lambda *a, **k: "99")
+    monkeypatch.setattr(m, "_select", lambda *a, **k: calls.append(a) or ("", {"lines": []}))
+    out = m._apply_plan({"x": "y"}, plan)
+    assert not calls and "selection is unchanged" in out and "Kombi: added" in out
