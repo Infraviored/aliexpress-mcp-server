@@ -12,8 +12,8 @@ the speed costs.
 
 ## Shopping list → cart
 
-1. `shop_list(items, list_name=…)` plans it. Say its "For the user" part; publish
-   the page it names with the Artifact tool (same path = same link) and open it.
+1. `shop_list(items, list_name=…)` plans it. Say its "For the user" part; give
+   the user the page address it names (served by the MCP, never published) and open it.
 2. Fix what the notes flag. Repeated or suspicious variant names: look at
    `get_variant_images`, then set `match` to the kind of article ("N16R8 board",
    not "N16R8" — the cheap hits were bare modules) or pin `sku_id` + `qty`.
@@ -36,7 +36,7 @@ Real total for any lines: `checkout_preview`. One product, N pieces: `best_offer
 you to look for something, find a better price or compare, you finish with one
 `make_report` page: the recommendation on top (`chosen`, with a short reason), the
 alternatives below it (1–2 sentences on what differs), `"pick": True` on the section so
-he can click his choice. Hand it over as a file or artifact. Do not ask the question in
+he can click his choice. Give the page address (served locally by the MCP, never published). Do not ask the question in
 chat, do not put it on a `decide` card (that rule is for other work, not for shopping
 choices), do not write a table in chat. In chat give two or three sentences and the
 recommendation; the page does the rest. Adding to the cart happens after he picked.
@@ -46,8 +46,8 @@ Every page for the user (research, comparison, "what did you find") comes from
 Each card needs `item_id` (picture from the product page) or `image` (URL,
 local file). Put the verdict into `notes`, the totals into `facts`, mark what
 is in the cart with a "✓ im Korb" tag. The cart and the plan pages
-(`view_cart`, `shop_list`) have their own builders. Publish the file it names
-with the Artifact tool, or hand it over as a file if that tool is missing.
+(`view_cart`, `shop_list`) have their own builders. Give the user the address
+the tool names. Never publish these pages (Artifact tool or any web service): they hold the user's cart.
 
 ## Orders
 

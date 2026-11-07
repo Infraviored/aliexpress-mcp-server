@@ -15,6 +15,7 @@ import json
 import os
 import re
 import asyncio
+import reportserver
 import uuid
 import functools
 import threading
@@ -298,12 +299,27 @@ _FOREGROUND = 0                # quick tool calls running now (they go before ba
 _FG_LOCK = threading.Lock()
 
 
-def _mtop_pace() -> None:
+CALL_LOG = CREDENTIALS_PATH.parent / "aliexpress-calls.log"
+
+
+def _log_call(kind: str) -> None:
+    """One line per AliExpress request (time, process, thread, kind): what came before a bot check."""
+    try:
+        if CALL_LOG.exists() and CALL_LOG.stat().st_size > 1_000_000:
+            CALL_LOG.replace(CALL_LOG.with_suffix(".log.1"))
+        with open(CALL_LOG, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} pid={os.getpid()} {threading.current_thread().name} {kind}\n")
+    except OSError:
+        pass
+
+
+def _mtop_pace(kind: str = "mtop") -> None:
     """Keep a gap (plus jitter) between MTOP calls, across all server processes:
     bursts are what trigger the bot check. Background jobs let quick tool calls go first."""
     import fcntl
     import random
     t0 = time.time()
+    _log_call(kind)
     _CALL.calls = getattr(_CALL, "calls", 0) + 1
     give_up = time.time() + 6.0      # quick calls go first, but never starve a background job
     while getattr(_CALL, "background", False) and _FOREGROUND > 0 and time.time() < give_up:
@@ -334,6 +350,7 @@ def _mtop_pace_locked(fcntl, random) -> None:
 def _bot_note(blocked: bool) -> None:
     """Remember across processes that AliExpress asked for a bot check (or that it passed)."""
     if blocked:
+        _log_call("BOT-CHECK")
         BOT_CHECK["since"] = BOT_CHECK.get("since") or time.time()
         BOT_CHECK["last"] = time.time()
         private.write_json(_BOT_FILE, {"since": BOT_CHECK["since"], "last": BOT_CHECK["last"]})
@@ -2071,18 +2088,27 @@ def _fmt_plan(plan: dict) -> str:
     return "\n".join(out)
 
 
-# The HTML pages view_cart and shop_list write; the assistant publishes them
-# as artifacts. Fixed names, so republishing keeps the artifact's link.
+# The HTML pages view_cart and shop_list write. They are NOT published anywhere (they hold the
+# user's cart): a small web server inside the MCP serves them on the local network, fixed names.
 REPORT_DIR = Path(os.environ.get("ALIEXPRESS_REPORT_DIR", "~/aliexpress-reports")).expanduser()
+REPORT_TOKEN_FILE = CREDENTIALS_PATH.parent / "aliexpress-report-token"
 
 
 def _write_report(name: str, page: str) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / name
     path.write_text(page, encoding="utf-8")
-    return (f"Page with pictures and links: {path}\n"
-            "Publish it with the Artifact tool (file_path above; the same path keeps the same link) "
-            "and open it for the user — the chat cannot show pictures.")
+    link = ""
+    try:
+        reportserver.start(REPORT_DIR, REPORT_TOKEN_FILE)        # False: another MCP process already serves it
+        link = reportserver.url(name, REPORT_TOKEN_FILE)
+    except Exception as e:
+        logger.debug("report server not started: %s", e)
+    return (f"Page with pictures and links: {link or path}\n"
+            + ("Give the user this address (served by the MCP on the local network, same address every time). "
+               "Do not publish the page anywhere: it holds the cart and prices. " if link else
+               f"File: {path} (the report server could not start: hand it over as a file, never publish it). ")
+            + "The chat cannot show pictures, so point the user to the page.")
 
 
 # Choice alternatives found for global seller lines, so view_cart does not
