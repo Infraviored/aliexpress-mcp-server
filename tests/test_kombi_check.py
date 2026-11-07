@@ -46,7 +46,7 @@ def test_kombi_orders_split_by_limit_and_keep_three_pieces_each():
 
 def test_search_is_paced_cached_and_stops_in_a_bot_check(monkeypatch):
     calls = []
-    monkeypatch.setattr(m, "_mtop_pace", lambda: calls.append("pace"))
+    monkeypatch.setattr(m, "_mtop_pace", lambda *a: calls.append("pace"))
     monkeypatch.setattr(m, "_bot_cooldown_left", lambda: 0.0)
     monkeypatch.setattr(m, "parse_search_results", lambda html: [{"item_id": "1", "title": "t"}])
     m._SEARCH_CACHE.clear()
