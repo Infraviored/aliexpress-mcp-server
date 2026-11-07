@@ -76,3 +76,28 @@ def test_search_is_paced_cached_and_stops_in_a_bot_check(monkeypatch):
         raise AssertionError("cooldown ignored")
     except RuntimeError as e:
         assert "paused" in str(e)
+
+
+def test_orders_below_three_pieces_are_merged_until_every_order_has_three():
+    orders = m._kombi_orders([{"pieces": 1}, {"pieces": 1}, {"pieces": 1}], 1)
+    assert len(orders) == 1 and sum(x["pieces"] for x in orders[0]) == 3
+    orders = m._kombi_orders([{"pieces": 5}, {"pieces": 1}, {"pieces": 1}, {"pieces": 1}], 1)
+    assert all(sum(x["pieces"] for x in o) >= 3 for o in orders)
+
+
+def test_x5secdata_on_a_normal_page_is_no_bot_check(monkeypatch):
+    monkeypatch.setattr(m, "_mtop_pace", lambda *a: None)
+    monkeypatch.setattr(m, "_bot_cooldown_left", lambda: 0.0)
+    monkeypatch.setattr(m, "parse_search_results", lambda html: [{"item_id": "1", "title": "t"}])
+    m._SEARCH_CACHE.clear()
+
+    class Resp:
+        url = "https://www.aliexpress.com/w/x.html"
+        text = "<script>var x5secdata='abc'</script>"
+        def raise_for_status(self): pass
+
+    class Client:
+        def get(self, *a, **k): return Resp()
+        def close(self): pass
+    monkeypatch.setattr(m, "get_client", lambda *a, **k: Client())
+    assert m._search("normal")[0]["item_id"] == "1"

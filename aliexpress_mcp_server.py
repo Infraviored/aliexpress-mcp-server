@@ -841,14 +841,15 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
         resp = client.get(url_path, params=params)
         if check_auth_redirect(resp):
             raise PermissionError("auth expired")
-        if "punish" in str(resp.url).lower() or "_____tmd_____" in str(resp.url) or "x5secdata" in resp.text[:6000]:
+        found = parse_search_results(resp.text)
+        if "punish" in str(resp.url).lower() or "_____tmd_____" in str(resp.url) or (
+                not found and re.search(r"x5secdata|_____tmd_____|punish", resp.text[:20000])):
             _bot_note(True)
             raise RuntimeError("bot check: AliExpress asked for a slider on the search page; "
                                f"calls pause for {int(BOT_COOLDOWN)} s")
         resp.raise_for_status()
         # The filter lets the odd hit through whose card lacks the Choice
         # badge; the product page decides (shop_list checks it there).
-        found = parse_search_results(resp.text)
         if found:
             _SEARCH_CACHE[key] = (time.time(), found)
         return [dict(h) for h in found]
@@ -2746,6 +2747,9 @@ def _edit_delete(fields):
     fields["operationType"] = "delete"
 
 
+LINE_NOT_FOUND = "not found in cart"      # the one message _cart_action_any reacts to
+
+
 def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
                       merged: Optional[dict] = None, business: str = "") -> tuple[list[str], dict[str, str]]:
     """
@@ -2762,7 +2766,7 @@ def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
         cid = str(cid).strip()
         bid = cartlib.item_blocks(merged).get(cid)
         if bid is None:
-            failed[cid] = "not found in cart"
+            failed[cid] = LINE_NOT_FOUND
             continue
         block = json.loads(json.dumps(merged["data"][bid]))
         edit(block.setdefault("fields", {}))
@@ -3010,9 +3014,11 @@ def _kombi_orders(picks: list[dict], limit: int) -> list[list[dict]]:
     orders: list[list[dict]] = []
     for p in sorted(picks, key=lambda x: -x["pieces"]):
         orders.append([p]) if not orders or len(orders[-1]) >= limit else orders[-1].append(p)
-    if len(orders) > 1 and sum(p["pieces"] for p in orders[-1]) < COMBO_MIN_PIECES:
-        last = orders.pop()
-        orders[-1] += last
+    pcs = lambda o: sum(p["pieces"] for p in o)
+    while len(orders) > 1 and min(map(pcs, orders)) < COMBO_MIN_PIECES:     # an order below 3 pieces saves nothing:
+        orders.sort(key=pcs)                                                # join the two smallest (limit is soft then)
+        small = orders.pop(0)
+        orders[0] += small
     return orders
 
 
@@ -3346,7 +3352,7 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False,
 def _cart_action_any(cookies: dict[str, str], edits: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     """Run line actions on the main cart; lines it does not have are tried in the Kombi-Knaller cart."""
     done, failed = _cart_line_action(cookies, edits)
-    lost = {c: e for c, e in edits.items() if failed.get(c) == "not found in cart"}
+    lost = {c: e for c, e in edits.items() if failed.get(c) == LINE_NOT_FOUND}
     if lost:
         d2, f2 = _cart_line_action(cookies, lost, business=COMBO)
         failed = {**{c: w for c, w in failed.items() if c not in lost}, **f2}
