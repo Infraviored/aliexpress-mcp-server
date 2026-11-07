@@ -304,11 +304,19 @@ CALL_LOG = CREDENTIALS_PATH.parent / "aliexpress-calls.log"
 
 def _log_call(kind: str) -> None:
     """One line per AliExpress request (time, process, thread, kind): what came before a bot check."""
+    import fcntl
     try:
-        if CALL_LOG.exists() and CALL_LOG.stat().st_size > 1_000_000:
-            CALL_LOG.replace(CALL_LOG.with_suffix(".log.1"))
+        CALL_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with open(CALL_LOG, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)           # rotation and append are one step across processes and threads
+            if os.fstat(f.fileno()).st_size > 1_000_000:
+                CALL_LOG.replace(CALL_LOG.with_suffix(".log.1"))
+                f.close()
+                f = open(CALL_LOG, "a")
+                fcntl.flock(f, fcntl.LOCK_EX)
             f.write(f"{time.strftime('%H:%M:%S')} pid={os.getpid()} {threading.current_thread().name} {kind}\n")
+            f.flush()
+            f.close()
     except OSError:
         pass
 
@@ -2100,8 +2108,9 @@ def _write_report(name: str, page: str) -> str:
     path.write_text(page, encoding="utf-8")
     link = ""
     try:
-        reportserver.start(REPORT_DIR, REPORT_TOKEN_FILE)        # False: another MCP process already serves it
-        link = reportserver.url(name, REPORT_TOKEN_FILE)
+        # start() is False when the port is taken: fine if it is our server (another MCP process), not if a foreign service holds it
+        if reportserver.start(REPORT_DIR, REPORT_TOKEN_FILE) or reportserver.alive(REPORT_TOKEN_FILE):
+            link = reportserver.url(name, REPORT_TOKEN_FILE)
     except Exception as e:
         logger.debug("report server not started: %s", e)
     return (f"Page with pictures and links: {link or path}\n"
