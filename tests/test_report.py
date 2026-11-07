@@ -59,6 +59,15 @@ def test_cart_page_survives_odd_decisions_and_blocks_javascript_links():
     assert "javascript:" not in page and "1. " in page
 
 
+def test_cart_page_edge_cases_no_items_no_total_odd_kind_and_title():
+    only_unlisted = report.cart_page(_page(items=[], total=None, checkout_url="",
+                                           unlisted=[{"img": None, "title": None, "url": "https://x", "qty": 1, "cost": 1.0}]), "now")
+    assert "Alles zur Kasse (0" not in only_unlisted and "Kasse mit allen 1 Zeilen" in only_unlisted
+    assert 'class="btn ghost"' not in only_unlisted and "Einfuhrabgabe fehlt" in only_unlisted
+    odd = report.cart_page(_page(items=[dict(ITEM, kind="Sonstige", cost=2.0, slowest=False, list="")]), "now")
+    assert "Globale Händler" in odd and "2,00 €" in odd
+
+
 def test_decision_helper_and_plurals():
     assert report._is_decision({"price": 2.5}) and not report._is_decision({"price": (0, 0)})
     assert report._teile(1) == "1 Teil" and report._teile(3) == "3 Teile"
@@ -99,3 +108,35 @@ def test_generic_page_pick_mode_has_radios_codes_and_lightbox():
     assert page.count('type="radio"') == 2 and "checked" in page
     assert ">A1<" in page and ">A2<" in page and 'id="pk-out"' in page and 'id="lb"' in page
     assert "clipboard" not in page
+
+
+def test_generic_page_drops_non_http_links():
+    page = report.generic_page("T", "", [], [], [{"heading": "H", "intro": "", "cards": [
+        _card(title="A", url="javascript:alert(1)")]}], "x")
+    assert "javascript:" not in page
+
+
+def test_report_image_refuses_local_files_outside_report_dir(tmp_path, monkeypatch):
+    import aliexpress_mcp_server as m
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reports")
+    (tmp_path / "reports").mkdir()
+    secret = tmp_path / "id_rsa.png"
+    secret.write_bytes(b"x")
+    ok = tmp_path / "reports" / "p.png"
+    ok.write_bytes(b"\x89PNG")
+    assert m._report_image({"image": str(secret)}) is None
+    assert m._report_image({"image": str(ok)}).startswith("data:image/png;base64,")
+
+
+def test_report_image_refuses_private_and_non_https_urls():
+    import aliexpress_mcp_server as m
+    for u in ("http://example.com/a.jpg", "https://127.0.0.1/a.jpg", "https://169.254.169.254/x.jpg",
+              "https://localhost/a.jpg"):
+        assert m._report_image({"image": u}) is None
+
+
+def test_cdn_picture_url_keeps_sized_and_query_urls():
+    import aliexpress_mcp_server as m
+    assert m._cdn_picture_url("https://ae01.alicdn.com/kf/Sabc.jpg") == "https://ae01.alicdn.com/kf/Sabc.jpg_800x800.jpg"
+    assert m._cdn_picture_url("https://ae01.alicdn.com/kf/Sabc.jpg_350x350.jpg") == "https://ae01.alicdn.com/kf/Sabc.jpg_350x350.jpg"
+    assert m._cdn_picture_url("https://ae01.alicdn.com/kf/Sabc.jpg?w=1") == "https://ae01.alicdn.com/kf/Sabc.jpg?w=1"

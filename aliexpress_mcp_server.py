@@ -1882,9 +1882,7 @@ def _cart_report(cart: dict, tags: dict[str, dict], previews: dict[str, dict], s
     by_list, rest = cartlib.by_list(cart, tags)
     listed = [(name, ln) for name, lns in by_list.items() for ln in lns]
     lines = [ln for _, ln in listed]
-    dec = []
-    for lns in by_list.values():
-        dec += _decisions(cart, tags, lns, alternatives)
+    dec = _decisions(cart, tags, lines, alternatives) if lines else []
     for o in options or []:
         dec.append({"kind": "agent", "title": o.get("title", ""), "facts": [o.get("text", "")] if o.get("text") else [],
                     "img": o.get("img"), "link": o.get("link"), "link_text": o.get("link_text") or o.get("link"),
@@ -2577,9 +2575,10 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                             + checkoutlib.format_preview(priced[name], len(ids), cartlib.checkout_url(ids), DUTY_PER_LINE))
         except Exception as e:
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
-    combined = next(iter(priced.values())) if len(priced) == 1 else None
+    n_lists = len(cartlib.by_list(c, tags)[0])
+    combined = next(iter(priced.values())) if n_lists == 1 and priced else None
     all_ids = [ln["cart_id"] for lns in cartlib.by_list(c, tags)[0].values() for ln in lns]
-    if checkout and len(priced) > 1 and all_ids:
+    if checkout and n_lists > 1 and all_ids:
         try:
             combined = _render_order(cookies, all_ids)
         except Exception as e:

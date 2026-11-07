@@ -296,8 +296,10 @@ def cart_page(page: dict, stamp: str) -> str:
         out.append(_money(page["goods"], page["ship"], page["duty"], page["discount"]))
         out.append(f'<div class="legend"><span>Kasse: Ware + Versand + Einfuhrabgabe − Rabatt = '
                    f'<b class="num">{eur(total)}</b></span></div>')
-    out.append(f'<div class="go"><a class="btn" href="{_e(_url(page["checkout_url"]))}" target="_blank" rel="noopener">'
-               f'Alles zur Kasse ({_teile(len(items))})</a><span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
+    if items:
+        out.append(f'<div class="go"><a class="btn" href="{_e(_url(page.get("checkout_url")))}" target="_blank" '
+                   f'rel="noopener">Alles zur Kasse ({_teile(len(items))})</a>'
+                   '<span>Nichts wird bestellt, bis du dort bezahlst.</span></div>')
     if page.get("summary"):
         out.append(f'<div class="note"><p>{_e(page["summary"])}</p></div>')
     if page.get("mismatch"):
@@ -314,7 +316,7 @@ def cart_page(page: dict, stamp: str) -> str:
         text = " ".join(str(x) for x in [d.get("title")] + list(d.get("facts") or []) + [d.get("warn")] if x)
         out.append(f'<div class="note"><p>{_e(text)}</p></div>')
     for kind, label, how in _GROUPS:
-        rows = [it for it in items if it["kind"] == kind]
+        rows = [it for it in items if (it["kind"] == "Choice") == (kind == "Choice")]  # unknown kinds count as global
         if rows:
             out.append(f'<div class="lh g"><span><b>{label}</b> <span class="eyebrow">{_teile(len(rows))} · {how}</span></span>'
                        f'<span class="num">{eur(sum(it["cost"] for it in rows))}</span></div>'
@@ -323,17 +325,19 @@ def cart_page(page: dict, stamp: str) -> str:
     if others:
         rows = "".join(
             f'<div class="row">{_img(o.get("img"))}<div class="t">'
-            f'<a class="need" href="{_e(_url(o["url"]))}" target="_blank" rel="noopener">{_e(o["title"][:70])}</a>'
+            f'<a class="need" href="{_e(_url(o["url"]))}" target="_blank" rel="noopener">{_e(str(o.get("title") or "")[:70])}</a>'
             f'<div class="meta"><span>{o["qty"]}×</span></div></div>'
             f'<div class="money"><b>{eur(o["cost"])}</b></div></div>' for o in others)
         out.append(f'<div class="lh g"><span><b>Ohne Liste</b> <span class="eyebrow">{_teile(len(others))} · '
                    f'im Korb, aber nicht im Gesamtpreis oben</span></span>'
                    f'<span class="num">{eur(sum(o["cost"] for o in others))}</span></div>'
                    f'<div class="rows">{rows}</div>'
-                   f'<div class="go"><a class="btn ghost" href="{_e(_url(page["checkout_all_url"]))}" target="_blank" '
-                   f'rel="noopener">Auch diese mitnehmen: Kasse mit allen {len(items) + len(others)} Zeilen</a></div>')
-    out.append(f"<footer>Stand {_e(stamp)}. Zeilenpreise = Ware + Versand; die Einfuhrabgabe steht nur im Gesamtpreis. "
-               "Preise von der Kassenseite, nichts bestellt.</footer>")
+                   f'<div class="go"><a class="btn{" ghost" if items else ""}" href="{_e(_url(page.get("checkout_all_url")))}" '
+                   f'target="_blank" rel="noopener">{"Auch diese mitnehmen: " if items else ""}Kasse mit allen '
+                   f'{len(items) + len(others)} Zeilen</a></div>')
+    out.append(f"<footer>Stand {_e(stamp)}. Zeilenpreise = Ware + Versand"
+               + ("; die Einfuhrabgabe steht nur im Gesamtpreis" if total is not None else "; ohne Kassen-Vorschau, Einfuhrabgabe fehlt")
+               + ". Preise von der Kassenseite, nichts bestellt.</footer>")
     return _page("Warenkorb " + (page.get("name") or "Übersicht"), "\n".join(out))
 
 
