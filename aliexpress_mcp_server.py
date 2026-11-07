@@ -1971,7 +1971,7 @@ def _attach_rounds(plan: dict) -> None:
     plan["rounds"] = []
     if not kombi:
         return
-    items = [{"pieces": p["way"]["pieces"], "pick": p} for p in kombi]
+    items = [{"pieces": p["way"]["pieces"], "lines": len(p["way"]["lines"]), "pick": p} for p in kombi]
     plan["rounds"] = [[i["pick"] for i in o] for o in _kombi_orders(items, COMBO_MAX_LINES or 10)]
     plan["id"] = f"plan-{uuid.uuid4().hex[:6]}"
     rounds = [{"added": False, "picks": [
@@ -1981,7 +1981,10 @@ def _attach_rounds(plan: dict) -> None:
     with _STATE_LOCK:
         try:
             store = json.loads(PLANS_FILE.read_text())
-        except (OSError, ValueError):
+        except OSError:
+            store = {}
+        except ValueError:                                  # damaged file: keep it, start a new one
+            PLANS_FILE.replace(PLANS_FILE.with_suffix(".json.bak"))
             store = {}
         store[plan["id"]] = {"list": plan.get("list") or "", "at": time.time(), "rounds": rounds}
         for old in sorted(store, key=lambda k: store[k]["at"])[:-20]:
@@ -1996,7 +1999,7 @@ def _combo_order_text(plan: dict) -> str:
             f"{plan['combo_goods']:.2f} {CURRENCY} goods, no import charge (3+ pieces). It is ordered on its own checkout page, "
             "apart from the main cart (shipping and Choice threshold count there separately).")
     if COMBO_MAX_LINES and lines > COMBO_MAX_LINES:
-        rounds = -(-lines // COMBO_MAX_LINES)
+        rounds = len(plan.get("rounds") or []) or -(-lines // COMBO_MAX_LINES)
         text += f" More than {COMBO_MAX_LINES} lines: order it in {rounds} rounds."
     else:
         text += " If its checkout says 'Limit exceeded, remove N items', order it in several rounds (each with 3+ pieces)."
@@ -2406,7 +2409,8 @@ def _apply_plan(cookies: dict[str, str], plan: dict) -> str:
         w = p["way"]
         for (v, q), ship in zip(w["lines"], w["line_ship"]):
             if w.get("combo_free"):
-                if len(plan.get("rounds") or []) > 1 and p not in plan["rounds"][0]:
+                if len(plan.get("rounds") or []) > 1 and (p["need"], w["offer"]["item_id"]) not in {
+                        (q["need"], q["way"]["offer"]["item_id"]) for q in plan["rounds"][0]}:
                     continue                    # a later round: combo_round puts it in when its turn comes
                 key = (w["offer"]["item_id"], v["sku_id"])
                 e = kombi.setdefault(key, {"need": p["need"], "label": v["label"], "qty": 0, "price": v["price"]})
@@ -3049,8 +3053,9 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
 def _kombi_orders(picks: list[dict], limit: int) -> list[list[dict]]:
     """Split the Kombi picks into orders of at most `limit` lines; each order needs 3+ pieces (a short last one joins the one before)."""
     orders: list[list[dict]] = []
+    n_lines = lambda o: sum(p.get("lines", 1) for p in o)
     for p in sorted(picks, key=lambda x: -x["pieces"]):
-        orders.append([p]) if not orders or len(orders[-1]) >= limit else orders[-1].append(p)
+        orders.append([p]) if not orders or n_lines(orders[-1]) + p.get("lines", 1) > limit else orders[-1].append(p)
     pcs = lambda o: sum(p["pieces"] for p in o)
     while len(orders) > 1 and min(map(pcs, orders)) < COMBO_MIN_PIECES:     # an order below 3 pieces saves nothing:
         orders.sort(key=pcs)                                                # join the two smallest (limit is soft then)
@@ -3182,8 +3187,8 @@ def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
     The next Kombi-Knaller order of a shop_list plan. The combo checkout takes only so many
     lines, so shop_list spreads the Kombi lines over rounds and stores them under a plan id;
     apply puts round 1 into the combo cart. After you have ordered it, call this again: it puts
-    the next round (or `round_no`) into the combo cart and checks ONLY those lines, so the
-    checkout page shows exactly that order. No other tool needed. Never orders anything.
+    the next round (or `round_no`) into the combo cart and checks ONLY those lines (it UNCHECKS every other Kombi line, also ones of other lists: the checkout
+    page then shows exactly this order; the result names what it unchecked). Never orders anything.
 
     Args:
         plan_id: the id shop_list printed ("plan-ab12cd").
@@ -3217,9 +3222,15 @@ def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
         out.append(f"  Round {i}: " + ", ".join(f"{p['need']} x{p['pieces']}" for p in r["picks"]) + f" - {state(r)}")
     if not add:
         return "\n".join(out)
-    n = round_no or next((i for i, r in enumerate(rounds, 1) if not r["added"]), 0)
-    if not n or n > len(rounds):
-        return "\n".join(out + ["Every round has been put in. Nothing left."])
+    with _STATE_LOCK:                       # decide and claim in one step: no second call starts the same round
+        cur = _plan_store()
+        rounds = (cur.get(plan_id) or {}).get("rounds") or rounds
+        n = round_no or next((i for i, r in enumerate(rounds, 1) if not r["added"]), 0)
+        if not n or n > len(rounds):
+            return "\n".join(out + ["Every round has been put in. Nothing left."])
+        if not round_no and plan_id in cur:
+            cur[plan_id]["rounds"][n - 1]["added"] = True
+            private.write_json(PLANS_FILE, cur)
     r = rounds[n - 1]
     kombi = {(p["item_id"], ln["sku_id"]): {"need": p["need"], "label": ln["label"], "qty": ln["qty"], "price": ln["price"]}
              for p in r["picks"] for ln in p["lines"]}
@@ -3230,11 +3241,10 @@ def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
         text, _ = _select(cookies, ids, only=True, business=COMBO)
     except Exception as e:
         return "\n".join(out + [f"Round {n}:"] + [f"- {x}" for x in log] + [f"Checking the round failed: {e}"])
-    r["added"] = True
     with _STATE_LOCK:
         cur = _plan_store()
         if plan_id in cur:
-            cur[plan_id]["rounds"][n - 1]["added"] = True
+            cur[plan_id]["rounds"][n - 1]["added"] = not any(x.startswith("FAILED") for x in log)
             private.write_json(PLANS_FILE, cur)
     return "\n".join(out + [f"Round {n} put in:"] + [f"- {x}" for x in log] + ["", text])
 
