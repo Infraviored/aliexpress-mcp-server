@@ -852,7 +852,7 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
         return [dict(h) for h in hit[1]]
     if (left := _bot_cooldown_left()) > 0:        # asking again during a block only deepens it
         raise RuntimeError(f"bot check active, paused for another {int(left)} s")
-    _mtop_pace()                                   # a search page is as much a request as an mtop call
+    _mtop_pace("search")                                 # a search page is as much a request as an mtop call
     client = get_client()
     try:
         resp = client.get(url_path, params=params)
