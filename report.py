@@ -3,8 +3,8 @@ The cart and a shopping-list comparison as one self-contained HTML page.
 
 The chat cannot embed pictures, so view_cart and shop_list also write a page
 (pictures inlined as data: URIs, nothing loaded from AliExpress) that the
-assistant publishes as an artifact. Same file path every time, so the
-artifact keeps its link.
+MCP serves on the local network (reportserver.py). Same file name every time, so the
+address stays the same.
 
 The functions take plain row dicts (built in the server) and return HTML.
 """
@@ -269,6 +269,31 @@ def _cart_row(it: dict) -> str:
             f'<div class="money"><b>{eur(it["cost"])}</b>{extra}</div></div>')
 
 
+def _combo_section(c: dict) -> str:
+    """The Kombi-Knaller basket: its own order, import charge gone from 3 pieces, ordered in rounds."""
+    def row(it: dict) -> str:
+        chips = '<span class="chip choice">angehakt</span>' if it["checked"] else '<span class="chip off">wartet</span>'
+        return (f'<div class="row{"" if it["checked"] else " alt"}">{_img(it.get("img"))}<div class="t">'
+                f'<a class="need" href="{_e(_url(it["url"]))}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
+                f'{_e(it["need"])}</a><div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>{chips}</div></div>'
+                f'<div class="money"><b>{eur(it["cost"])}</b></div></div>')
+    rows = c["rows"]
+    covered = c["pieces"] >= 3
+    out = [f'<div class="lh g"><span><b>Kombi-Knaller-Korb</b> <span class="eyebrow">{_teile(len(rows))} · '
+           f'eigene Kasse, ab 3 Stück ohne Einfuhrabgabe</span></span><span class="num">{eur(c["goods"])}</span></div>',
+           f'<div class="note{"" if covered else " warn"}"><p>Angehakt: {c["pieces"]} Stück, Ware {eur(c["goods"])}. '
+           + ("Ab 3 Stück: keine Einfuhrabgabe." if covered else "Unter 3 Stück: die Einfuhrabgabe ist NICHT gedeckt.")
+           + " Dieser Korb wird getrennt vom Hauptkorb bestellt, die Summe oben gilt nur für den Hauptkorb.</p></div>",
+           f'<div class="rows">{"".join(row(it) for it in rows)}</div>']
+    for rd in c.get("rounds") or []:
+        out.append(f'<div class="note"><p><b>Bestellung {rd["n"]}:</b> {_e(rd["names"])} — {_e(rd["state"])}</p></div>')
+    if c.get("url"):
+        out.append(f'<div class="go"><a class="btn" href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">'
+                   f'Kombi-Kasse ({c["pieces"]} Stück)</a><span>Nichts wird bestellt, bis du dort bezahlst.'
+                   ' „Limit exceeded“: in mehreren Bestellungen bestellen.</span></div>')
+    return "\n".join(out)
+
+
 _GROUPS = (("Choice", "Choice", "Versand und Einfuhrabgabe gemeinsam"),
            ("global", "Globale Händler", "Versand je Zeile"))
 
@@ -321,6 +346,9 @@ def cart_page(page: dict, stamp: str) -> str:
             out.append(f'<div class="lh g"><span><b>{label}</b> <span class="eyebrow">{_teile(len(rows))} · {how}</span></span>'
                        f'<span class="num">{eur(sum(it["cost"] for it in rows))}</span></div>'
                        f'<div class="rows">{"".join(_cart_row(it) for it in rows)}</div>')
+    combo = page.get("combo")
+    if combo:
+        out.append(_combo_section(combo))
     others = page.get("unlisted") or []
     if others:
         rows = "".join(
