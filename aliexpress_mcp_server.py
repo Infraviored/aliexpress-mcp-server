@@ -2427,14 +2427,16 @@ def _cart_pace() -> None:
     _last_cart_call = time.time()
 
 
-def _cart_base_payload() -> dict[str, Any]:
-    return {
-        "_currency": CURRENCY,
-        "shipToCountry": COUNTRY,
-        "_saasRegion": "aeg",
-        "locale": "en_US",
-        "bizParams": json.dumps({"platformType": "DESKTOP", "pcChoiceNewCart": 1}),
-    }
+COMBO = "nn_mix"   # the Kombi-Knaller cart ("Combo Blast cart"): 3+ items, no import charge
+
+
+def _cart_base_payload(business: str = "") -> dict[str, Any]:
+    biz = {"platformType": "DESKTOP", "pcChoiceNewCart": 1}
+    out = {"_currency": CURRENCY, "shipToCountry": COUNTRY, "_saasRegion": "aeg", "locale": "en_US"}
+    if business:
+        biz.update(localCart="GLOBAL_YELLOW_PC", selectIds="", isNewStyle=True, sourceBizPage="nnHsCode")
+        out["business"] = business
+    return {**out, "bizParams": json.dumps(biz)}
 
 
 def _cart_check(resp: dict) -> dict:
@@ -2455,17 +2457,18 @@ def _cart_check(resp: dict) -> dict:
     return resp.get("data") or {}
 
 
-def _cart_render(cookies: dict[str, str]) -> dict:
-    """Page 1 of the cart as a droplet snapshot (the web page's format, in CURRENCY)."""
+def _cart_render(cookies: dict[str, str], business: str = "") -> dict:
+    """Page 1 of the cart (or of channel cart `business`) as a droplet snapshot (the web page's format, in CURRENCY)."""
     _cart_pace()
     return _cart_check(mtop_call(
         "mtop.aliexpress.trade.cart.render", "1.0",
-        {"platformType": "DESKTOP", **_cart_base_payload()},
+        {"platformType": "DESKTOP", **_cart_base_payload(business)},
         cookies=cookies, referer=CART_REFERER,
     ))
 
 
-def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str], next_page: bool = False) -> dict:
+def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str], next_page: bool = False,
+                business: str = "") -> dict:
     """Fire `operator` (with its possibly modified `block`) against snapshot `state`."""
     blocks = state.get("data") or {}
     root = (state.get("page") or {}).get("root")
@@ -2482,7 +2485,7 @@ def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str]
     params = base64.b64encode(
         gzip.compress(json.dumps(upstream, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     ).decode("ascii")
-    payload = {"compress": True, "params": params, "nextPage": next_page, **_cart_base_payload()}
+    payload = {"compress": True, "params": params, "nextPage": next_page, **_cart_base_payload(business)}
     _cart_pace()
     return _cart_check(mtop_call(
         "mtop.aliexpress.trade.cart.async", "1.0", payload,
@@ -2490,12 +2493,12 @@ def _cart_async(state: dict, operator: str, block: dict, cookies: dict[str, str]
     ))
 
 
-def _cart_pages(cookies: dict[str, str]) -> tuple[dict, list[dict]]:
+def _cart_pages(cookies: dict[str, str], business: str = "") -> tuple[dict, list[dict]]:
     """
     Every page of the cart, plus one snapshot merged over them that actions
     are sent against (next pages must be requested from it as well).
     """
-    state = _cart_render(cookies)
+    state = _cart_render(cookies, business)
     pages, merged = [state], cartlib.merge(None, state)
     for n in range(1, CART_MAX_PAGES + 1):
         pg = cartlib.pagination(state)
@@ -2504,7 +2507,7 @@ def _cart_pages(cookies: dict[str, str]) -> tuple[dict, list[dict]]:
         if n == CART_MAX_PAGES:
             logger.warning("cart has more than %d pages; the rest is not read", CART_MAX_PAGES)
             break
-        state = _cart_async(merged, pg[0], pg[1], cookies, next_page=True)
+        state = _cart_async(merged, pg[0], pg[1], cookies, next_page=True, business=business)
         pages.append(state)
         merged = cartlib.merge(merged, state)
     return merged, pages
@@ -2529,7 +2532,7 @@ def _edit_delete(fields):
 
 
 def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
-                      merged: Optional[dict] = None) -> tuple[list[str], dict[str, str]]:
+                      merged: Optional[dict] = None, business: str = "") -> tuple[list[str], dict[str, str]]:
     """
     Fire one action per cart line against the merged snapshot (`merged`, read
     when not given). `edits`: cart_id → edit(fields), which sets operationType
@@ -2537,7 +2540,7 @@ def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
     folded back in, as the web page does.
     """
     if merged is None:
-        merged, _ = _cart_pages(cookies)
+        merged, _ = _cart_pages(cookies, business)
     done: list[str] = []
     failed: dict[str, str] = {}
     for cid, edit in edits.items():
@@ -2549,7 +2552,7 @@ def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
         block = json.loads(json.dumps(merged["data"][bid]))
         edit(block.setdefault("fields", {}))
         try:
-            resp = _cart_async(merged, bid, block, cookies)
+            resp = _cart_async(merged, bid, block, cookies, business=business)
         except Exception as e:
             failed[cid] = str(e)
             continue
@@ -2567,8 +2570,8 @@ def _cart_line_action(cookies: dict[str, str], edits: dict[str, Any],
     return done, failed
 
 
-def _read_cart(cookies: dict[str, str]) -> dict:
-    return cartlib.parse(_cart_pages(cookies)[1])
+def _read_cart(cookies: dict[str, str], business: str = "") -> dict:
+    return cartlib.parse(_cart_pages(cookies, business)[1])
 
 
 def _render_order(cookies: dict[str, str], cart_ids: list[str]) -> dict:
@@ -2770,6 +2773,28 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     return "\n".join(out)
 
 
+def _combo_text(cookies: dict[str, str], cart: dict) -> str:
+    """The Kombi-Knaller cart (channel cart nn_mix): its lines, what is checked, and whether the import charge is covered."""
+    ch = next((x for x in cart["header"].get("channels") or [] if x.get("business") == COMBO and x.get("count")), None)
+    if not ch:
+        return ""
+    try:
+        lines = _read_cart(cookies, COMBO)["lines"]
+    except Exception as e:
+        return f"## Kombi-Knaller cart ({ch['count']} items): not readable ({e})"
+    ok = [ln for ln in lines if ln["valid"]]
+    pick = [ln for ln in ok if ln["checked"]]
+    pieces = sum(ln["qty"] for ln in pick)
+    total = sum((ln["price"] or 0) * ln["qty"] for ln in pick)
+    out = [f"## Kombi-Knaller cart ({COMBO}): {len(ok)} valid line(s) of {len(lines)}, {len(pick)} checked = {pieces} pcs, "
+           f"{total:.2f} {CURRENCY} goods. " + ("3+ pieces checked: import charge covered." if pieces >= 3
+                                                else "Fewer than 3 pieces checked: the import charge is NOT covered.")
+           + f" Order it on its page: {ch.get('url') or ''} (Limit exceeded = remove lines or order in several rounds)."]
+    out += [f"- cart_id {ln['cart_id']}: {ln['qty']}× {ln['variant'][:30]} — {ln['title'][:50]}, {ln['price']} each, "
+            + ("checked" if ln["checked"] else "unchecked") + ("" if ln["valid"] else ", INVALID") for ln in lines]
+    return "\n".join(out)
+
+
 @mcp.tool()
 def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = "",
               options: Optional[list[dict]] = None, alternatives: bool = True) -> str:
@@ -2833,7 +2858,7 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
     except Exception as e:
         page = f"(page not written: {e})"
     return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined),
-                         page, "## Details (for you)\n" + text] + previews)
+                         page, "## Details (for you)\n" + text, _combo_text(cookies, c)] + previews).replace("\n\n\n\n", "\n\n")
 
 
 @mcp.tool()
@@ -2931,7 +2956,7 @@ def _remember_lines(add: dict[str, dict] | None = None, drop: list[str] | None =
 
 
 def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
-              known: Optional[set[str]] = None) -> str:
+              known: Optional[set[str]] = None, business: str = "") -> str:
     """
     Add one variant; returns its cart_id. Raises on refusal. Adding a variant
     that is already in the cart raises that line's quantity and returns its
@@ -2939,7 +2964,7 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
     `known`: cart ids before the add (read from the cart when not given).
     """
     if known is None:
-        known = {ln["cart_id"] for ln in _read_cart(cookies)["lines"]}
+        known = {ln["cart_id"] for ln in _read_cart(cookies, business)["lines"]}
     payload = {
         "locale": "en_US",
         "shipToCountry": COUNTRY,
@@ -2955,6 +2980,10 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
             "skuId": str(sku_id), "bundleSellerId": 0, "channelCode": None,
         }]),
     }
+    if business:   # what the Kombi-Knaller page sends: the channel cart, not the main one
+        payload["business"] = business
+        payload["bizParams"] = json.dumps({"platformType": "DESKTOP", "isNewStyle": True, "useLimitStyle": True,
+                                           "sourceBizPage": "nnHsCode"})
     _cart_pace()
     resp = mtop_call(
         "mtop.aliexpress.trade.cart.add", "1.0", payload,
@@ -2973,7 +3002,8 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
 
 
 @mcp.tool()
-def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "") -> str:
+def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "",
+                combo: bool = False) -> str:
     """
     Add a product variant to the AliExpress cart and check it for checkout.
     This changes the real cart (it does not buy anything). Adding a variant
@@ -2986,6 +3016,10 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
         quantity: How many of that variant.
         list_name: Shopping list the line belongs to (see set_cart_list).
         need: What it is for on that list ("I2S microphone").
+        combo: Put it into the Kombi-Knaller cart (only for hits flagged "Kombi"
+            in search_products): 3+ pieces there are ordered without import
+            charge. Adding a variant that is already there REPLACES that line
+            (new cart_id): give the TOTAL quantity you want, not the extra.
     """
     cookies = load_cookies()
     if not cookies:
@@ -2993,9 +3027,20 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
     if quantity < 1:
         return "quantity must be at least 1."
     try:
-        cid = _cart_add(cookies, item_id, sku_id, quantity)
+        cid = _cart_add(cookies, item_id, sku_id, quantity, business=COMBO if combo else "")
     except Exception as e:
         return f"Add to cart failed: {e}"
+    if combo:
+        try:
+            line = next((ln for ln in _read_cart(cookies, COMBO)["lines"] if ln["cart_id"] == cid), None)
+        except Exception as e:
+            return f"Added {quantity} × item {item_id} to the Kombi-Knaller cart, cart_id {cid}, but reading it failed: {e}"
+        if list_name:
+            _remember_lines({cid: {"list": list_name.strip(), "need": need, "item_id": str(item_id), "sku_id": str(sku_id),
+                                   "own": True, "combo": True}})
+        return (f"Added to the Kombi-Knaller cart: {line['qty']} × {line['title'][:50]} ({line['variant']}), {line['price']} each, "
+                + ("checked" if line["checked"] else "NOT checked") + f", cart_id {cid}. 3+ pieces there pay no import charge."
+                if line else f"Added item {item_id} to the Kombi-Knaller cart, cart_id {cid} (view_cart shows it).")
     if list_name:
         tag = {"list": list_name.strip(), "need": need}
         if cid not in _line_store():
