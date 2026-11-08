@@ -104,8 +104,39 @@ def test_decide_cart_passes_the_opinions_to_the_page(monkeypatch):
     monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
     written = {}
     monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(page=page), "ok")[1])
-    m.decide_cart(opinions={"11": {"verdict": "Gute Wahl", "rating": "4,9★ 100"}})
+    m.decide_cart(opinions={"11": {"verdict": "Gute Wahl", "rating": "4,9★ 100"}}, check_deals=False)
     assert "Gute Wahl" in written["page"] and "4,9★ 100" in written["page"]
+
+
+def test_decide_cart_offers_the_choice_alternative_of_a_global_line(monkeypatch):
+    line = {"cart_id": "11", "item_id": "1", "sku_id": "2", "title": "Sensor", "variant": "Purple", "price": 14.59, "qty": 3,
+            "checked": True, "valid": True, "ship": 3.38, "group": "global", "choice": False, "image": "", "delivery": ("16.11.", "24.11.")}
+    alt = {"item_id": "99", "title": "Sensor Choice", "url": "https://x/99", "img": None, "buy": "3× Purple", "cost": 40.0, "days": 5,
+           "lines": [{"sku_id": "77", "qty": 3}], "ambiguous": False}
+    monkeypatch.setattr(m, "load_cookies", lambda: {"a": "b"})
+    monkeypatch.setattr(m, "_read_cart", lambda cookies, business="": {"lines": [line], "header": {}})
+    monkeypatch.setattr(m, "_combo_lines", lambda cookies, cart: [])
+    monkeypatch.setattr(m, "_line_store", lambda: {})
+    monkeypatch.setattr(m, "_alt_cache", lambda: {})
+    monkeypatch.setattr(m, "_choice_alternative", lambda ln, tag, cache: alt)
+    monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
+    written = {}
+    monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(page=page), "ok")[1])
+    m.decide_cart()
+    p = written["page"]
+    assert 'data-replaces="11"' in p and 'data-item="99"' in p and "Choice statt global" in p and "spart" in p
+
+
+def test_apply_selection_swaps_in_the_alternative_and_removes_the_old_line(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "add_to_cart", lambda *a, **k: (calls.append(("add", a)), "Added 3 x item")[1])
+    monkeypatch.setattr(m, "remove_from_cart", lambda ids: (calls.append(("del", ids)), "Removed 1 item(s).")[1])
+    m.apply_selection(_msg([{"item_id": "99", "sku_id": "77", "qty": 3, "state": "yes", "category": "Extras", "replaces": "11"}]))
+    assert [c[0] for c in calls] == ["add", "del"] and calls[1][1] == ["11"]
+    calls.clear()
+    monkeypatch.setattr(m, "add_to_cart", lambda *a, **k: "Add to cart failed: boom")
+    out = m.apply_selection(_msg([{"item_id": "99", "sku_id": "77", "qty": 3, "state": "yes", "category": "Extras", "replaces": "11"}]))
+    assert calls == [] and "NOT removed" in out
 
 
 def test_offer_mode_keeps_maybe_and_delete():
@@ -145,7 +176,7 @@ def test_decide_cart_builds_a_page_from_the_cart(monkeypatch):
     monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
     written = {}
     monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(name=name, page=page), "ok")[1])
-    assert m.decide_cart() == "ok"
+    assert m.decide_cart(check_deals=False) == "ok"
     p = written["page"]
     assert written["name"] == "warenkorb.html" and 'data-cart="11"' in p and "Duese · White" in p and 'data-qty0="2"' in p
     assert 'data-cat="Extras"' in p and 'data-choice="1"' in p
