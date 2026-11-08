@@ -3998,22 +3998,26 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         if cid:
             cart.append((cid, it["state"], qty, qty0))
         else:
-            (yes if it.get("state") == "yes" else rest).append((item_id, sku_id, qty, str(it.get("category") or "")))
+            (yes if it.get("state") == "yes" else rest).append(
+                (item_id, sku_id, qty, str(it.get("category") or ""), str(int(str(it["replaces"]))) if it.get("replaces") else ""))
     if not yes and not cart:
         return "Nothing chosen with Ja: nothing added."
     out = [_apply_cart_selection(cart, dry_run)] if cart else []
-    for item_id, sku_id, qty, cat in yes:
+    for item_id, sku_id, qty, cat, repl in yes:
         if dry_run:
-            out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})")
+            out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line {repl}" if repl else ""))
             continue
-        out.append(f"{item_id} / {sku_id} x{qty}: " + add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat))
-    left = [f"{i}/{s}" for i, s, _, _ in rest]
+        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat)
+        out.append(f"{item_id} / {sku_id} x{qty}: " + res)
+        if repl:   # the offer replaces a line (a cheaper way to buy the same): drop the old line only when the new one is in
+            out.append(f"Replaced line {repl}: " + (remove_from_cart([repl]) if res.startswith("Added") else "NOT removed, the add failed"))
+    left = [f"{i}/{s}" for i, s, _, _, _ in rest]
     return "\n".join(out + ([f"Not added (Vielleicht or Nein): {', '.join(left)}"] if left else []))
 
 
 @tool()
 def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: str = "",
-                opinions: dict = None) -> str:
+                opinions: dict = None, check_deals: bool = True) -> str:
     """
     The REAL cart as a decision page, compact enough for 50 lines: per shopping list (and the Kombi-Knaller
     basket) one row per line with picture, short title, YOUR opinion, price and Ja / Nein / Löschen
@@ -4031,6 +4035,9 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
         opinions: {cart_id: {"verdict": "one sentence: why this one, what to watch", "rating": "4,8★ 208" (when it matters),
             "fit": "✓ Highland genannt" or "Modell nicht genannt" (only for parts that must fit something)}}.
             Lines you know nothing about may be left out.
+        check_deals: before the page is built, look for a cheaper way to buy each line that comes from a global seller
+            (same pieces from a Choice offer: no own shipping, import charges covered). A found alternative is a row of its
+            own right under the line; choosing Ja there swaps it in. Costs searches (cached 6 h); False = skip.
     """
     cookies = load_cookies()
     if not cookies:
@@ -4054,21 +4061,45 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
     if not groups:
         return "The cart has no lines to show."
     cats = []
+    alt_cache = _alt_cache() if check_deals else {}
     for heading, lines in groups.items():
         cards = []
         for ln, tag in lines:
             need = tag.get("need") or ln["title"][:40]
             op = (opinions or {}).get(ln["cart_id"]) or (opinions or {}).get(ln["item_id"]) or {}
+            global_line = check_deals and heading != "Kombi-Knaller-Korb" and not ln.get("choice") and ln.get("group") != "group_choice"
             cards.append({"title": f"{need} · {ln['variant']}" if ln.get("variant") else need,
                           "verdict": op.get("verdict") or "", "rating": op.get("rating") or "", "fit": op.get("fit") or "",
                           "item_id": ln["item_id"], "sku_id": ln["sku_id"], "cart_id": ln["cart_id"],
                           "price": ln["price"] or 0, "ship": ln.get("ship") or 0, "choice": ln.get("group") == "group_choice",
+                          "duty": DUTY_PER_LINE if (heading != "Kombi-Knaller-Korb" and ln.get("group") != "group_choice") else 0,
                           "qty": ln["qty"], "default": "yes" if ln["checked"] else "no",
                           "image": ln.get("image") or "", "url": f"{BASE_URL}/item/{ln['item_id']}.html",
                           "tags": [x for x in (cartlib.GROUP_NAMES.get(ln.get("group"), ln.get("group")),
                                                f"{ln['delivery'][0]}…{ln['delivery'][1]}" if ln.get("delivery") else "") if x],
                           "text": ln["title"]})
+            if global_line:
+                try:
+                    alt = _choice_alternative(ln, tag, alt_cache)
+                except Exception as e:
+                    logger.debug("alternative for %s failed: %s", ln["cart_id"], e)
+                    alt = None
+                if alt and len(alt["lines"]) == 1 and alt["lines"][0]["qty"] > 0:
+                    q = alt["lines"][0]["qty"]
+                    now = cartlib.goods(ln) + (ln["ship"] or 0) + DUTY_PER_LINE
+                    diff = alt["cost"] - now
+                    when = f"Lieferung in etwa {alt['days']} Tagen" if alt.get("days") else ""
+                    cards.append({"title": f"Choice statt global: {need}", "item_id": alt["item_id"], "sku_id": alt["lines"][0]["sku_id"],
+                                  "replaces": ln["cart_id"], "price": round(alt["cost"] / q, 2), "ship": 0, "choice": True, "duty": 0,
+                                  "qty": q, "default": "no",
+                                  "verdict": (f"{alt['buy']} für {report.eur(alt['cost'])} statt {report.eur(now)} (Ware, Versand, Abgabe): "
+                                              f"{'spart' if diff < 0 else 'kostet'} {report.eur(abs(diff))}, kein eigener Versand. {when}").strip(),
+                                  "fit": "Variantenname mehrfach: Bild prüfen" if alt.get("ambiguous") else "",
+                                  "image": alt.get("img") or "", "url": alt["url"], "tags": ["Alternative", "Choice"],
+                                  "text": alt["title"]})
         cats.append({"heading": heading, "cards": cards})
+    if alt_cache:
+        private.write_json(ALT_CACHE_FILE, alt_cache)
     cards = [x for cat in cats for x in cat["cards"]]
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=4) as ex:

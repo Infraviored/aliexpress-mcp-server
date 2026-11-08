@@ -626,6 +626,7 @@ _DECIDE_JS = r"""<script>
       if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10) && !r.querySelector(".note-in").value.trim()) return;
       var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
       if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
+      if (r.dataset.replaces) { if (v !== "yes") return; it.replaces = r.dataset.replaces; }
       var nt = r.querySelector('.note-in').value.trim(); if (nt) it.note = nt;
       items.push(it);
     });
@@ -679,6 +680,13 @@ _DECIDE_JS = r"""<script>
     if (tx && !(t.closest && t.closest("a, input, button"))) tx.closest(".row").classList.toggle("open");
   });
   document.addEventListener("input", function () { send.textContent = "Senden"; calc(); });
+  function setSt(row, v) { var el = row.querySelector('input[value="' + v + '"]'); if (el) el.checked = true; }
+  document.addEventListener("change", function (e) {
+    var r = e.target.closest && e.target.closest(".row.dec");
+    if (!r || e.target.value !== "yes") return;
+    if (r.dataset.replaces) rows.forEach(function (o) { if (o.dataset.cart === r.dataset.replaces) setSt(o, "no"); });
+    else if (r.dataset.cart) rows.forEach(function (o) { if (o.dataset.replaces === r.dataset.cart) setSt(o, "no"); });
+  });
   document.addEventListener("change", calc);
   calc();
 })();
@@ -747,6 +755,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             ship = float(c.get("ship") or 0)
             duty = float(c.get("duty") or 0)
             cart = f' data-cart="{_e(c["cart_id"])}"' if c.get("cart_id") else ""
+            cart += f' data-replaces="{_e(c["replaces"])}"' if c.get("replaces") else ""
             rows.append(
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
