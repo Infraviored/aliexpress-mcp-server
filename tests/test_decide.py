@@ -78,3 +78,55 @@ def test_apply_selection_reads_a_bare_json_message(monkeypatch):
     monkeypatch.setattr(m, "add_to_cart", lambda i, s, q, **k: (seen.append(i), "ok")[1])
     m.apply_selection(json.dumps({"action": "select", "items": [{"item_id": "7", "sku_id": "8", "state": "yes"}]}))
     assert seen == ["7"]
+
+
+def test_cart_mode_has_delete_and_no_maybe_and_compact_details():
+    h = _page([_card(cart_id="30016210959867", default="yes", tags=["Choice"], text="langer Titel")])
+    assert 'value="delete"' in h and 'value="maybe"' not in h
+    assert 'data-cart="30016210959867"' in h and 'data-state0="yes"' in h and 'data-qty0="1"' in h
+    assert "<details><summary>Details</summary>" in h                     # chips and text only on tap
+    assert "alle Ja" in h and "alle Nein" in h
+    assert 'class="mk"' in h and 'data-bulk="delete"' in h and 'data-mark="1"' in h      # multi-select with bulk actions
+
+
+def test_offer_mode_keeps_maybe_and_delete():
+    h = _page([_card()])
+    assert 'value="maybe"' in h and 'value="delete"' in h
+
+
+def test_apply_selection_cart_lines(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "remove_from_cart", lambda ids: (calls.append(("del", ids)), "Removed 1 item(s).")[1])
+    monkeypatch.setattr(m, "update_cart_quantity", lambda c, q: (calls.append(("qty", c, q)), "ok")[1])
+    monkeypatch.setattr(m, "select_cart_items", lambda ids, only=False, selected=True: (calls.append(("sel", ids, selected)), "ok")[1])
+    monkeypatch.setattr(m, "add_to_cart", lambda *a, **k: pytest.fail("a cart line is not added again"))
+    m.apply_selection(_msg([
+        {"item_id": "1", "sku_id": "2", "cart_id": "11", "qty": 1, "qty0": 1, "state": "delete"},
+        {"item_id": "1", "sku_id": "3", "cart_id": "12", "qty": 3, "qty0": 1, "state": "yes"},
+        {"item_id": "1", "sku_id": "4", "cart_id": "13", "qty": 1, "qty0": 1, "state": "no"}]))
+    assert ("del", ["11"]) in calls and ("qty", "12", 3) in calls
+    assert ("sel", ["13"], False) in calls and ("sel", ["12"], True) in calls
+
+
+def test_apply_selection_cart_dry_run_and_bad_state(monkeypatch):
+    monkeypatch.setattr(m, "remove_from_cart", lambda *a: pytest.fail("dry run"))
+    out = m.apply_selection(_msg([{"item_id": "1", "sku_id": "2", "cart_id": "11", "qty": 1, "qty0": 1, "state": "delete"}]), dry_run=True)
+    assert "WOULD DELETE 1" in out
+    assert "Bad state" in m.apply_selection(_msg([{"item_id": "1", "sku_id": "2", "cart_id": "11", "state": "boom"}]))
+
+
+def test_decide_cart_builds_a_page_from_the_cart(monkeypatch):
+    line = {"cart_id": "11", "item_id": "1", "sku_id": "2", "title": "A long product title for the cart", "variant": "White",
+            "price": 5.0, "qty": 2, "checked": True, "valid": True, "ship": 0, "group": "group_choice", "image": "",
+            "delivery": ("13.11.", "18.11.")}
+    monkeypatch.setattr(m, "load_cookies", lambda: {"a": "b"})
+    monkeypatch.setattr(m, "_read_cart", lambda cookies, business="": {"lines": [line], "header": {}})
+    monkeypatch.setattr(m, "_combo_lines", lambda cookies, cart: [])
+    monkeypatch.setattr(m, "_line_store", lambda: {"11": {"list": "Extras", "need": "Duese"}})
+    monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
+    written = {}
+    monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(name=name, page=page), "ok")[1])
+    assert m.decide_cart() == "ok"
+    p = written["page"]
+    assert written["name"] == "warenkorb.html" and 'data-cart="11"' in p and "Duese · White" in p and 'data-qty0="2"' in p
+    assert 'data-cat="Extras"' in p and 'data-choice="1"' in p

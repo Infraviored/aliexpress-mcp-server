@@ -3907,7 +3907,9 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
              "price": 20.39 (EUR per piece, number), "ship": 0 (EUR shipping for this line, 0 = free),
              "choice": true (Choice offer: shipping is shared, free from the threshold), "duty": 0 (estimated import charge per line),
              "qty": 1, "default": "yes"|"maybe"|"no" (pre-selected, default no), "tags": [...], "text": "...",
-             "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link}.
+             "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link,
+             "cart_id": only for lines already in the cart (see decide_cart)}.
+            Keep "title" SHORT (what it is, a few words): the page shows one line per offer, the rest under "tags"/"text" on tap.
         choice_threshold, choice_ship: free Choice shipping from this order value, else this fee once.
     """
     for sec in categories:
@@ -3929,6 +3931,27 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
     except ValueError as e:
         return f"Page not written: {e}. Fix those cards, then call decide_report again." + blocked_msg()
     return _write_report(f"{safe}.html", page)
+
+
+def _apply_cart_selection(cart: list[tuple[str, str, int, int]], dry_run: bool) -> str:
+    """Lines already in the cart: delete = remove, yes = check for checkout, no/maybe = uncheck, quantity changes."""
+    dele = [c for c, st, _, _ in cart if st == "delete"]
+    keep = [(c, st, q, q0) for c, st, q, q0 in cart if st != "delete"]
+    on = [c for c, st, _, _ in keep if st == "yes"]
+    off = [c for c, st, _, _ in keep if st != "yes"]
+    qty = [(c, q) for c, _, q, q0 in keep if q != q0]
+    if dry_run:
+        return (f"WOULD DELETE {len(dele)}, CHECK {len(on)}, UNCHECK {len(off)}, CHANGE QUANTITY of {len(qty)} cart line(s)")
+    out = []
+    if dele:
+        out.append("Deleted: " + remove_from_cart(dele).split("\n")[0])
+    for c, q in qty:
+        out.append(f"Quantity {c} -> {q}: " + update_cart_quantity(c, q).split("\n")[0])
+    if off:
+        out.append("Unchecked: " + select_cart_items(off, only=False, selected=False).split("\n")[0])
+    if on:
+        out.append("Checked: " + select_cart_items(on, only=False, selected=True).split("\n")[0])
+    return "\n".join(out) or "No change in the cart lines."
 
 
 def _parse_selection(text: str) -> dict:
@@ -3959,17 +3982,24 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         data = _parse_selection(selection)
     except (ValueError, json.JSONDecodeError) as e:
         return f"Cannot read the selection: {e}. Pass the page's whole message, including its json block."
-    yes, rest = [], []
+    yes, rest, cart = [], [], []
     for it in data["items"]:
         try:
             item_id, sku_id = str(int(str(it["item_id"]))), str(int(str(it["sku_id"])))
             qty = max(1, min(99, int(it.get("qty") or 1)))
+            cid = str(int(str(it["cart_id"]))) if it.get("cart_id") else ""
+            qty0 = int(it.get("qty0") or qty)
         except (KeyError, ValueError, TypeError):
-            return f"Bad item in the selection: {it!r}. Nothing was added."
-        (yes if it.get("state") == "yes" else rest).append((item_id, sku_id, qty, str(it.get("category") or "")))
-    if not yes:
+            return f"Bad item in the selection: {it!r}. Nothing was changed."
+        if it.get("state") not in ("yes", "maybe", "no", "delete"):
+            return f"Bad state in the selection: {it!r}. Nothing was changed."
+        if cid:
+            cart.append((cid, it["state"], qty, qty0))
+        else:
+            (yes if it.get("state") == "yes" else rest).append((item_id, sku_id, qty, str(it.get("category") or "")))
+    if not yes and not cart:
         return "Nothing chosen with Ja: nothing added."
-    out = []
+    out = [_apply_cart_selection(cart, dry_run)] if cart else []
     for item_id, sku_id, qty, cat in yes:
         if dry_run:
             out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})")
@@ -3977,6 +4007,69 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         out.append(f"{item_id} / {sku_id} x{qty}: " + add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat))
     left = [f"{i}/{s}" for i, s, _, _ in rest]
     return "\n".join(out + ([f"Not added (Vielleicht or Nein): {', '.join(left)}"] if left else []))
+
+
+@tool()
+def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: str = "") -> str:
+    """
+    The REAL cart as a decision page, compact enough for 50 lines: per shopping list (and the Kombi-Knaller
+    basket) one row per line with picture, short title, price, quantity and Ja / Nein / Löschen
+    (Ja = checked for checkout, Nein = unchecked, Löschen = removed from the cart). Use it instead of
+    describing a big cart in prose: the user goes through it once, presses the send button, and the
+    message he sends goes unchanged to apply_selection, which checks, unchecks, deletes and changes
+    quantities. Then read the cart again and report the real total. Give the user the page path in backticks.
+
+    Args:
+        name: File name without extension.
+        title: Page title.
+        list_name: Only this shopping list (empty = everything).
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    try:
+        c = _read_cart(cookies)
+    except Exception as e:
+        return f"Cart not readable: {e}"
+    tags = _line_store()
+    groups: dict[str, list[dict]] = {}
+    for ln in c["lines"]:
+        if not ln.get("valid", True):
+            continue
+        tag = tags.get(ln["cart_id"]) or {}
+        if list_name and tag.get("list") != list_name:
+            continue
+        groups.setdefault(tag.get("list") or "Ohne Liste", []).append((ln, tag))
+    combo_lines = _combo_lines(cookies, c) or []
+    if combo_lines and not list_name:
+        groups["Kombi-Knaller-Korb"] = [(ln, tags.get(ln["cart_id"]) or {}) for ln in combo_lines if ln["valid"]]
+    if not groups:
+        return "The cart has no lines to show."
+    cats = []
+    for heading, lines in groups.items():
+        cards = []
+        for ln, tag in lines:
+            need = tag.get("need") or ln["title"][:40]
+            cards.append({"title": f"{need} · {ln['variant']}" if ln.get("variant") else need,
+                          "item_id": ln["item_id"], "sku_id": ln["sku_id"], "cart_id": ln["cart_id"],
+                          "price": ln["price"] or 0, "ship": ln.get("ship") or 0, "choice": ln.get("group") == "group_choice",
+                          "qty": ln["qty"], "default": "yes" if ln["checked"] else "no",
+                          "image": ln.get("image") or "", "url": f"{BASE_URL}/item/{ln['item_id']}.html",
+                          "tags": [x for x in (cartlib.GROUP_NAMES.get(ln.get("group"), ln.get("group")),
+                                               f"{ln['delivery'][0]}…{ln['delivery'][1]}" if ln.get("delivery") else "") if x],
+                          "text": ln["title"]})
+        cats.append({"heading": heading, "cards": cards})
+    cards = [x for cat in cats for x in cat["cards"]]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for x, img in zip(cards, ex.map(_report_image, cards)):
+            x["img"] = img
+    for x in cards:
+        if not x["img"]:
+            x["img"] = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="   # a blank pixel
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "warenkorb"
+    page = report.decide_page(safe, title, time.strftime("%d.%m.%Y %H:%M"), [], [], cats, time.strftime("%d.%m.%Y %H:%M"))
+    return _write_report(f"{safe}.html", page)
 
 
 # ─── Orders (read only) ─────────────────────────────────────────────────────

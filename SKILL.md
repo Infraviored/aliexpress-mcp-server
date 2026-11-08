@@ -41,6 +41,11 @@ chat, do not put it on a `decide` card (that rule is for other work, not for sho
 choices), do not write a table in chat. In chat give two or three sentences and the
 recommendation; the page does the rest. Adding to the cart happens after he picked.
 
+**One page type for everything the user decides: the decision page.** For a big or finished cart call
+`decide_cart` (the real cart, one compact row per line; Ja = checked, Nein = unchecked, Löschen = removed, quantity,
+multi-select with "N markiert: Ja / Nein / Löschen"). Do not describe a long order in prose and do not ask
+him in chat which lines to keep: send the page, then pass his message to `apply_selection`.
+
 **When there are alternatives to decide between, use `decide_report` instead:** one category per need
 (Frunk, Kofferraum ...), each offer a card with `item_id` AND `sku_id`, `price` (number), `ship`, `choice`,
 `default` (your recommendation: "yes"), and `fit` where the part must fit something (a car model: say
