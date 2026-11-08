@@ -41,6 +41,16 @@ chat, do not put it on a `decide` card (that rule is for other work, not for sho
 choices), do not write a table in chat. In chat give two or three sentences and the
 recommendation; the page does the rest. Adding to the cart happens after he picked.
 
+**When there are alternatives to decide between, use `decide_report` instead:** one category per need
+(Frunk, Kofferraum ...), each offer a card with `item_id` AND `sku_id`, `price` (number), `ship`, `choice`,
+`default` (your recommendation: "yes"), and `fit` where the part must fit something (a car model: say
+whether the seller names it, "✓ Highland genannt" or "Modell nicht genannt"). The page has Ja / Vielleicht / Nein,
+a quantity and a live ESTIMATE of the total; its button hands the choice to the chat as text plus a json block
+(through the ClaudeVoice dashboard). Pass that message unchanged to `apply_selection`: it puts every "Ja"
+in the cart. Then `view_cart`, and tell him the real prices against the estimate. Show him the page by writing
+its file path as plain text in chat (the dashboard turns it into a card), and give the local address too.
+Search more than the first page and more than one wording when the product allows it.
+
 Every page for the user (research, comparison, "what did you find") comes from
 `make_report`, never from hand-written HTML: one layout, always with pictures.
 Each card needs `item_id` (picture from the product page) or `image` (URL,

@@ -3888,6 +3888,97 @@ def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
     return _write_report(f"{re.sub(r'[^A-Za-z0-9_-]+', '-', name).strip('-') or 'report'}.html", page)
 
 
+@tool()
+def decide_report(name: str, title: str, categories: list[dict], subtitle: str = "",
+                  facts: list[dict] = None, notes: list[dict] = None,
+                  choice_threshold: float = 10.0, choice_ship: float = 1.99) -> str:
+    """
+    Build a page the user DECIDES on (instead of make_report, which only shows): per category (one need
+    each) the offers with Ja / Vielleicht / Nein, a quantity, a live estimate (goods + shipping + import charge) and a
+    button that sends the choice to the chat. When the user's choice arrives (text plus a json block),
+    pass it to apply_selection: it puts every "Ja" into the cart. Use it for any research with alternatives.
+    Pictures are mandatory. Give the user the address; never publish the page.
+
+    Args:
+        name: File name without extension.
+        title, subtitle, facts, notes: as in make_report.
+        categories: [{"heading": "Frunk", "intro": "...", "cards": [card, ...]}], card =
+            {"title": "...", "item_id": "...", "sku_id": "..." (both needed: the choice is put in the cart by them),
+             "price": 20.39 (EUR per piece, number), "ship": 0 (EUR shipping for this line, 0 = free),
+             "choice": true (Choice offer: shipping is shared, free from the threshold), "duty": 0 (estimated import charge per line),
+             "qty": 1, "default": "yes"|"maybe"|"no" (pre-selected, default no), "tags": [...], "text": "...",
+             "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link}.
+        choice_threshold, choice_ship: free Choice shipping from this order value, else this fee once.
+    """
+    for sec in categories:
+        for c in sec.get("cards") or []:
+            c.setdefault("title", c.get("item_id") or "?")
+        sec.setdefault("cards", [])
+        sec.setdefault("heading", "")
+    cards = [c for sec in categories for c in sec["cards"]]
+    if not cards:
+        return "No cards: give at least one category with cards."
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for c, img in zip(cards, ex.map(_report_image, cards)):
+            c["img"] = img
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "decide"
+    try:
+        page = report.decide_page(safe, title, subtitle, facts or [], notes or [], categories,
+                                  time.strftime("%d.%m.%Y %H:%M"), choice_threshold, choice_ship)
+    except ValueError as e:
+        return f"Page not written: {e}. Fix those cards, then call decide_report again." + blocked_msg()
+    return _write_report(f"{safe}.html", page)
+
+
+def _parse_selection(text: str) -> dict:
+    """The json block of a decide_report message (fenced or bare) as a dict; ValueError when there is none."""
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S) or re.search(r"(\{.*\})", text, re.S)
+    if not m:
+        raise ValueError("no json block in the selection")
+    data = json.loads(m.group(1))
+    if data.get("action") != "select" or not isinstance(data.get("items"), list):
+        raise ValueError("not a selection (action select with items expected)")
+    return data
+
+
+@tool()
+def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) -> str:
+    """
+    Put the user's choice from a decide_report page into the cart: every item with state "yes" is added
+    (and checked) with its quantity; "maybe" and "no" are left out and named. Pass the message the page sent
+    (text plus json block) unchanged. Afterwards read the cart (view_cart) and tell the user the real prices
+    against the page's estimate. Never orders anything.
+
+    Args:
+        selection: The whole message from the page.
+        list_name: Shopping list the lines belong to (see set_cart_list); empty = none.
+        dry_run: Only list what would be added.
+    """
+    try:
+        data = _parse_selection(selection)
+    except (ValueError, json.JSONDecodeError) as e:
+        return f"Cannot read the selection: {e}. Pass the page's whole message, including its json block."
+    yes, rest = [], []
+    for it in data["items"]:
+        try:
+            item_id, sku_id = str(int(str(it["item_id"]))), str(int(str(it["sku_id"])))
+            qty = max(1, min(99, int(it.get("qty") or 1)))
+        except (KeyError, ValueError, TypeError):
+            return f"Bad item in the selection: {it!r}. Nothing was added."
+        (yes if it.get("state") == "yes" else rest).append((item_id, sku_id, qty, str(it.get("category") or "")))
+    if not yes:
+        return "Nothing chosen with Ja: nothing added."
+    out = []
+    for item_id, sku_id, qty, cat in yes:
+        if dry_run:
+            out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})")
+            continue
+        out.append(f"{item_id} / {sku_id} x{qty}: " + add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat))
+    left = [f"{i}/{s}" for i, s, _, _ in rest]
+    return "\n".join(out + ([f"Not added (Vielleicht or Nein): {', '.join(left)}"] if left else []))
+
+
 # ─── Orders (read only) ─────────────────────────────────────────────────────
 
 ORDERS_REFERER = "https://www.aliexpress.com/p/order/index.html"
