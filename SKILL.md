@@ -46,6 +46,10 @@ recommendation; the page does the rest. Adding to the cart happens after he pick
 multi-select with "N markiert: Ja / Nein / Löschen"). Do not describe a long order in prose and do not ask
 him in chat which lines to keep: send the page, then pass his message to `apply_selection`.
 
+**Fill your opinion on every row.** He decides on your judgement: `opinions` in `decide_cart`, `verdict` / `rating` /
+`fit` on each card of `decide_report`. One sentence per row: why this one, what to watch, the rating where it matters,
+for car parts whether the seller names his model. Short titles (a few words): the row shows one line, two for the opinion.
+
 **When there are alternatives to decide between, use `decide_report` instead:** one category per need
 (Frunk, Kofferraum ...), each offer a card with `item_id` AND `sku_id`, `price` (number), `ship`, `choice`,
 `default` (your recommendation: "yes"), and `fit` where the part must fit something (a car model: say

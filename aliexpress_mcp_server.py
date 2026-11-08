@@ -3907,6 +3907,8 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
              "price": 20.39 (EUR per piece, number), "ship": 0 (EUR shipping for this line, 0 = free),
              "choice": true (Choice offer: shipping is shared, free from the threshold), "duty": 0 (estimated import charge per line),
              "qty": 1, "default": "yes"|"maybe"|"no" (pre-selected, default no), "tags": [...], "text": "...",
+             "verdict": "your opinion in one sentence: why this one, what to watch" (ALWAYS fill it: he decides on it),
+             "rating": "4,8★ 208" (when it matters),
              "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link,
              "cart_id": only for lines already in the cart (see decide_cart)}.
             Keep "title" SHORT (what it is, a few words): the page shows one line per offer, the rest under "tags"/"text" on tap.
@@ -4010,19 +4012,25 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
 
 
 @tool()
-def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: str = "") -> str:
+def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: str = "",
+                opinions: dict = None) -> str:
     """
     The REAL cart as a decision page, compact enough for 50 lines: per shopping list (and the Kombi-Knaller
-    basket) one row per line with picture, short title, price, quantity and Ja / Nein / Löschen
+    basket) one row per line with picture, short title, YOUR opinion, price and Ja / Nein / Löschen
     (Ja = checked for checkout, Nein = unchecked, Löschen = removed from the cart). Use it instead of
     describing a big cart in prose: the user goes through it once, presses the send button, and the
     message he sends goes unchanged to apply_selection, which checks, unchecks, deletes and changes
     quantities. Then read the cart again and report the real total. Give the user the page path in backticks.
 
+    ALWAYS fill `opinions`: the user decides on your judgement. Without it the rows are bare.
+
     Args:
         name: File name without extension.
         title: Page title.
         list_name: Only this shopping list (empty = everything).
+        opinions: {cart_id: {"verdict": "one sentence: why this one, what to watch", "rating": "4,8★ 208" (when it matters),
+            "fit": "✓ Highland genannt" or "Modell nicht genannt" (only for parts that must fit something)}}.
+            Lines you know nothing about may be left out.
     """
     cookies = load_cookies()
     if not cookies:
@@ -4050,7 +4058,9 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
         cards = []
         for ln, tag in lines:
             need = tag.get("need") or ln["title"][:40]
+            op = (opinions or {}).get(ln["cart_id"]) or (opinions or {}).get(ln["item_id"]) or {}
             cards.append({"title": f"{need} · {ln['variant']}" if ln.get("variant") else need,
+                          "verdict": op.get("verdict") or "", "rating": op.get("rating") or "", "fit": op.get("fit") or "",
                           "item_id": ln["item_id"], "sku_id": ln["sku_id"], "cart_id": ln["cart_id"],
                           "price": ln["price"] or 0, "ship": ln.get("ship") or 0, "choice": ln.get("group") == "group_choice",
                           "qty": ln["qty"], "default": "yes" if ln["checked"] else "no",
