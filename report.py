@@ -504,51 +504,52 @@ _ICON_DEL = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 _ICON_MAYBE = '<span aria-hidden="true" style="font-weight:700">?</span>'
 
 _DECIDE_CSS = """<style>
-/* decision page: a dense list. Row = picture | title + the agent's opinion | price + three icon buttons.
-   No page header, no summary card: category bands stick to the top, one slim bar sits at the bottom. */
+/* decision page, concept B: one column, a big picture on the left, on the right title, price, the agent's opinion and three
+   icon buttons. Tap the picture = mark, tap the text = details. No page header, one slim bar at the bottom. */
 .wrap { gap: 0; padding-block: 0 84px; max-width: 720px; }
 .hints { padding: 6px 2px; }
 .hints .note { margin-top: 6px; }
+.hints summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
 .cat-h { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 9px 2px 7px;
   background: var(--bg); border-bottom: 1px solid var(--line); }
 .cat-h h2 { flex: 1; min-width: 0; margin: 0; font: 600 .95rem var(--body); letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cat-h .sub { font: .78rem var(--mono); color: var(--muted); white-space: nowrap; }
 .cat-h button { font: inherit; font-size: .78rem; background: none; border: 0; padding: 4px 2px; color: var(--accent); cursor: pointer; }
-section[data-cat] .rows { background: none; border: 0; border-radius: 0; }
-.row.dec { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 2px 10px; align-items: start;
-  padding: 8px 2px; border-top: 1px solid var(--line); cursor: default; }
+section[data-cat] .rows { display: block; background: none; border: 0; border-radius: 0; }
+.row.dec { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 4px 12px; align-items: start; padding: 10px 2px;
+  border-top: 1px solid var(--line); background: none; }
 .row.dec:first-child { border-top: 0; }
-.thumb { grid-row: 1 / 3; position: relative; width: 44px; height: 44px; padding: 0; border: 0; background: none; cursor: pointer; }
-.thumb img, .thumb .noimg { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; display: block; cursor: pointer; }
-.row.marked .thumb::after { content: "\\2713"; position: absolute; inset: 0; display: grid; place-items: center; border-radius: 6px;
-  background: color-mix(in srgb, var(--accent) 80%, transparent); color: #fff; font-weight: 700; font-size: 1.3rem; }
-.tx { min-width: 0; cursor: pointer; }
-.tx .need { display: block; font: 600 .92rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.dec .thumb { grid-row: 1 / 3; position: relative; width: 104px; height: 104px; padding: 0; border: 0; background: var(--line);
+  border-radius: 8px; overflow: hidden; cursor: pointer; }
+.row.dec .thumb img, .row.dec .thumb .noimg { display: block; width: 104px; height: 104px; border-radius: 0; object-fit: cover; cursor: pointer; }
+.row.marked .thumb::after { content: "\\2713"; position: absolute; inset: 0; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
+.tx { min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
+.tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx .pr { font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
+.tx .pr small { font: 400 .75rem var(--body); color: var(--muted); margin-left: 6px; }
 .tx .vd { font-size: .8rem; line-height: 1.3; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .tx .vd b { font-weight: 700; }
 .tx .vd .ok { color: var(--accent); } .tx .vd .q { color: var(--warn); }
 .row.open .tx .vd { display: block; }
-.rt { display: grid; gap: 4px; justify-items: end; }
-.pr { font: 600 .92rem var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.pr small { font: 400 .7rem var(--body); color: var(--muted); margin-left: 4px; }
-.seg { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 34px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
+.ctl { align-self: end; }
+.seg { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 42px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
-.seg label { height: 32px; display: grid; place-items: center; cursor: pointer; border-left: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+.seg label { height: 34px; display: grid; place-items: center; cursor: pointer; border-left: 1px solid var(--line); color: var(--muted); background: var(--surface); }
 .seg input:first-child + label { border-left: 0; }
 .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
 .seg input:checked + label.y { background: var(--accent); color: var(--surface); }
 .seg input:checked + label.m { background: var(--duty); color: #222421; }
 .seg input:checked + label.n { background: var(--ship); color: var(--fg); }
 .seg input:checked + label.d { background: var(--warn); color: var(--surface); }
-.more { grid-column: 2 / -1; display: none; font-size: .82rem; color: var(--muted); padding-top: 4px; gap: 6px; }
+.more { grid-column: 1 / -1; display: none; font-size: .82rem; color: var(--muted); gap: 6px; padding-top: 2px; }
 .row.open .more { display: grid; }
 .more .meta { display: flex; flex-wrap: wrap; gap: 4px; }
 .more .qrow { display: flex; align-items: center; gap: 8px; }
 .qty { width: 3.4rem; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
-.row.dec.is-no { opacity: .62; }
-.row.dec.is-del { opacity: .42; }
+.row.dec.is-no .thumb, .row.dec.is-no .tx { opacity: .55; }
+.row.dec.is-del .thumb, .row.dec.is-del .tx { opacity: .35; }
 .row.dec.is-del .need { text-decoration: line-through; }
-.hints summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
 .dbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; background: var(--surface); border-top: 1px solid var(--line);
   padding: 6px max(12px, env(safe-area-inset-left, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)); }
 .dbar .in { max-width: 720px; margin: 0 auto; display: grid; gap: 6px; }
@@ -566,7 +567,7 @@ section[data-cat] .rows { background: none; border: 0; border-radius: 0; }
 .dbar .send { font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px; padding: 0 16px; height: 38px;
   background: var(--accent); color: var(--surface); }
 .dbar .cp { width: 38px; height: 38px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); cursor: pointer; font: inherit; }
-.bar textarea { width: 100%; min-height: 4.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
+.dbar textarea { width: 100%; min-height: 4.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
   font: .72rem var(--mono); padding: 6px 8px; box-sizing: border-box; }
 </style>"""
 
@@ -733,9 +734,9 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
                 f'<button type="button" class="thumb" aria-label="markieren">{_img(c["img"])}</button>'
-                f'<div class="tx"><span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>{vd_html}</div>'
-                f'<div class="rt"><div class="pr">{eur(price)}<small class="qx"></small></div>'
-                f'<div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
+                f'<div class="tx"><span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
+                f'<div class="pr">{eur(price)}<small class="qx"></small></div>{vd_html}</div>'
+                f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
         out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
                    f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'
                    f'<div class="rows">{"".join(rows)}</div></section>')
