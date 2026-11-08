@@ -506,7 +506,7 @@ _ICON_MAYBE = '<span aria-hidden="true" style="font-weight:700">?</span>'
 _DECIDE_CSS = """<style>
 /* decision page, concept B: one column, a big picture on the left, on the right title, price, the agent's opinion and three
    icon buttons. Tap the picture = mark, tap the text = details. No page header, one slim bar at the bottom. */
-.wrap { gap: 0; padding-block: 0 84px; max-width: 720px; }
+.wrap { gap: 0; padding-block: 0 84px; max-width: 720px; padding-left: max(6px, env(safe-area-inset-left, 0px)); padding-right: max(6px, env(safe-area-inset-right, 0px)); }
 .hints { padding: 6px 2px; }
 .hints .note { margin-top: 6px; }
 .hints summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
@@ -516,33 +516,34 @@ _DECIDE_CSS = """<style>
 .cat-h .sub { font: .78rem var(--mono); color: var(--muted); white-space: nowrap; }
 .cat-h button { font: inherit; font-size: .78rem; background: none; border: 0; padding: 4px 2px; color: var(--accent); cursor: pointer; }
 section[data-cat] .rows { display: block; background: none; border: 0; border-radius: 0; }
-.row.dec { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 4px 12px; align-items: start; padding: 10px 2px;
+.row.dec { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 4px 8px; align-items: start; padding: 8px 0;
   border-top: 1px solid var(--line); background: none; }
 .row.dec:first-child { border-top: 0; }
-.row.dec .thumb { grid-row: 1 / 3; position: relative; width: 104px; height: 104px; padding: 0; border: 0; background: var(--line);
+.row.dec .thumb { grid-column: 1; grid-row: 1; position: relative; width: 112px; height: 112px; padding: 0; border: 0; background: var(--line);
   border-radius: 8px; overflow: hidden; cursor: pointer; }
-.row.dec .thumb img, .row.dec .thumb .noimg { display: block; width: 104px; height: 104px; border-radius: 0; object-fit: cover; cursor: pointer; }
+.row.dec .thumb img, .row.dec .thumb .noimg { display: block; width: 112px; height: 112px; border-radius: 0; object-fit: cover; cursor: pointer; }
 .row.marked .thumb::after { content: "\\2713"; position: absolute; inset: 0; display: grid; place-items: center;
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
-.tx { min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
-.tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
+.tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .tx .pr { font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
 .tx .pr small { font: 400 .75rem var(--body); color: var(--muted); margin-left: 6px; }
-.tx .vd { font-size: .8rem; line-height: 1.3; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.tx .vd { font-size: .8rem; line-height: 1.3; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
 .tx .vd b { font-weight: 700; }
 .tx .vd .ok { color: var(--accent); } .tx .vd .q { color: var(--warn); }
 .row.open .tx .vd { display: block; }
-.ctl { align-self: end; }
-.seg { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 42px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
+.ctl { grid-column: 1; grid-row: 2; }
+.note-in { width: 100%; box-sizing: border-box; margin-top: 3px; padding: 3px 6px; font: .78rem var(--body); border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+.seg { display: grid; width: 112px; box-sizing: border-box; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
-.seg label { height: 34px; display: grid; place-items: center; cursor: pointer; border-left: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+.seg label { height: 26px; line-height: 0; display: grid; place-items: center; cursor: pointer; border-left: 1px solid var(--line); color: var(--muted); background: var(--surface); }
 .seg input:first-child + label { border-left: 0; }
 .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
 .seg input:checked + label.y { background: var(--accent); color: var(--surface); }
 .seg input:checked + label.m { background: var(--duty); color: #222421; }
 .seg input:checked + label.n { background: var(--ship); color: var(--fg); }
 .seg input:checked + label.d { background: var(--warn); color: var(--surface); }
-.more { grid-column: 1 / -1; display: none; font-size: .82rem; color: var(--muted); gap: 6px; padding-top: 2px; }
+.more { grid-column: 1 / -1; grid-row: 3; display: none; font-size: .82rem; color: var(--muted); gap: 6px; padding-top: 2px; }
 .row.open .more { display: grid; }
 .more .meta { display: flex; flex-wrap: wrap; gap: 4px; }
 .more .qrow { display: flex; align-items: center; gap: 8px; }
@@ -582,14 +583,14 @@ _DECIDE_JS = r"""<script>
   function qty(r) { return Math.max(1, parseInt(r.querySelector(".qty").value, 10) || 1); }
   rows.forEach(function (r) {
     var s = saved[r.dataset.id];
-    if (s) { var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true; r.querySelector(".qty").value = s.q; }
+    if (s) { var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true; r.querySelector(".qty").value = s.q; if (s.n) r.querySelector(".note-in").value = s.n; }
   });
   var total = 0, stEl = document.getElementById("sb-state"), send = document.getElementById("sb-send");
   function calc() {
     var goods = 0, duty = 0, ship = 0, ch = 0, n = 0, keep = {};
     rows.forEach(function (r) {
       var v = st(r), q = qty(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
-      keep[r.dataset.id] = { st: v, q: q };
+      keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value };
       r.querySelector(".qx").textContent = q > 1 ? "×" + q : "";
       if (v !== "yes") return;
       n++; var g = parseFloat(r.dataset.price) * q; goods += g; duty += parseFloat(r.dataset.duty);
@@ -612,9 +613,10 @@ _DECIDE_JS = r"""<script>
       var v = st(r), q = qty(r), cid = r.dataset.cart;
       cnt[v]++;
       if (v === "delete") dels.push(r.dataset.title.slice(0, 28));
-      if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10)) return;
+      if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10) && !r.querySelector(".note-in").value.trim()) return;
       var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
       if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
+      var nt = r.querySelector('.note-in').value.trim(); if (nt) it.note = nt;
       items.push(it);
     });
     var head = "Auswahl " + T + ": " + cnt.yes + " ja, " + cnt.no + " nein" + (cnt.maybe ? ", " + cnt.maybe + " vielleicht" : "") +
@@ -658,7 +660,7 @@ _DECIDE_JS = r"""<script>
       showBulk(); calc(); return;
     }
     var tx = t.closest && t.closest(".tx");
-    if (tx && !(t.closest && t.closest("a"))) tx.closest(".row").classList.toggle("open");
+    if (tx && !(t.closest && t.closest("a, input"))) tx.closest(".row").classList.toggle("open");
   });
   document.addEventListener("input", function () { send.textContent = "Senden"; calc(); });
   document.addEventListener("change", calc);
@@ -698,7 +700,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
     icons = {"yes": (_ICON_YES, "Ja"), "maybe": (_ICON_MAYBE, "Vielleicht"), "no": (_ICON_NO, "Nein"), "delete": (_ICON_DEL, "Löschen")}
     for si, sec in enumerate(categories):
         cart_mode = any(c.get("cart_id") for c in sec["cards"])
-        order = ("yes", "no", "delete") if cart_mode else ("yes", "maybe", "no", "delete")
+        order = ("yes", "maybe", "no", "delete")
         rows = []
         for ci, c in enumerate(sec["cards"]):
             state = c.get("default") if c.get("default") in ("yes", "maybe", "no") else "no"
@@ -735,7 +737,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
                 f'<button type="button" class="thumb" aria-label="markieren">{_img(c["img"])}</button>'
                 f'<div class="tx"><span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
-                f'<div class="pr">{eur(price)}<small class="qx"></small></div>{vd_html}</div>'
+                f'<div class="pr">{eur(price)}<small class="qx"></small></div>{vd_html}'
+                f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
                 f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
         out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
                    f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'

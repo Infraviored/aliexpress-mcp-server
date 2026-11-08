@@ -82,7 +82,7 @@ def test_apply_selection_reads_a_bare_json_message(monkeypatch):
 
 def test_cart_mode_has_delete_and_no_maybe_and_compact_details():
     h = _page([_card(cart_id="30016210959867", default="yes", tags=["Choice"], text="langer Titel")])
-    assert 'value="delete"' in h and 'value="maybe"' not in h
+    assert 'value="delete"' in h and 'value="maybe"' in h and 'class="note-in"' in h
     assert 'data-cart="30016210959867"' in h and 'data-state0="yes"' in h and 'data-qty0="1"' in h
     assert 'class="more"' in h and "langer Titel" in h                    # chips and text only on tap (row.open)
     assert 'class="thumb"' in h and 'data-bulk="delete"' in h and 'data-all="1"' in h   # tap picture = mark, bulk actions
