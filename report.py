@@ -533,7 +533,11 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
 .tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
 .tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.tx .pr { font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
+.tx .pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
+.stp { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--surface); }
+.stp button { width: 26px; height: 26px; padding: 0; border: 0; background: none; color: var(--fg); font: 600 1rem var(--body); cursor: pointer; }
+.stp .qty { width: 2.2rem; height: 26px; padding: 0; border: 0; border-radius: 0; text-align: center; font: 600 .9rem var(--mono); -moz-appearance: textfield; background: none; }
+.stp .qty::-webkit-outer-spin-button, .stp .qty::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .tx .pr small { font: 400 .75rem var(--body); color: var(--muted); margin-left: 6px; }
 .tx .vd { font-size: .8rem; line-height: 1.3; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
 .tx .vd b { font-weight: 700; }
@@ -598,7 +602,6 @@ _DECIDE_JS = r"""<script>
     rows.forEach(function (r) {
       var v = st(r), q = qty(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
       keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value };
-      r.querySelector(".qx").textContent = q > 1 ? "×" + q : "";
       if (v !== "yes") return;
       n++; var g = parseFloat(r.dataset.price) * q; goods += g; duty += parseFloat(r.dataset.duty);
       if (r.dataset.choice === "1") ch += g; else ship += parseFloat(r.dataset.ship);
@@ -653,7 +656,9 @@ _DECIDE_JS = r"""<script>
   function marked() { return rows.filter(function (r) { return r.classList.contains("marked"); }); }
   function showBulk() { var n = marked().length; bulk.hidden = n === 0; document.getElementById("sb-marked").textContent = n + " markiert"; }
   document.addEventListener("click", function (e) {
-    var t = e.target, mk = t.closest && t.closest(".mk"), th = t.closest && t.closest(".thumb");
+    var t = e.target, sb = t.closest && t.closest(".stp button");
+    if (sb) { var qi = sb.parentNode.querySelector(".qty"); qi.value = Math.min(99, Math.max(1, (parseInt(qi.value, 10) || 1) + (sb.classList.contains("up") ? 1 : -1))); qi.dispatchEvent(new Event("input", { bubbles: true })); return; }
+    var mk = t.closest && t.closest(".mk"), th = t.closest && t.closest(".thumb");
     if (mk) { mk.closest(".row").classList.toggle("marked"); showBulk(); return; }
     if (t.closest && t.closest(".lb")) { lb.classList.remove("on"); return; }
     if (th) { var im = th.querySelector("img"); if (im) { lbi.src = im.currentSrc || im.src; lb.classList.add("on"); } return; }
@@ -671,7 +676,7 @@ _DECIDE_JS = r"""<script>
       showBulk(); calc(); return;
     }
     var tx = t.closest && t.closest(".tx");
-    if (tx && !(t.closest && t.closest("a, input"))) tx.closest(".row").classList.toggle("open");
+    if (tx && !(t.closest && t.closest("a, input, button"))) tx.closest(".row").classList.toggle("open");
   });
   document.addEventListener("input", function () { send.textContent = "Senden"; calc(); });
   document.addEventListener("change", calc);
@@ -732,7 +737,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             meta_html = '<div class="meta">' + chips + "</div>" if chips else ""
             text_html = "<div>" + _e(c["text"]) + "</div>" if c.get("text") else ""
             more = (f'<div class="more">{meta_html}{text_html}'
-                    f'<label class="qrow">Menge <input class="qty" type="number" min="1" max="99" value="{qty}"></label>{link}</div>')
+                    f'{link}</div>')
             rid = f"r{si}_{ci}"
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
@@ -748,7 +753,9 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx"><span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
-                f'<div class="pr">{eur(price)}<small class="qx"></small></div>{vd_html}'
+                f'<div class="pr"><span>{eur(price)}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
+                f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
+                f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
                 f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
         out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
