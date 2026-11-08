@@ -1,0 +1,12 @@
+[Unit]
+Description=AliExpress MCP report pages (decision page, cart, plans) on port 8765
+After=network-online.target
+
+[Service]
+# The MCP writes the pages, this serves them; it must not die when the MCP reconnects.
+ExecStart=%h/repos/aliexpress-mcp-server/.venv/bin/python %h/repos/aliexpress-mcp-server/reportserver.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
