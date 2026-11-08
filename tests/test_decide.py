@@ -201,3 +201,17 @@ def test_decide_cart_builds_a_page_from_the_cart(monkeypatch):
     p = written["page"]
     assert written["name"] == "warenkorb.html" and 'data-cart="11"' in p and "Duese · White" in p and 'data-qty0="2"' in p
     assert 'data-cat="Extras"' in p and 'data-choice="1"' in p
+
+
+def test_select_checks_every_line_and_names_the_ones_that_did_not_stick(monkeypatch):
+    lines = [{"cart_id": str(i), "title": f"Teil {i}", "variant": "", "checked": False} for i in range(12)]
+    monkeypatch.setattr(m, "_cart_pages", lambda cookies, business="": ({"data": {}}, []))
+    monkeypatch.setattr(m.cartlib, "parse", lambda pages: {"lines": lines})
+    sent = {}
+    monkeypatch.setattr(m, "_cart_line_action",
+                        lambda cookies, edits, merged=None, business="": (sent.update(edits), (list(edits), {}))[1])
+    after = [dict(ln, checked=ln["cart_id"] != "11") for ln in lines]   # AliExpress left one unchecked
+    monkeypatch.setattr(m, "_read_cart", lambda cookies, business="": {"lines": after, "summary": {}})
+    text = m._select({"a": "b"}, [str(i) for i in range(12)])[0]
+    assert len(sent) == 12                                   # no 10-line cap any more
+    assert "NOT checked after the call (1): Teil 11" in text

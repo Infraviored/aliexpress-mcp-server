@@ -94,8 +94,8 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
 - One cart line per part: every line pays an import charge, and at a global
   seller its own shipping.
 - Never compare offers by the search price (cheapest variant, often bait).
-- Hand out the list's checkout link, never "the ticked lines": the cart page
-  keeps only 10 ticked, the link has no limit.
+- Hand out the list's checkout link, never "the ticked lines": the link holds exactly the list.
+  Checking lines is verified against the cart afterwards: say every line the answer names as "NOT checked".
 - Ask before `remove_from_cart` on lines the MCP did not add.
 - Offer only what the user asked for. Every word of the request that decides the
   product ("High Speed", "matt", "black", brand, size) must be in the offer's

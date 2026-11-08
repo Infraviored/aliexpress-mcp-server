@@ -116,7 +116,7 @@ def test_format_lists_separates_list_from_other_lines_and_flags_leftovers():
     text = cart.format_cart(c, tags=tags)
     assert "## List 'sat' — 12 line(s)" in text
     assert "## Other lines (not on a list)" in text
-    assert "the cart page keeps only 10 ticked" in text or "ticked on the cart page" in text
+    assert "ticked on the cart page" in text
     link = next(l for l in text.splitlines() if "Checkout link for the whole list" in l)
     assert parse_qs(urlparse(link.split(": ", 1)[1]).query)["availableProductShopcartIds"][0].split(",") == ids
 

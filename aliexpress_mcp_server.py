@@ -3485,14 +3485,13 @@ def select_cart_items(cart_ids: list[str], only: bool = False, selected: bool = 
     for exactly these lines. This changes the real cart's selection, not its
     content.
 
-    AliExpress remembers at most 10 checked lines (an 11th silently unchecks
-    the oldest). The returned checkout link holds every given line, however
-    many: it opens the order confirmation with exactly those lines, where the
-    user decides to pay.
+    Every given line is checked; the cart is read again afterwards and any line
+    that is still not checked is named ("NOT checked"), so nothing is lost
+    silently. The returned checkout link holds every given line: it opens the
+    order confirmation with exactly those lines, where the user decides to pay.
 
     Args:
-        cart_ids: cart_id values from view_cart, most important first (when
-            more than 10, the first 10 stay checked).
+        cart_ids: cart_id values from view_cart.
         only: uncheck every other line first, so the cart shows exactly these.
         selected: False unchecks the given lines instead.
 
@@ -3529,19 +3528,14 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False,
         done, failed = _cart_line_action(cookies, {c: _edit_check(False) for c in want if state_of[c]}, merged, business)
         out.append(f"Unchecked {len(done)} line(s).")
     else:
-        # Uncheck first: AliExpress keeps only MAX_CHECKED lines checked.
+        # Uncheck first, then check every wanted line (no cap: a guessed 10-line limit used to drop the rest).
         off = [c for c, on in state_of.items() if on and c not in want] if only else []
-        keep = want if business else want[:cartlib.MAX_CHECKED]
-        on = [c for c in keep if not state_of[c]]
+        on = [c for c in want if not state_of[c]]
         done, failed = _cart_line_action(
             cookies, {**{c: _edit_check(False) for c in off}, **{c: _edit_check(True) for c in on}}, merged, business)
-        out.append(f"Checked {sum(1 for c in on if c in done)} line(s); {len(keep) - len(on)} were already checked.")
+        out.append(f"Checked {sum(1 for c in on if c in done)} line(s); {len(want) - len(on)} were already checked.")
         if any(c in done for c in off):
             out.append("Unchecked (not in the list): " + "; ".join(titles[c] for c in off if c in done))
-        if not business and len(want) > cartlib.MAX_CHECKED:
-            out.append(f"AliExpress keeps only {cartlib.MAX_CHECKED} lines checked on the cart page; "
-                       f"the other {len(want) - cartlib.MAX_CHECKED} stay unchecked there "
-                       f"but are included in the checkout link below.")
     for c, why in failed.items():
         out.append(f"Failed {titles.get(c, c)}: {why}")
     if unknown_out is not None:
@@ -3550,6 +3544,12 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False,
         out.append("Not in cart: " + ", ".join(unknown))
     after = _read_cart(cookies, business)
     s = after["summary"]
+    # Verify against the cart as it is now, not against the answers of the single calls.
+    now = {ln["cart_id"]: ln["checked"] for ln in after["lines"]}
+    wrong = [c for c in want if c not in failed and now.get(c) is not selected]
+    if wrong:
+        out.append(("NOT checked after the call" if selected else "STILL checked after the call")
+                   + f" ({len(wrong)}): " + "; ".join(titles.get(c, c) for c in wrong))
     if business:
         pick = [ln for ln in after["lines"] if ln["valid"] and ln["checked"]]
         pieces = sum(ln["qty"] for ln in pick)
@@ -3728,9 +3728,9 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
         f"{group}. cart_id {cid}."
     )
     if dropped:
-        out += (f" AliExpress keeps {cartlib.MAX_CHECKED} lines checked, so it unchecked: "
+        out += (" AliExpress unchecked other lines when this one was added: "
                 + "; ".join(f"{ln['title'][:40]} ({ln['variant']})" for ln in dropped)
-                + ". The checkout link from select_cart_items covers any number of lines.")
+                + ". Check them again with select_cart_items.")
     return out
 
 
@@ -3973,10 +3973,13 @@ def _apply_cart_selection(cart: list[tuple[str, str, int, int]], dry_run: bool) 
         out.append("Deleted: " + remove_from_cart(dele).split("\n")[0])
     for c, q in qty:
         out.append(f"Quantity {c} -> {q}: " + update_cart_quantity(c, q).split("\n")[0])
+    def report(text: str) -> str:   # every line that says what happened or failed, not only the first
+        return "\n  ".join(l for l in text.split("\n")
+                            if not l.startswith(("Checkout link", "Kombi-Knaller cart now", "Cart page now")))
     if off:
-        out.append("Unchecked: " + select_cart_items(off, only=False, selected=False).split("\n")[0])
+        out.append("Unchecked: " + report(select_cart_items(off, only=False, selected=False)))
     if on:
-        out.append("Checked: " + select_cart_items(on, only=False, selected=True).split("\n")[0])
+        out.append("Checked: " + report(select_cart_items(on, only=False, selected=True)))
     return "\n".join(out) or "No change in the cart lines."
 
 
