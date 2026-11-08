@@ -22,6 +22,7 @@ def test_page_has_a_row_with_choices_quantity_and_data():
     assert 'class="row dec"' in h and 'data-price="20.39"' in h and 'data-sku="12000039323135462"' in h
     assert 'value="yes" checked' in h and 'type="number"' in h and "Highland genannt" in h
     assert "claudevoice:send" in h and "Schätzung" in h
+    assert "claudevoice:sent" in h                      # the dashboard confirms the send
     assert "__NAME__" not in h and "__TH__" not in h and "__CS__" not in h
 
 

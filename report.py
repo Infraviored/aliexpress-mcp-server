@@ -589,6 +589,13 @@ _DECIDE_JS = r"""<script>
     var t = msg(); box.value = t; box.hidden = false; box.select();
     try { navigator.clipboard.writeText(t); state.textContent = "Kopiert."; } catch (e) { state.textContent = "Text markiert, bitte kopieren."; }
   });
+  window.addEventListener("message", function (e) {
+    if (e.data && e.data.type === "claudevoice:sent") {
+      state.textContent = "Gesendet. Die Auswahl ist im Chat angekommen.";
+      document.getElementById("sb-send").textContent = "Gesendet ✓";
+    }
+  });
+  document.addEventListener("input", function () { document.getElementById("sb-send").textContent = "Auswahl an den Chat senden"; });
   document.addEventListener("input", calc); document.addEventListener("change", calc);
   calc();
 })();
