@@ -46,11 +46,15 @@ recommendation; the page does the rest. Adding to the cart happens after he pick
 multi-select with "N markiert: Ja / Nein / Löschen"). Do not describe a long order in prose and do not ask
 him in chat which lines to keep: send the page, then pass his message to `apply_selection`.
 
-**The best deal is checked BEFORE the page is built, never after.** `decide_cart` looks for every line from a global seller
-whether the same pieces are cheaper from a Choice offer (no own shipping, import charges covered) and puts that as its own
-row under the line ("Choice statt global"); Ja on it adds the offer and removes the old line (`replaces`), the page sets
-the other one to Nein. Keep `check_deals` on. Not yet checked: Kombi-Knaller for single lines, and cheaper Choice offers
-for lines that are already Choice: say so when it matters.
+**The best deal is checked BEFORE the page is built, never after, and every candidate is verified by LOOKING at it.**
+`decide_cart` looks for every line from a global seller whether the same pieces are cheaper from a Choice offer (no own
+shipping, import charges covered). Search hits are often different articles (a 0,44 € ring against a 20 € hotend), so a
+candidate is NOT put on the page by itself: the answer lists each one with a comparison picture (original left, offer right).
+Read every picture, decide it is the same product in the same variant and pack, then call `decide_cart` again with
+`approved_alternatives=[cart_ids]`. The approved ones appear as a row with a "Choice-Alternative" pill under the line; Ja on it
+adds the offer and removes the old line (`replaces`). A price under 40 % of the goods is rejected without a look. Tell the user
+which you approved and which not, and why. Not yet checked: Kombi-Knaller for single lines, cheaper Choice offers for lines
+that are already Choice: say so when it matters.
 
 **Fill your opinion on every row.** He decides on your judgement: `opinions` in `decide_cart`, `verdict` / `rating` /
 `fit` on each card of `decide_report`. One sentence per row: why this one, what to watch, the rating where it matters,

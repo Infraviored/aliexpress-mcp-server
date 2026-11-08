@@ -533,6 +533,7 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
 .tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
 .tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.tx .pill { justify-self: start; padding: 1px 8px; border-radius: 99px; font: 600 .68rem var(--body); background: var(--accent); color: var(--surface); }
 .tx .pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
 .stp { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--surface); }
 .stp button { width: 26px; height: 26px; padding: 0; border: 0; background: none; color: var(--fg); font: 600 1rem var(--body); cursor: pointer; }
@@ -747,6 +748,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             more = (f'<div class="more">{meta_html}{text_html}'
                     f'{link}</div>')
             rid = f"r{si}_{ci}"
+            pill = f'<span class="pill">{_e(c["badge"])}</span>' if c.get("badge") else ""
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
                 f'<label class="{v[0]}" for="{rid}{v[0]}" title="{icons[v][1]}" aria-label="{icons[v][1]}">{icons[v][0]}</label>'
@@ -761,7 +763,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
-                f'<div class="tx"><span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
+                f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
                 f'<div class="pr"><span>{eur(price)}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
                 f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
                 f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{vd_html}'
