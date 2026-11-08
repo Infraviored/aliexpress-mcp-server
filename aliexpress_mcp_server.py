@@ -3807,6 +3807,28 @@ def _cdn_picture_url(url: str) -> str:
     return url + "_800x800.jpg"
 
 
+def _compare_image(cart_id: str, left: Optional[str], right: Optional[str]) -> Optional[str]:
+    """Original left, candidate right, as one picture in the report folder, so the agent can look at both (path, or None)."""
+    try:
+        from io import BytesIO
+        from PIL import Image as PILImage
+        ims = []
+        for src in (left, right):
+            if not src or not src.startswith("data:image/"):
+                return None
+            ims.append(PILImage.open(BytesIO(base64.b64decode(src.split(",", 1)[1]))).convert("RGB").resize((400, 400)))
+        sheet = PILImage.new("RGB", (820, 400), (255, 255, 255))
+        sheet.paste(ims[0], (0, 0))
+        sheet.paste(ims[1], (420, 0))
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / f"vergleich-{re.sub(r'[^0-9A-Za-z]', '', str(cart_id))}.png"
+        sheet.save(path)
+        return str(path)
+    except Exception as e:
+        logger.debug("comparison picture failed: %s", e)
+        return None
+
+
 def _report_image(card: dict) -> Optional[str]:
     """data: URI for one report card: its `image` (https URL, file inside the report folder, data: URI), else the picture of `item_id`."""
     import mimetypes
@@ -4017,7 +4039,7 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
 
 @tool()
 def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: str = "",
-                opinions: dict = None, check_deals: bool = True) -> str:
+                opinions: dict = None, check_deals: bool = True, approved_alternatives: list = None) -> str:
     """
     The REAL cart as a decision page, compact enough for 50 lines: per shopping list (and the Kombi-Knaller
     basket) one row per line with picture, short title, YOUR opinion, price and Ja / Nein / Löschen
@@ -4038,6 +4060,11 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
         check_deals: before the page is built, look for a cheaper way to buy each line that comes from a global seller
             (same pieces from a Choice offer: no own shipping, import charges covered). A found alternative is a row of its
             own right under the line; choosing Ja there swaps it in. Costs searches (cached 6 h); False = skip.
+        approved_alternatives: cart_ids whose alternative YOU have verified. A found alternative is NOT put on the page until
+            you approve it: the answer lists every candidate with a comparison picture (original left, offer right) in the
+            report folder. Read each picture and the numbers, decide whether it is the SAME product (same shape, same
+            variant, same pack size), then call decide_cart again with the cart_ids that are. Search hits are often
+            different articles (an accessory for 0,44 € against a 20 € part): never approve unseen.
     """
     cookies = load_cookies()
     if not cookies:
@@ -4062,6 +4089,8 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
         return "The cart has no lines to show."
     cats = []
     alt_cache = _alt_cache() if check_deals else {}
+    approved = {str(x) for x in (approved_alternatives or [])}
+    pending: list[tuple[dict, dict, dict, str]] = []   # (original card, alt, line, why not shown)
     for heading, lines in groups.items():
         cards = []
         for ln, tag in lines:
@@ -4088,8 +4117,14 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
                     q = alt["lines"][0]["qty"]
                     now = cartlib.goods(ln) + (ln["ship"] or 0) + DUTY_PER_LINE
                     diff = alt["cost"] - now
+                    if alt["cost"] < 0.4 * cartlib.goods(ln):
+                        pending.append((cards[-1], alt, ln, "rejected: price under 40 % of the goods, a different article"))
+                        continue
+                    if ln["cart_id"] not in approved:
+                        pending.append((cards[-1], alt, ln, "not verified yet"))
+                        continue
                     when = f"Lieferung in etwa {alt['days']} Tagen" if alt.get("days") else ""
-                    cards.append({"title": f"Choice statt global: {need}", "item_id": alt["item_id"], "sku_id": alt["lines"][0]["sku_id"],
+                    cards.append({"title": f"{need} · {alt['buy']}", "badge": "Choice-Alternative", "item_id": alt["item_id"], "sku_id": alt["lines"][0]["sku_id"],
                                   "replaces": ln["cart_id"], "price": round(alt["cost"] / q, 2), "ship": 0, "choice": True, "duty": 0,
                                   "qty": q, "default": "no",
                                   "verdict": (f"{alt['buy']} für {report.eur(alt['cost'])} statt {report.eur(now)} (Ware, Versand, Abgabe): "
@@ -4110,7 +4145,23 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
             x["img"] = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="   # a blank pixel
     safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "warenkorb"
     page = report.decide_page(safe, title, time.strftime("%d.%m.%Y %H:%M"), [], [], cats, time.strftime("%d.%m.%Y %H:%M"))
-    return _write_report(f"{safe}.html", page)
+    msg = _write_report(f"{safe}.html", page)
+    todo = []
+    for orig, alt, ln, why in pending:
+        if why.startswith("rejected"):
+            todo.append(f"- {ln['cart_id']} {orig['title'][:40]}: candidate '{alt['title'][:50]}' for {report.eur(alt['cost'])} "
+                        f"against {report.eur(cartlib.goods(ln))} — {why}.")
+            continue
+        pic = _compare_image(ln["cart_id"], orig.get("img"), _report_image({"image": alt.get("img") or ""}))
+        todo.append(f"- {ln['cart_id']} {orig['title'][:40]}: candidate '{alt['title'][:50]}' ({alt['buy']}) for "
+                    f"{report.eur(alt['cost'])} against {report.eur(cartlib.goods(ln) + (ln['ship'] or 0) + DUTY_PER_LINE)} now. "
+                    + (f"Comparison picture, READ IT: {pic}" if pic else "No comparison picture: look at both offers yourself."))
+    if todo:
+        msg += ("\n\nCHEAPER-WAY CANDIDATES, NOT ON THE PAGE YET. Read each comparison picture (original left, candidate right). "
+                "Only when it is the same product in the same variant and pack, call decide_cart again with "
+                "approved_alternatives=[cart_ids] (the same opinions); say to the user which you approved and which not and why:\n"
+                + "\n".join(todo))
+    return msg
 
 
 # ─── Orders (read only) ─────────────────────────────────────────────────────
