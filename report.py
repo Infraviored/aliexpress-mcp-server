@@ -526,9 +526,26 @@ _DECIDE_CSS = """<style>
 .sumbar .state { color: var(--muted); font-size: .84rem; }
 .sumbar textarea { width: 100%; min-height: 6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
   font: .8rem var(--mono); padding: 6px 8px; box-sizing: border-box; }
-@media (max-width: 560px) { .row.dec { grid-template-columns: 56px minmax(0, 1fr); }
-  .row.dec img, .row.dec .noimg { width: 56px; height: 56px; }
-  .row.dec .money { grid-column: 1 / -1; justify-items: start; } }
+@media (max-width: 560px) {
+  .row.dec { grid-template-columns: 64px minmax(0, 1fr); gap: 8px 12px; }
+  /* price and shipping on one line, the three choices as wide tap targets, quantity below */
+  .row.dec .money { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr; align-items: baseline;
+    justify-items: start; text-align: left; gap: 10px 12px; }
+  .row.dec .money b { white-space: nowrap; font-size: 1.15rem; }
+  .row.dec .money .seg { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; justify-self: stretch; }
+  .seg label { text-align: center; padding: 12px 4px; white-space: nowrap; font-size: .95rem; }
+  .row.dec .money .qrow { grid-column: 1 / -1; }
+  .qty { width: 4.2rem; padding: 8px; font-size: 1rem; }
+  .row.dec .meta { gap: 4px; }
+  /* the summary bar stays small: total and buttons in one glance */
+  .sumbar { padding: 8px 12px; gap: 6px; }
+  .sumbar .tot { font-size: 1.1rem; }
+  .sumbar .parts { font-size: .74rem; }
+  .sumbar .acts { gap: 8px; }
+  .sumbar .acts button { padding: 10px 10px; flex: 1; font-size: .9rem; }
+  .sumbar .state { flex-basis: 100%; font-size: .76rem; }
+  .sumbar .state:empty { display: none; }
+}
 </style>"""
 
 _DECIDE_JS = r"""<script>
