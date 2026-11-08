@@ -58,7 +58,9 @@ candidate is NOT put on the page by itself: the answer lists each one with a com
 Read every picture, decide it is the same product in the same variant and pack, then call `decide_cart` again with
 `approved_alternatives=[cart_ids]`. The approved ones appear as a row with a "Choice-Alternative" pill under the line; Ja on it
 adds the offer and removes the old line (`replaces`). A price under 40 % of the goods is rejected without a look. Tell the user
-which you approved and which not, and why. Not yet checked: Kombi-Knaller for single lines, cheaper Choice offers for lines
+which you approved and which not, and why. `decide_cart` also merges cart lines of the same need (same list and item, query or
+need name) into the cheapest single line when that is cheaper than the split: the answer lists each merge ("MERGED LINES"), tell
+the user. Not yet checked: Kombi-Knaller for single lines, cheaper Choice offers for lines
 that are already Choice: say so when it matters.
 
 **Fill your opinion on every row.** He decides on your judgement: `opinions` in `decide_cart`, `verdict` / `rating` /
