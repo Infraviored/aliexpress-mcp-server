@@ -38,11 +38,6 @@ SUMMARY = "app_cart_summary_component"
 HEADER = "app_cart_head_component"
 PAGINATION = "app_cart_pagination_container"
 
-# AliExpress remembers at most this many checked lines; checking one more
-# silently unchecks the oldest (the web page does the same, it only shows 11
-# until reload). Checkout itself takes any number of lines by cart id.
-MAX_CHECKED = 10
-
 GROUP_NAMES = {"group_choice": "Shipped by AliExpress (Choice)", "global": "Shipped by global sellers"}
 
 
