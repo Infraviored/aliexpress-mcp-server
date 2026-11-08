@@ -522,7 +522,14 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .row.dec .thumb { grid-column: 1; grid-row: 1; position: relative; width: 112px; height: 112px; padding: 0; border: 0; background: var(--line);
   border-radius: 8px; overflow: hidden; cursor: pointer; }
 .row.dec .thumb img, .row.dec .thumb .noimg { display: block; width: 112px; height: 112px; border-radius: 0; object-fit: cover; cursor: pointer; }
-.row.marked .thumb::after { content: "\\2713"; position: absolute; inset: 0; display: grid; place-items: center;
+.row.dec .mk { position: absolute; top: 4px; left: 4px; z-index: 2; width: 26px; height: 26px; padding: 0; border-radius: 50%; cursor: pointer;
+  border: 2px solid #fff; background: rgba(15, 17, 15, .45); }
+.row.marked .mk { background: var(--accent); }
+.row.marked .mk::after { content: "\\2713"; color: #fff; font: 700 15px/1 var(--body); }
+.lb { position: fixed; inset: 0; z-index: 50; display: none; place-items: center; background: rgba(0, 0, 0, .88); cursor: zoom-out; }
+.lb.on { display: grid; }
+.lb img { max-width: 96vw; max-height: 92vh; object-fit: contain; border-radius: 6px; background: #fff; }
+.row.marked .thumb::after { pointer-events: none; content: "\\2713"; position: absolute; inset: 0; display: grid; place-items: center;
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
 .tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
 .tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -640,12 +647,16 @@ _DECIDE_JS = r"""<script>
   window.addEventListener("message", function (e) {
     if (e.data && e.data.type === "claudevoice:sent") { stEl.textContent = "Gesendet. Die Auswahl ist im Chat angekommen."; send.textContent = "Gesendet ✓"; }
   });
+  var lb = document.createElement("div"); lb.className = "lb"; var lbi = document.createElement("img"); lb.appendChild(lbi); document.body.appendChild(lb);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") lb.classList.remove("on"); });
   var bulk = document.getElementById("sb-bulk");
   function marked() { return rows.filter(function (r) { return r.classList.contains("marked"); }); }
   function showBulk() { var n = marked().length; bulk.hidden = n === 0; document.getElementById("sb-marked").textContent = n + " markiert"; }
   document.addEventListener("click", function (e) {
-    var t = e.target, th = t.closest && t.closest(".thumb");
-    if (th) { th.closest(".row").classList.toggle("marked"); showBulk(); return; }
+    var t = e.target, mk = t.closest && t.closest(".mk"), th = t.closest && t.closest(".thumb");
+    if (mk) { mk.closest(".row").classList.toggle("marked"); showBulk(); return; }
+    if (t.closest && t.closest(".lb")) { lb.classList.remove("on"); return; }
+    if (th) { var im = th.querySelector("img"); if (im) { lbi.src = im.currentSrc || im.src; lb.classList.add("on"); } return; }
     var all = t.closest && t.closest("button[data-all]");
     if (all) {
       var rs = [].slice.call(all.closest("section").querySelectorAll(".row.dec")), on = rs.every(function (r) { return r.classList.contains("marked"); });
@@ -735,7 +746,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
-                f'<button type="button" class="thumb" aria-label="markieren">{_img(c["img"])}</button>'
+                f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx"><span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
                 f'<div class="pr">{eur(price)}<small class="qx"></small></div>{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
