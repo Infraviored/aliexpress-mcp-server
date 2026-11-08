@@ -2120,6 +2120,8 @@ REPORT_TOKEN_FILE = CREDENTIALS_PATH.parent / "aliexpress-report-token"
 def _write_report(name: str, page: str) -> str:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / name
+    if name.endswith(".html") and "<meta charset" not in page[:500].lower():
+        page = '<meta charset="utf-8">\n' + page      # also right when opened as a file, without the server's header
     path.write_text(page, encoding="utf-8")
     link = ""
     try:
