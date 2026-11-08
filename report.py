@@ -499,53 +499,59 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
 
 
 _DECIDE_CSS = """<style>
-/* decision page: one row per offer, yes / maybe / no, quantity, live estimate */
-.row.dec { grid-template-columns: 64px minmax(0, 1fr) auto; align-items: start; padding-block: 10px; }
-.row.dec img, .row.dec .noimg { width: 64px; height: 64px; }
-.row.dec.is-no { opacity: .55; }
-.row.dec .money { gap: 8px; justify-items: end; }
-.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
+/* decision page: compact rows (thumb | title | price), a second line with the choices, details only on tap */
+.row.dec { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px 10px; }
+.row.dec img, .row.dec .noimg { width: 40px; height: 40px; }
+.row.dec .t { min-width: 0; }
+.row.dec .need { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.dec .pr { font: 600 .95rem var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.row.dec .pr small { display: block; font: 400 .7rem var(--body); color: var(--muted); }
+.row.dec .ctl { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+.row.dec .ctl .seg { flex: 1; }
+.row.dec details { grid-column: 1 / -1; font-size: .8rem; color: var(--muted); }
+.row.dec details summary { cursor: pointer; }
+.row.dec details .meta { margin-top: 4px; }
+.row.dec .fit { font-size: .74rem; }
+.row.dec.is-no { opacity: .65; }
+.row.dec.is-del { opacity: .45; }
+.row.dec.is-del .need { text-decoration: line-through; }
+.seg { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
-.seg label { padding: 7px 12px; cursor: pointer; font-size: .85rem; border-left: 1px solid var(--line); background: var(--surface); user-select: none; }
+.seg label { padding: 9px 6px; text-align: center; cursor: pointer; font-size: .85rem; border-left: 1px solid var(--line);
+  background: var(--surface); white-space: nowrap; user-select: none; }
 .seg input:first-child + label { border-left: 0; }
 .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
 .seg input:checked + label.y { background: var(--accent); color: var(--surface); font-weight: 600; }
 .seg input:checked + label.m { background: var(--duty); color: #222421; font-weight: 600; }
 .seg input:checked + label.n { background: var(--line); color: var(--fg); }
-.qrow { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: .82rem; }
-.qty { width: 3.6rem; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
+.seg input:checked + label.d { background: var(--warn); color: var(--surface); font-weight: 600; }
+.qty { width: 3.2rem; padding: 7px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
+.cat-h { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; justify-content: space-between; }
+.cat-h .sub { font: 600 .9rem var(--mono); color: var(--muted); }
+.cat-h .acts { display: flex; gap: 6px; }
+.cat-h button { font: inherit; font-size: .78rem; background: none; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; color: var(--muted); cursor: pointer; }
+.hints summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+.mk { width: 22px; height: 22px; accent-color: var(--accent); flex: 0 0 auto; margin: 0; }
+.bulk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.bulk[hidden] { display: none; }
+.bulk span { font-weight: 600; margin-right: auto; }
+.bulk button { font: inherit; cursor: pointer; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent);
+  background: var(--accent); color: var(--surface); font-weight: 600; }
+.bulk button.del { background: var(--warn); border-color: var(--warn); }
+.bulk button.ghost { background: transparent; color: var(--muted); border-color: var(--line); }
 .sumbar { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
-  padding: 10px 14px; display: grid; gap: 8px; }
-.sumbar .top { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; justify-content: space-between; }
-.sumbar .tot { font: 600 1.25rem var(--mono); font-variant-numeric: tabular-nums; }
-.sumbar .parts { color: var(--muted); font-size: .84rem; }
-.sumbar .acts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.sumbar button { font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--accent); border-radius: 8px; padding: 9px 16px;
-  background: var(--accent); color: var(--surface); }
-.sumbar button.ghost { background: transparent; color: var(--accent); }
-.sumbar .state { color: var(--muted); font-size: .84rem; }
-.sumbar textarea { width: 100%; min-height: 6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
-  font: .8rem var(--mono); padding: 6px 8px; box-sizing: border-box; }
-@media (max-width: 560px) {
-  .row.dec { grid-template-columns: 64px minmax(0, 1fr); gap: 8px 12px; }
-  /* price and shipping on one line, the three choices as wide tap targets, quantity below */
-  .row.dec .money { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr; align-items: baseline;
-    justify-items: start; text-align: left; gap: 10px 12px; }
-  .row.dec .money b { white-space: nowrap; font-size: 1.15rem; }
-  .row.dec .money .seg { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; justify-self: stretch; }
-  .seg label { text-align: center; padding: 12px 4px; white-space: nowrap; font-size: .95rem; }
-  .row.dec .money .qrow { grid-column: 1 / -1; }
-  .qty { width: 4.2rem; padding: 8px; font-size: 1rem; }
-  .row.dec .meta { gap: 4px; }
-  /* the summary bar stays small: total and buttons in one glance */
-  .sumbar { padding: 8px 12px; gap: 6px; }
-  .sumbar .tot { font-size: 1.1rem; }
-  .sumbar .parts { font-size: .74rem; }
-  .sumbar .acts { gap: 8px; }
-  .sumbar .acts button { padding: 10px 10px; flex: 1; font-size: .9rem; }
-  .sumbar .state { flex-basis: 100%; font-size: .76rem; }
-  .sumbar .state:empty { display: none; }
-}
+  padding: 8px 12px; display: grid; gap: 6px; }
+.sumbar .top { display: flex; gap: 6px 14px; align-items: baseline; justify-content: space-between; }
+.sumbar .tot { font: 600 1.1rem var(--mono); font-variant-numeric: tabular-nums; }
+.sumbar .parts { color: var(--muted); font-size: .76rem; }
+.sumbar .acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sumbar button { font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--accent); border-radius: 8px; padding: 9px 14px;
+  background: var(--accent); color: var(--surface); flex: 1; }
+.sumbar button.ghost { background: transparent; color: var(--accent); flex: 0 0 auto; }
+.sumbar .state { color: var(--muted); font-size: .76rem; flex-basis: 100%; }
+.sumbar .state:empty { display: none; }
+.sumbar textarea { width: 100%; min-height: 5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
+  font: .75rem var(--mono); padding: 6px 8px; box-sizing: border-box; }
 </style>"""
 
 _DECIDE_JS = r"""<script>
@@ -559,16 +565,13 @@ _DECIDE_JS = r"""<script>
   function qty(r) { return Math.max(1, parseInt(r.querySelector(".qty").value, 10) || 1); }
   rows.forEach(function (r) {
     var s = saved[r.dataset.id];
-    if (s) {
-      var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true;
-      r.querySelector(".qty").value = s.q;
-    }
+    if (s) { var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true; r.querySelector(".qty").value = s.q; }
   });
   var total = 0;
   function calc() {
     var goods = 0, duty = 0, ship = 0, ch = 0, n = 0, keep = {};
     rows.forEach(function (r) {
-      var v = st(r); r.classList.toggle("is-no", v === "no");
+      var v = st(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
       keep[r.dataset.id] = { st: v, q: qty(r) };
       if (v !== "yes") return;
       n++; var g = parseFloat(r.dataset.price) * qty(r); goods += g; duty += parseFloat(r.dataset.duty);
@@ -576,44 +579,78 @@ _DECIDE_JS = r"""<script>
     });
     if (ch > 0 && ch < TH) ship += CS;
     total = goods + ship + duty;
+    [].forEach.call(document.querySelectorAll("section[data-cat]"), function (s) {
+      var g = 0, k = 0;
+      [].forEach.call(s.querySelectorAll(".row.dec"), function (r) { if (st(r) === "yes") { k++; g += parseFloat(r.dataset.price) * qty(r); } });
+      s.querySelector(".sub").textContent = k + " · " + f(g);
+    });
     document.getElementById("sb-total").textContent = f(total);
-    document.getElementById("sb-parts").textContent = n + " gewählt · Ware " + f(goods) + " · Versand " + f(ship) + " · Einfuhrabgabe " + f(duty) + " (Schätzung)";
+    document.getElementById("sb-parts").textContent = n + " ja · Ware " + f(goods) + " · Versand " + f(ship) + " · Abgabe " + f(duty) + " (geschätzt)";
     try { localStorage.setItem(key, JSON.stringify(keep)); } catch (e) {}
   }
   function msg() {
-    var parts = [], items = [];
-    [].forEach.call(document.querySelectorAll("section[data-cat]"), function (s) {
-      var p = [];
-      [].forEach.call(s.querySelectorAll(".row.dec"), function (r) {
-        var v = st(r), q = qty(r);
-        items.push({ item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: s.dataset.cat });
-        if (v !== "no") p.push((v === "yes" ? "JA " : "VIELLEICHT ") + r.dataset.title + " x" + q + " " + f(parseFloat(r.dataset.price) * q));
-      });
-      parts.push(s.dataset.cat + ": " + (p.join("; ") || "nichts"));
+    var items = [], cnt = { yes: 0, maybe: 0, no: 0, "delete": 0 }, dels = [];
+    rows.forEach(function (r) {
+      var v = st(r), q = qty(r), cid = r.dataset.cart;
+      cnt[v]++;
+      if (v === "delete") dels.push(r.dataset.title.slice(0, 28));
+      if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10)) return;   // a cart line nobody touched
+      var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
+      if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
+      items.push(it);
     });
-    return "Auswahl " + T + ": " + parts.join(" | ") + " | Summe ca. " + f(total) + " (Schätzung)\n```json\n" +
-      JSON.stringify({ action: "select", report: NAME, items: items }) + "\n```";
+    var head = "Auswahl " + T + ": " + cnt.yes + " ja, " + cnt.no + " nein" + (cnt.maybe ? ", " + cnt.maybe + " vielleicht" : "") +
+      (cnt["delete"] ? ", " + cnt["delete"] + " löschen (" + dels.slice(0, 5).join("; ") + (dels.length > 5 ? " ..." : "") + ")" : "") +
+      " | Summe ca. " + f(total) + " (geschätzt)";
+    return head + "\n```json\n" + JSON.stringify({ action: "select", report: NAME, items: items }) + "\n```";
   }
-  var box = document.getElementById("sb-text"), state = document.getElementById("sb-state");
-  document.getElementById("sb-send").addEventListener("click", function () {
+  var box = document.getElementById("sb-text"), state = document.getElementById("sb-state"), send = document.getElementById("sb-send");
+  send.addEventListener("click", function () {
     var t = msg(); box.value = t; box.hidden = false;
+    if (t.length > 19500) { state.textContent = "Zu lang für eine Nachricht (" + t.length + " Zeichen): erst einen Teil entscheiden."; return; }
     try { window.parent.postMessage({ type: "claudevoice:send", text: t }, "*"); } catch (e) {}
-    try { navigator.clipboard.writeText(t).then(function () { state.textContent = "An den Chat übergeben und kopiert. Im Chat auf Senden tippen."; },
-      function () { state.textContent = "An den Chat übergeben. Falls nichts kommt: Text unten kopieren und im Chat einfügen."; }); }
-    catch (e) { state.textContent = "An den Chat übergeben. Falls nichts kommt: Text unten kopieren und im Chat einfügen."; }
+    try { navigator.clipboard.writeText(t).then(function () { state.textContent = "An den Chat übergeben. Dort auf Senden tippen."; },
+      function () { state.textContent = "An den Chat übergeben. Kommt nichts an: Text unten kopieren."; }); }
+    catch (e) { state.textContent = "An den Chat übergeben. Kommt nichts an: Text unten kopieren."; }
   });
   document.getElementById("sb-copy").addEventListener("click", function () {
     var t = msg(); box.value = t; box.hidden = false; box.select();
     try { navigator.clipboard.writeText(t); state.textContent = "Kopiert."; } catch (e) { state.textContent = "Text markiert, bitte kopieren."; }
   });
   window.addEventListener("message", function (e) {
-    if (e.data && e.data.type === "claudevoice:sent") {
-      state.textContent = "Gesendet. Die Auswahl ist im Chat angekommen.";
-      document.getElementById("sb-send").textContent = "Gesendet ✓";
-    }
+    if (e.data && e.data.type === "claudevoice:sent") { state.textContent = "Gesendet. Die Auswahl ist im Chat angekommen."; send.textContent = "Gesendet ✓"; }
   });
-  document.addEventListener("input", function () { document.getElementById("sb-send").textContent = "Auswahl an den Chat senden"; });
-  document.addEventListener("input", calc); document.addEventListener("change", calc);
+  var bulk = document.getElementById("sb-bulk");
+  function marked() { return rows.filter(function (r) { return r.querySelector(".mk").checked; }); }
+  function showBulk() {
+    var n = marked().length; bulk.hidden = n === 0;
+    document.getElementById("sb-marked").textContent = n + " markiert";
+  }
+  document.addEventListener("change", function (e) { if (e.target.classList && e.target.classList.contains("mk")) showBulk(); });
+  document.addEventListener("click", function (e) {
+    var m = e.target.closest && e.target.closest("button[data-mark]");
+    if (m) {
+      var boxes = [].slice.call(m.closest("section").querySelectorAll(".mk")), all = boxes.every(function (b) { return b.checked; });
+      boxes.forEach(function (b) { b.checked = !all; }); showBulk(); return;
+    }
+    var k = e.target.closest && e.target.closest("button[data-bulk]");
+    if (k) {
+      marked().forEach(function (r) {
+        if (k.dataset.bulk === "none") { r.querySelector(".mk").checked = false; return; }
+        var el = r.querySelector('input[value="' + k.dataset.bulk + '"]'); if (el) el.checked = true;
+        if (k.dataset.bulk === "delete" || k.dataset.bulk === "yes" || k.dataset.bulk === "no") r.querySelector(".mk").checked = false;
+      });
+      showBulk(); calc(); return;
+    }
+    var b = e.target.closest && e.target.closest("button[data-set]");
+    if (!b) return;
+    [].forEach.call(b.closest("section").querySelectorAll(".row.dec"), function (r) {
+      var el = r.querySelector('input[value="' + b.dataset.set + '"]'); if (el) el.checked = true;
+    });
+    calc();
+  });
+  document.addEventListener("input", function () { send.textContent = "Auswahl an den Chat senden"; calc(); });
+  document.addEventListener("change", calc);
   calc();
 })();
 </script>"""
@@ -622,12 +659,15 @@ _DECIDE_JS = r"""<script>
 def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: list[dict],
                 categories: list[dict], stamp: str, choice_threshold: float = 10.0, choice_ship: float = 1.99) -> str:
     """
-    A page to decide on: per category (need) the offers, each with yes / maybe / no and a quantity,
-    a live estimate (goods + shipping + import charge) and a send button that hands the choice to the chat.
+    A page to decide on, compact enough for a long cart: per category the offers as one row each
+    (picture, short title, price, Ja / Nein / Löschen, quantity; details only on tap), live totals,
+    "alle Ja / alle Nein" per category and a send button that hands the choice to the chat.
+    Without cart_id on the cards (new offers) there is also "Vielleicht"; with cart_id (lines already in the
+    cart) the choices are Ja = check for checkout, Nein = uncheck, Löschen = remove the line.
 
     categories: [{heading, intro, cards: [{title, img (data: URI), price (EUR per piece), ship (EUR per line, 0 = free),
                   choice (bool: Choice order, shipping shared), duty (EUR per line), qty, default (yes|maybe|no), tags, text, url,
-                  item_id, sku_id, fit}]}]
+                  item_id, sku_id, cart_id, fit}]}]
     Raises ValueError when a card has no picture or no item_id/sku_id.
     """
     import json as _json
@@ -641,51 +681,70 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
     if facts:
         out.append('<div class="facts">' + "".join(
             f'<div class="fact"><b>{_e(f["value"])}</b><span>{_e(f["label"])}</span></div>' for f in facts) + "</div>")
-    for n in notes:
-        out.append(f'<div class="note{" warn" if n.get("warn") else ""}"><p>{_e(n["text"])}</p></div>')
-    n_row = 0
+    if notes:
+        warn = any(n.get("warn") for n in notes)
+        sym = "⚠ " if warn else ""
+        out.append(f'<details class="hints"><summary>{sym}Hinweise ({len(notes)})</summary>'
+                   + "".join(f'<div class="note{" warn" if n.get("warn") else ""}"><p>{_e(n["text"])}</p></div>' for n in notes)
+                   + "</details>")
     for si, sec in enumerate(categories):
         intro = f'<p class="intro">{_e(sec["intro"])}</p>' if sec.get("intro") else ""
+        cart_mode = any(c.get("cart_id") for c in sec["cards"])
+        choices = ((("yes", "Ja"), ("no", "Nein"), ("delete", "Löschen")) if cart_mode
+                   else (("yes", "Ja"), ("maybe", "Vielleicht"), ("no", "Nein"), ("delete", "Löschen")))
         rows = []
         for ci, c in enumerate(sec["cards"]):
-            n_row += 1
-            chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>' for t in c.get("tags") or [])
-            fit = c.get("fit")
-            if fit:
-                chips = f'<span class="chip{" ok" if str(fit).startswith("✓") else " changed"}">{_e(fit)}</span>' + chips
-            name_html = (f'<a class="need" href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
-                         if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
-            text = f'<span class="diff">{_e(c["text"])}</span>' if c.get("text") else ""
             state = c.get("default") if c.get("default") in ("yes", "maybe", "no") else "no"
+            if cart_mode and state == "maybe":
+                state = "no"
+            chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>' for t in c.get("tags") or [])
+            detail = ""
+            if chips or c.get("text"):
+                detail = (f'<details><summary>Details</summary><div class="meta">{chips}</div>'
+                          + (f'<div>{_e(c["text"])}</div>' if c.get("text") else "") + "</details>")
+            fit = c.get("fit")
+            fit_html = (f'<div class="meta fit"><span class="chip{" ok" if str(fit).startswith("✓") else " changed"}">{_e(fit)}</span></div>'
+                        if fit else "")
+            name_html = (f'<a class="need" href="{_e(_url(c["url"]))}" target="_blank" rel="noopener" title="{_e(c["title"])}">{_e(c["title"])}</a>'
+                         if c.get("url") else f'<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>')
             rid = f"r{si}_{ci}"
+            del_title = ' title="Aus dem Warenkorb löschen"'
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
-                f'<label class="{v[0]}" for="{rid}{v[0]}">{lab}</label>'
-                for v, lab in (("yes", "Ja"), ("maybe", "Vielleicht"), ("no", "Nein")))
+                f'<label class="{v[0]}" for="{rid}{v[0]}"{del_title if v == "delete" else ""}>{lab}</label>'
+                for v, lab in choices)
             price = float(c.get("price") or 0)
             ship = float(c.get("ship") or 0)
             duty = float(c.get("duty") or 0)
+            qty = int(c.get("qty") or 1)
+            cart = f' data-cart="{_e(c["cart_id"])}"' if c.get("cart_id") else ""
             rows.append(
-                f'<div class="row dec" data-id="{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
-                f'data-sku="{_e(c["sku_id"])}" data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
-                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}">'
-                f'{_img(c["img"])}<div class="t">{name_html}<div class="meta">{chips}</div>{text}</div>'
-                f'<div class="money"><b>{eur(price)}</b><small>{"Versand frei" if ship == 0 else "Versand " + eur(ship)}</small>'
-                f'<div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div>'
-                f'<label class="qrow">Menge <input class="qty" type="number" min="1" max="99" value="{int(c.get("qty") or 1)}"></label></div>'
-                '</div>')
-        out.append(f'<section data-cat="{_e(sec["heading"])}"><h2>{_e(sec["heading"])}</h2>{intro}'
+                f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
+                f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
+                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
+                f'{_img(c["img"])}<div class="t">{name_html}{fit_html}</div>'
+                f'<div class="pr">{eur(price)}<small>{"Versand frei" if ship == 0 else "Versand " + eur(ship)}</small></div>'
+                f'<div class="ctl"><input type="checkbox" class="mk" aria-label="markieren"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div>'
+                f'<input class="qty" type="number" min="1" max="99" value="{qty}" aria-label="Menge"></div>{detail}</div>')
+        out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
+                   f'<span class="sub"></span><span class="acts"><button type="button" data-mark="1">alle markieren</button>'
+                   f'<button type="button" data-set="yes">alle Ja</button>'
+                   f'<button type="button" data-set="no">alle Nein</button></span></div>{intro}'
                    f'<div class="rows">{"".join(rows)}</div></section>')
-    out.append('<div class="sumbar"><div class="top"><span class="eyebrow">Geschätzte Summe</span>'
+    out.append('<div class="sumbar"><div class="bulk" id="sb-bulk" hidden><span id="sb-marked"></span>'
+               '<button type="button" data-bulk="yes">Ja</button><button type="button" data-bulk="no">Nein</button>'
+               '<button type="button" data-bulk="delete" class="del">Löschen</button>'
+               '<button type="button" data-bulk="none" class="ghost">Aufheben</button></div>'
+               '<div class="top"><span class="eyebrow">Summe der Ja-Zeilen</span>'
                '<span class="tot" id="sb-total"></span></div><div class="parts" id="sb-parts"></div>'
                '<div class="acts"><button type="button" id="sb-send">Auswahl an den Chat senden</button>'
-               '<button type="button" id="sb-copy" class="ghost">Nur kopieren</button><span class="state" id="sb-state"></span></div>'
+               '<button type="button" id="sb-copy" class="ghost">Kopieren</button><span class="state" id="sb-state"></span></div>'
                '<textarea id="sb-text" readonly hidden aria-label="Nachricht"></textarea></div>')
     js = (_DECIDE_JS.replace("__NAME__", _json.dumps(name).replace("</", "<\\/"))
           .replace("__TH__", repr(float(choice_threshold))).replace("__CS__", repr(float(choice_ship))))
     out.append(js)
     out.append('<div id="lb" role="dialog" aria-label="Bild"><img alt=""></div>')
     out.append(_LB_JS)
-    out.append(f"<footer>Stand {_e(stamp)}. Die Summe ist eine Schätzung; die echten Preise stehen nach dem Einlegen in den Warenkorb fest. "
+    out.append(f"<footer>Stand {_e(stamp)}. Die Summe ist eine Schätzung; echte Preise stehen im Warenkorb fest. "
                "Nichts bestellt, Bezahlen ist dein Klick.</footer>")
     return _page(title, _DECIDE_CSS + "\n" + "\n".join(out))
