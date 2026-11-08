@@ -4,6 +4,9 @@ Nothing is published anywhere: the pages hold the user's cart and prices. The se
 local network, every URL carries a long random token (stored mode 600), and only the report folder is
 visible. Several MCP processes share one port: the first binds it, the others find it taken and reuse
 the same address (same folder, same token); `alive()` checks that the one answering is ours.
+
+Run it as its own service (`python reportserver.py`, unit file in deploy/) so the address keeps working
+when the MCP process restarts: a thread inside the MCP dies with it, and every reconnect killed the links.
 """
 from __future__ import annotations
 
@@ -19,6 +22,10 @@ from urllib.parse import unquote, urlsplit
 PORT = int(os.environ.get("ALIEXPRESS_REPORT_PORT", "8765"))
 BIND = os.environ.get("ALIEXPRESS_REPORT_BIND", "0.0.0.0")      # 127.0.0.1 = this machine only
 HOST = os.environ.get("ALIEXPRESS_REPORT_HOST", "")             # name or address the user's phone can reach
+# Same defaults as the MCP: the pages it writes and the token it hands out.
+REPORT_DIR = Path(os.environ.get("ALIEXPRESS_REPORT_DIR", "~/aliexpress-reports")).expanduser()
+TOKEN_FILE = Path(os.environ.get("ALIEXPRESS_CREDENTIALS", "~/.mcp-credentials/aliexpress.json")).expanduser().parent \
+    / "aliexpress-report-token"
 _started = False
 _lock = threading.Lock()
 
@@ -96,15 +103,19 @@ def _handler(directory: Path, tok: str):
     return H
 
 
+def server(directory: Path, token_file: Path, port: int | None = None) -> http.server.ThreadingHTTPServer:
+    directory.mkdir(parents=True, exist_ok=True)
+    return http.server.ThreadingHTTPServer((BIND, PORT if port is None else port), _handler(directory, token(token_file)))
+
+
 def start(directory: Path, token_file: Path) -> bool:
     """Start the server thread once per process; False when the port is taken (another process may serve it)."""
     global _started
     with _lock:
         if _started:
             return True
-        directory.mkdir(parents=True, exist_ok=True)
         try:
-            srv = http.server.ThreadingHTTPServer((BIND, PORT), _handler(directory, token(token_file)))
+            srv = server(directory, token_file)
         except OSError:
             return False
         threading.Thread(target=srv.serve_forever, daemon=True, name="report-server").start()
@@ -125,3 +136,11 @@ def alive(token_file: Path) -> bool:
 def url(name: str, token_file: Path) -> str:
     host = HOST or ("127.0.0.1" if BIND in ("127.0.0.1", "localhost") else socket.gethostname())
     return f"http://{host}:{PORT}/{token(token_file)}/{name}"
+
+
+if __name__ == "__main__":
+    # The service: serve the report folder in the foreground. A port still held by an MCP thread makes
+    # this exit; systemd starts it again a few seconds later and it takes over once that process is gone.
+    s = server(REPORT_DIR, TOKEN_FILE)
+    print(f"report server on {BIND}:{PORT}, folder {REPORT_DIR}", flush=True)
+    s.serve_forever()

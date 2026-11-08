@@ -2113,7 +2113,7 @@ def _fmt_plan(plan: dict) -> str:
 
 # The HTML pages view_cart and shop_list write. They are NOT published anywhere (they hold the
 # user's cart): a small web server inside the MCP serves them on the local network, fixed names.
-REPORT_DIR = Path(os.environ.get("ALIEXPRESS_REPORT_DIR", "~/aliexpress-reports")).expanduser()
+REPORT_DIR = reportserver.REPORT_DIR
 REPORT_TOKEN_FILE = CREDENTIALS_PATH.parent / "aliexpress-report-token"
 
 
