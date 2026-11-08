@@ -45,6 +45,11 @@ recommendation; the page does the rest. Adding to the cart happens after he pick
 `decide_cart` (the real cart, one compact row per line; Ja = checked, Nein = unchecked, Löschen = removed, quantity,
 multi-select with "N markiert: Ja / Nein / Löschen"). Do not describe a long order in prose and do not ask
 him in chat which lines to keep: send the page, then pass his message to `apply_selection`.
+Give the page as its server address (http://<host>:8765/<token>/<name>.html, plain text, no backticks): opened through
+the dashboard's port route it keeps his choices and shows "In den Korb", which runs `apply_selection` on the report
+server itself after a second tap and shows the result on the page; nothing comes to the chat then. What it did is
+appended to `applied.log` in the report folder: read it before you talk about the cart. "Chat" still sends the choice
+(with notes) to you as before.
 
 **The best deal is checked BEFORE the page is built, never after, and every candidate is verified by LOOKING at it.**
 `decide_cart` looks for every line from a global seller whether the same pieces are cheaper from a Choice offer (no own

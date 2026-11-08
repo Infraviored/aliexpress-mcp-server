@@ -579,6 +579,10 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .dbar .st { font-size: .72rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dbar .send { font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px; padding: 0 16px; height: 38px;
   background: var(--accent); color: var(--surface); }
+.dbar .send.cart { background: var(--fg); color: var(--surface); }
+.dbar .send.cart.sure { background: var(--warn); }
+.dbar .send:disabled { opacity: .6; }
+.dbar .main:has(#sb-cart:not([hidden])) #sb-send { background: var(--bg); color: var(--fg); border: 1px solid var(--line); padding: 0 10px; }
 .dbar .cp { width: 38px; height: 38px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); cursor: pointer; font: inherit; }
 .dbar textarea { width: 100%; min-height: 4.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
   font: .72rem var(--mono); padding: 6px 8px; box-sizing: border-box; }
@@ -624,6 +628,7 @@ _DECIDE_JS = r"""<script>
       var v = st(r), q = qty(r), cid = r.dataset.cart;
       cnt[v]++;
       if (v === "delete") dels.push(r.dataset.title.slice(0, 28));
+      if (r.dataset.done) return;   // already put into the cart from this page
       if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10) && !r.querySelector(".note-in").value.trim()) return;
       var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
       if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
@@ -634,8 +639,50 @@ _DECIDE_JS = r"""<script>
     var head = "Auswahl " + T + ": " + cnt.yes + " ja, " + cnt.no + " nein" + (cnt.maybe ? ", " + cnt.maybe + " vielleicht" : "") +
       (cnt["delete"] ? ", " + cnt["delete"] + " löschen (" + dels.slice(0, 5).join("; ") + (dels.length > 5 ? " ..." : "") + ")" : "") +
       " | Summe ca. " + f(total) + " (geschätzt)";
+    msg.n = items.length;
     return head + "\n```json\n" + JSON.stringify({ action: "select", report: NAME, items: items }) + "\n```";
   }
+  // "In den Korb": only where the page comes from the report server (it runs the selection itself).
+  var cartB = document.getElementById("sb-cart"), sure = 0;
+  try {
+    fetch("apply", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { if (j && j.ok) { cartB.hidden = false; send.textContent = "Chat"; } }, function () {});
+  } catch (e) {}
+  function rebase() {   // the cart now matches the page: the next run sends only new changes
+    rows.forEach(function (r) {
+      var v = st(r);
+      if (r.dataset.cart) { r.dataset.state0 = v; r.dataset.qty0 = String(qty(r)); }
+      else if (v === "yes") r.dataset.done = "1";
+    });
+  }
+  function poll(job) {
+    fetch("apply/" + job, { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.done) { setTimeout(function () { poll(job); }, 3000); return; }
+      box.value = j.result; box.hidden = false;
+      var bad = /NOT checked|NOT removed|failed|Failed|Fehler|Cannot|Bad /.test(j.result);
+      stEl.textContent = j.ok === false ? "Fehlgeschlagen, siehe Text." : bad ? "Ausgeführt, mit Fehlern: siehe Text." : "Im Warenkorb ✓";
+      cartB.disabled = false; cartB.textContent = "In den Korb";
+      if (j.ok !== false) rebase();
+    }, function () { setTimeout(function () { poll(job); }, 5000); });
+  }
+  cartB.addEventListener("click", function () {
+    var t = msg();
+    if (!msg.n) { stEl.textContent = "Nichts geändert gegenüber dem Warenkorb."; return; }
+    if (Date.now() - sure > 5000) {
+      sure = Date.now(); cartB.classList.add("sure"); cartB.textContent = "Wirklich? " + msg.n;
+      setTimeout(function () { if (Date.now() - sure >= 5000) { cartB.classList.remove("sure"); cartB.textContent = "In den Korb"; } }, 5100);
+      return;
+    }
+    sure = 0; cartB.classList.remove("sure"); cartB.disabled = true; cartB.textContent = "Läuft …";
+    stEl.textContent = msg.n + " Änderung(en) werden ausgeführt, das dauert etwa eine Minute pro 10 Zeilen.";
+    fetch("apply", { method: "POST", headers: { "Content-Type": "application/json", "X-Decide": "1" }, body: JSON.stringify({ text: t }) })
+      .then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+      .then(function (a) {
+        if (a[0] === 202) { poll(a[1].job); return; }
+        cartB.disabled = false; cartB.textContent = "In den Korb";
+        stEl.textContent = a[0] === 409 ? "Es läuft schon ein Durchgang, gleich nochmal." : "Abgelehnt: " + (a[1].error || a[0]);
+      }, function () { cartB.disabled = false; cartB.textContent = "In den Korb"; stEl.textContent = "Server nicht erreichbar."; });
+  });
   var box = document.getElementById("sb-text");
   send.addEventListener("click", function () {
     var t = msg(); box.value = t; box.hidden = false;
@@ -680,7 +727,7 @@ _DECIDE_JS = r"""<script>
     var tx = t.closest && t.closest(".tx");
     if (tx && !(t.closest && t.closest("a, input, button"))) tx.closest(".row").classList.toggle("open");
   });
-  document.addEventListener("input", function () { send.textContent = "Senden"; calc(); });
+  document.addEventListener("input", function () { send.textContent = cartB.hidden ? "Senden" : "Chat"; calc(); });
   function setSt(row, v) { var el = row.querySelector('input[value="' + v + '"]'); if (el) el.checked = true; }
   document.addEventListener("change", function (e) {
     var r = e.target.closest && e.target.closest(".row.dec");
@@ -780,7 +827,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                '<textarea id="sb-text" readonly hidden aria-label="Nachricht"></textarea>'
                '<div class="main"><div class="dsum"><span class="tot" id="sb-total"></span><span class="st" id="sb-state"></span></div>'
                '<button type="button" id="sb-copy" class="cp" aria-label="Kopieren">⧉</button>'
-               '<button type="button" id="sb-send" class="send">Senden</button></div></div></div>')
+               '<button type="button" id="sb-send" class="send">Senden</button>'
+               '<button type="button" id="sb-cart" class="send cart" hidden>In den Korb</button></div></div></div>')
     js = (_DECIDE_JS.replace("__NAME__", _json.dumps(name).replace("</", "<\\/"))
           .replace("__TH__", repr(float(choice_threshold))).replace("__CS__", repr(float(choice_ship))))
     out.append(js)
