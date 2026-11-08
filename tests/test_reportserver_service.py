@@ -12,7 +12,8 @@ def test_standalone_server_serves_pages_with_the_token(tmp_path):
     try:
         port = s.server_address[1]
         t = reportserver.token(tok)
-        assert urllib.request.urlopen(f"http://127.0.0.1:{port}/{t}/p.html", timeout=3).read() == b"hallo"
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/{t}/p.html", timeout=3)
+        assert resp.read() == b"hallo" and resp.headers["Content-Type"] == "text/html; charset=utf-8"
         assert urllib.request.urlopen(f"http://127.0.0.1:{port}/{t}/.ping", timeout=3).read() == b"ok"
     finally:
         s.shutdown()

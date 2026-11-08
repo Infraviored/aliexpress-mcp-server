@@ -64,6 +64,10 @@ def safe_file(directory: Path, rel: str) -> Path | None:
 
 def _handler(directory: Path, tok: str):
     class H(http.server.SimpleHTTPRequestHandler):
+        # Without a charset the browser reads the UTF-8 pages as Latin-1 ("Â·", "â‚¬", "LÃ¶schen").
+        extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map,
+                          ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8"}
+
         def __init__(self, *a, **k):
             super().__init__(*a, directory=str(directory), **k)
 
