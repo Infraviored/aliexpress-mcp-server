@@ -2182,6 +2182,80 @@ def _choice_alternative(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
     return alt
 
 
+def _merge_candidate(item_id: str, pieces: int, tag: dict, cache: dict) -> Optional[dict]:
+    """
+    The cheapest way to cover `pieces` pieces in ONE cart line of this product (via `cache`), or None.
+    Priced by `_ways_for`, the pricing the planner uses (pack ladder, shipping, store discounts, import charge, `match`/`avoid`).
+    """
+    key = f"merge:{item_id}:{pieces}:{tag.get('match', '')}:{tag.get('avoid', '')}"
+    hit = cache.get(key)
+    if hit:
+        return hit["alt"]
+    ways, _ = _ways_for(item_id, {"pieces": pieces, "match": tag.get("match", ""), "avoid": tag.get("avoid", "")}, 0.0)
+    ways = [w for w in ways if len(w["lines"]) == 1 and w["pieces"] >= pieces and w["lines"][0][1] > 0]
+    alt = None
+    if ways:
+        w = min(ways, key=lambda w: (w["net"], w["pieces"]))
+        (v, q), = w["lines"]
+        alt = {**_way_view(w), "sku_id": v["sku_id"], "qty": q, "cost": round(w["net"], 2), "pieces": w["pieces"]}
+    cache[key] = {"at": time.time(), "alt": alt}
+    return alt
+
+
+def _merge_split_lines(pairs: list[tuple[dict, dict]], cache: dict) -> list[dict]:
+    """
+    Cart lines of ONE need (same shopping list and the same item, query or need name before " (") that together are
+    cheaper as a single line of one of their products. One dict per group that is worth merging:
+    {lines, win (candidate), keep (cart line that already is the winner, or None), split, saving}.
+    """
+    parent: dict[int, int] = {}
+    def find(i: int) -> int:
+        while parent.setdefault(i, i) != i:
+            i = parent[i]
+        return i
+    keys = []
+    for ln, tag in pairs:
+        base = str(tag.get("need") or "").split(" (")[0].strip().lower()
+        keys.append((tag.get("list") or "", str(ln["item_id"]), str(tag.get("query") or "").strip().lower(), base))
+    for i, (ln, tag) in enumerate(pairs):
+        if not tag.get("need"):
+            continue
+        for j in range(i):
+            if not pairs[j][1].get("need") or keys[i][0] != keys[j][0]:
+                continue
+            same_item = keys[i][1] == keys[j][1]
+            if same_item and deals.base_name(ln.get("variant")) != deals.base_name(pairs[j][0].get("variant")):
+                continue   # another variant of the item is another article, not the same need
+            if same_item or (keys[i][2] and keys[i][2] == keys[j][2]) or (keys[i][3] and keys[i][3] == keys[j][3]):
+                parent[find(i)] = find(j)
+    members: dict[int, list[int]] = {}
+    for i in range(len(pairs)):
+        members.setdefault(find(i), []).append(i)
+    out = []
+    for idx in members.values():
+        if len(idx) < 2:
+            continue
+        lns = [pairs[i][0] for i in idx]
+        tag = next((pairs[i][1] for i in idx if pairs[i][1].get("match")), pairs[idx[0]][1])
+        total = sum(ln["qty"] * deals.pack_size(ln.get("variant")) for ln in lns)
+        split = sum(cartlib.goods(ln) + (ln.get("ship") or 0) + DUTY_PER_LINE for ln in lns)
+        best = None
+        for item_id in dict.fromkeys(str(ln["item_id"]) for ln in lns):
+            try:
+                cand = _merge_candidate(item_id, total, tag, cache)
+            except Exception as e:
+                logger.debug("merge candidate %s failed: %s", item_id, e)
+                cand = None
+            if cand and (best is None or cand["cost"] < best["cost"]):
+                best = cand
+        if not best or split - best["cost"] <= 0.005:
+            continue
+        keep = next((ln for ln in lns if str(ln["item_id"]) == str(best["item_id"]) and str(ln["sku_id"]) == str(best["sku_id"])), None)
+        out.append({"lines": lns, "win": best, "keep": keep, "split": round(split, 2), "saving": round(split - best["cost"], 2),
+                    "total": total, "need": str(tag.get("need") or lns[0]["title"][:40]).split(" (")[0].strip()})
+    return out
+
+
 def _date_in(days: Optional[int]) -> Optional[str]:
     return time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400 * days)) if days else None
 
@@ -4017,6 +4091,8 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
             item_id, sku_id = str(int(str(it["item_id"]))), str(int(str(it["sku_id"])))
             qty = max(1, min(99, int(it.get("qty") or 1)))
             cid = str(int(str(it["cart_id"]))) if it.get("cart_id") else ""
+            raw = it.get("replaces") or []
+            repl = [str(int(str(x).strip())) for x in (raw.split(",") if isinstance(raw, str) else raw) if str(x).strip()]
             qty0 = int(it.get("qty0") or qty)
         except (KeyError, ValueError, TypeError):
             return f"Bad item in the selection: {it!r}. Nothing was changed."
@@ -4026,18 +4102,18 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
             cart.append((cid, it["state"], qty, qty0))
         else:
             (yes if it.get("state") == "yes" else rest).append(
-                (item_id, sku_id, qty, str(it.get("category") or ""), str(int(str(it["replaces"]))) if it.get("replaces") else ""))
+                (item_id, sku_id, qty, str(it.get("category") or ""), repl))
     if not yes and not cart:
         return "Nothing chosen with Ja: nothing added."
     out = [_apply_cart_selection(cart, dry_run)] if cart else []
     for item_id, sku_id, qty, cat, repl in yes:
         if dry_run:
-            out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line {repl}" if repl else ""))
+            out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line(s) {', '.join(repl)}" if repl else ""))
             continue
         res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat)
         out.append(f"{item_id} / {sku_id} x{qty}: " + res)
         if repl:   # the offer replaces a line (a cheaper way to buy the same): drop the old line only when the new one is in
-            out.append(f"Replaced line {repl}: " + (remove_from_cart([repl]) if res.startswith("Added") else "NOT removed, the add failed"))
+            out.append(f"Replaced line(s) {', '.join(repl)}: " + (remove_from_cart(repl) if res.startswith("Added") else "NOT removed, the add failed"))
     left = [f"{i}/{s}" for i, s, _, _, _ in rest]
     return "\n".join(out + ([f"Not added (Vielleicht or Nein): {', '.join(left)}"] if left else []))
 
@@ -4096,8 +4172,16 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
     alt_cache = _alt_cache() if check_deals else {}
     approved = {str(x) for x in (approved_alternatives or [])}
     pending: list[tuple[dict, dict, dict, str]] = []   # (original card, alt, line, why not shown)
+    merge_notes: list[str] = []
     for heading, lines in groups.items():
         cards = []
+        merges: list[dict] = []
+        if check_deals and heading != "Kombi-Knaller-Korb":
+            try:
+                merges = _merge_split_lines([(ln, tag) for ln, tag in lines], alt_cache)
+            except Exception as e:
+                logger.debug("merging split lines failed: %s", e)
+        merged_of = {ln["cart_id"]: mg for mg in merges for ln in mg["lines"]}
         for ln, tag in lines:
             need = tag.get("need") or ln["title"][:40]
             op = (opinions or {}).get(ln["cart_id"]) or (opinions or {}).get(ln["item_id"]) or {}
@@ -4112,6 +4196,17 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
                           "tags": [x for x in (cartlib.GROUP_NAMES.get(ln.get("group"), ln.get("group")),
                                                f"{ln['delivery'][0]}…{ln['delivery'][1]}" if ln.get("delivery") else "") if x],
                           "text": ln["title"]})
+            mg = merged_of.get(ln["cart_id"])
+            if mg:
+                win, c0 = mg["win"], cards[-1]
+                c0["state0"] = c0["default"]
+                if mg["keep"] is ln:
+                    c0.update(qty=win["qty"], qty0=ln["qty"], default="yes", badge="Zusammengelegt",
+                              verdict=f"{win['qty']}× in einer Zeile statt {len(mg['lines'])} Zeilen: spart {report.eur(mg['saving'])}")
+                else:
+                    c0.update(default="delete" if mg["keep"] else "no",
+                              verdict=f"Zusammengelegt: ein Bedarf ({mg['total']} Stück) ist in einer Zeile günstiger, spart {report.eur(mg['saving'])}")
+                continue
             if global_line:
                 try:
                     alt = _choice_alternative(ln, tag, alt_cache)
@@ -4137,6 +4232,18 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
                                   "fit": "Variantenname mehrfach: Bild prüfen" if alt.get("ambiguous") else "",
                                   "image": alt.get("img") or "", "url": alt["url"], "tags": ["Alternative", "Choice"],
                                   "text": alt["title"]})
+        for mg in merges:
+            win, need = mg["win"], mg["need"]
+            old = " + ".join(f"{ln['qty']}× {ln.get('variant') or ln['title'][:30]}" for ln in mg["lines"])
+            if mg["keep"] is None:
+                cards.append({"title": f"{need} · {win['buy']}", "badge": "Zusammengelegt", "item_id": win["item_id"], "sku_id": win["sku_id"],
+                              "replaces": [ln["cart_id"] for ln in mg["lines"]], "price": round(win["cost"] / win["qty"], 2), "ship": 0,
+                              "choice": False, "duty": 0, "qty": win["qty"], "default": "yes",
+                              "verdict": f"{win['buy']} in einer Zeile für {report.eur(win['cost'])} statt {old} für {report.eur(mg['split'])}: spart {report.eur(mg['saving'])}",
+                              "image": win.get("img") or "", "url": win["url"], "tags": ["Zusammengelegt"], "text": win["title"]})
+            merge_notes.append(f"- {need}: {old} -> {win['buy']} in ONE line ({mg['total']} pieces needed), "
+                               f"{report.eur(mg['split'])} -> {report.eur(win['cost'])}, saves {report.eur(mg['saving'])}"
+                               + (f"; kept cart line {mg['keep']['cart_id']} (quantity change)" if mg["keep"] else "; new offer replaces the old lines"))
         cats.append({"heading": heading, "cards": cards})
     if alt_cache:
         private.write_json(ALT_CACHE_FILE, alt_cache)
@@ -4161,6 +4268,8 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
         todo.append(f"- {ln['cart_id']} {orig['title'][:40]}: candidate '{alt['title'][:50]}' ({alt['buy']}) for "
                     f"{report.eur(alt['cost'])} against {report.eur(cartlib.goods(ln) + (ln['ship'] or 0) + DUTY_PER_LINE)} now. "
                     + (f"Comparison picture, READ IT: {pic}" if pic else "No comparison picture: look at both offers yourself."))
+    if merge_notes:
+        msg += "\n\nMERGED LINES (one need split over several cart lines is cheaper as one line; already on the page, tell the user):\n" + "\n".join(merge_notes)
     if todo:
         msg += ("\n\nCHEAPER-WAY CANDIDATES, NOT ON THE PAGE YET. Read each comparison picture (original left, candidate right). "
                 "Only when it is the same product in the same variant and pack, call decide_cart again with "

@@ -632,7 +632,7 @@ _DECIDE_JS = r"""<script>
       if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10) && !r.querySelector(".note-in").value.trim()) return;
       var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
       if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
-      if (r.dataset.replaces) { if (v !== "yes") return; it.replaces = r.dataset.replaces; }
+      if (r.dataset.replaces) { if (v !== "yes") return; it.replaces = r.dataset.replaces.split(","); }
       var nt = r.querySelector('.note-in').value.trim(); if (nt) it.note = nt;
       items.push(it);
     });
@@ -732,8 +732,8 @@ _DECIDE_JS = r"""<script>
   document.addEventListener("change", function (e) {
     var r = e.target.closest && e.target.closest(".row.dec");
     if (!r || e.target.value !== "yes") return;
-    if (r.dataset.replaces) rows.forEach(function (o) { if (o.dataset.cart === r.dataset.replaces) setSt(o, "no"); });
-    else if (r.dataset.cart) rows.forEach(function (o) { if (o.dataset.replaces === r.dataset.cart) setSt(o, "no"); });
+    if (r.dataset.replaces) { var ids = r.dataset.replaces.split(","); rows.forEach(function (o) { if (ids.indexOf(o.dataset.cart) >= 0) setSt(o, "no"); }); }
+    else if (r.dataset.cart) rows.forEach(function (o) { if (o.dataset.replaces && o.dataset.replaces.split(",").indexOf(r.dataset.cart) >= 0) setSt(o, "no"); });
   });
   document.addEventListener("change", calc);
   calc();
@@ -775,7 +775,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
         order = ("yes", "maybe", "no", "delete")
         rows = []
         for ci, c in enumerate(sec["cards"]):
-            state = c.get("default") if c.get("default") in ("yes", "maybe", "no") else "no"
+            state = c.get("default") if c.get("default") in ("yes", "maybe", "no") or (cart_mode and c.get("default") == "delete") else "no"
             if cart_mode and state == "maybe":
                 state = "no"
             fit = c.get("fit")
@@ -804,11 +804,15 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             ship = float(c.get("ship") or 0)
             duty = float(c.get("duty") or 0)
             cart = f' data-cart="{_e(c["cart_id"])}"' if c.get("cart_id") else ""
-            cart += f' data-replaces="{_e(c["replaces"])}"' if c.get("replaces") else ""
+            repl = c.get("replaces")
+            repl = ",".join(str(x) for x in repl) if isinstance(repl, (list, tuple)) else str(repl or "")
+            cart += f' data-replaces="{_e(repl)}"' if repl else ""
+            # a page default that is itself a change (merged lines) starts from the cart's state
+            state0 = c.get("state0") if c.get("state0") in ("yes", "maybe", "no", "delete") else state
             rows.append(
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
-                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state}" data-qty0="{qty}">'
+                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-qty0="{int(c.get("qty0") or qty)}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
                 f'<div class="pr"><span>{eur(price)}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
