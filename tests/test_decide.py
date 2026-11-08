@@ -21,7 +21,7 @@ def test_page_has_a_row_with_choices_quantity_and_data():
     h = _page([_card(default="yes", fit="✓ Highland genannt")])
     assert 'class="row dec"' in h and 'data-price="20.39"' in h and 'data-sku="12000039323135462"' in h
     assert 'value="yes" checked' in h and 'type="number"' in h and "Highland genannt" in h
-    assert "claudevoice:send" in h and "Schätzung" in h
+    assert "claudevoice:send" in h
     assert "claudevoice:sent" in h                      # the dashboard confirms the send
     assert "__NAME__" not in h and "__TH__" not in h and "__CS__" not in h
 
@@ -84,9 +84,28 @@ def test_cart_mode_has_delete_and_no_maybe_and_compact_details():
     h = _page([_card(cart_id="30016210959867", default="yes", tags=["Choice"], text="langer Titel")])
     assert 'value="delete"' in h and 'value="maybe"' not in h
     assert 'data-cart="30016210959867"' in h and 'data-state0="yes"' in h and 'data-qty0="1"' in h
-    assert "<details><summary>Details</summary>" in h                     # chips and text only on tap
-    assert "alle Ja" in h and "alle Nein" in h
-    assert 'class="mk"' in h and 'data-bulk="delete"' in h and 'data-mark="1"' in h      # multi-select with bulk actions
+    assert 'class="more"' in h and "langer Titel" in h                    # chips and text only on tap (row.open)
+    assert 'class="thumb"' in h and 'data-bulk="delete"' in h and 'data-all="1"' in h   # tap picture = mark, bulk actions
+
+
+def test_row_shows_the_agents_opinion_rating_and_fit():
+    h = _page([_card(verdict="Passt, aber 2 m reichen evtl. nicht", rating="4,8★ 208", fit="✓ Highland genannt")])
+    assert 'class="vd"' in h and "Passt, aber 2 m reichen evtl. nicht" in h and "4,8★ 208" in h and 'class="ok"' in h
+    assert "<h1>" not in h and 'class="dbar"' in h                       # no page header, one slim bar at the bottom
+
+
+def test_decide_cart_passes_the_opinions_to_the_page(monkeypatch):
+    line = {"cart_id": "11", "item_id": "1", "sku_id": "2", "title": "Title", "variant": "", "price": 5.0, "qty": 1, "checked": True,
+            "valid": True, "ship": 0, "group": "global", "image": "", "delivery": None}
+    monkeypatch.setattr(m, "load_cookies", lambda: {"a": "b"})
+    monkeypatch.setattr(m, "_read_cart", lambda cookies, business="": {"lines": [line], "header": {}})
+    monkeypatch.setattr(m, "_combo_lines", lambda cookies, cart: [])
+    monkeypatch.setattr(m, "_line_store", lambda: {})
+    monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
+    written = {}
+    monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(page=page), "ok")[1])
+    m.decide_cart(opinions={"11": {"verdict": "Gute Wahl", "rating": "4,9★ 100"}})
+    assert "Gute Wahl" in written["page"] and "4,9★ 100" in written["page"]
 
 
 def test_offer_mode_keeps_maybe_and_delete():
