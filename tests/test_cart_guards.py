@@ -61,6 +61,36 @@ def test_internal_replacing_callers_force_the_add(monkeypatch):
     assert seen == [("9", True), ("7", False)]
 
 
+def test_feature_notes_flag_missing_match_and_avoided_words():
+    lines = [{"cart_id": "1", "title": "65W GaN Charger", "variant": "US Plug"},
+             {"cart_id": "2", "title": "65W GaN Charger", "variant": "EU Plug"},
+             {"cart_id": "3", "title": "USB cable", "variant": "1m"}]
+    tags = {"1": {"need": "Charger", "match": "EU", "avoid": "US, UK"}, "2": {"need": "Charger", "match": "eu", "avoid": "US, UK"},
+            "3": {"need": "Cable", "avoid": "us"}}
+    notes = m._feature_notes(lines, tags)
+    assert any("cart_id 1" in n and "MISSING REQUIRED: eu" in n for n in notes)
+    assert any("cart_id 1" in n and "HAS AVOIDED: us" in n for n in notes)
+    assert not any("cart_id 2" in n or "cart_id 3" in n for n in notes)      # "us" is not in "USB"
+
+
+def _offer(label, title="65W Charger"):
+    return {"title": title, "variants": [{"sku_id": "s", "label": label}]}
+
+
+def test_add_refuses_a_variant_without_match_word_or_with_avoided_word(monkeypatch):
+    tags = {"1": {"list": "L", "need": "Charger", "match": "EU", "avoid": "US, UK"}}
+    added = _world(monkeypatch, [], [], tags)
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: _offer("US Plug"))
+    out = m.add_to_cart("B", "s", 1, list_name="L", need="Charger")
+    assert out.startswith("WRONG VARIANT") and "MISSING REQUIRED: eu" in out and "HAS AVOIDED: us" in out and not added
+    m.add_to_cart("B", "s", 1, list_name="L", need="Charger", force=True)
+    assert added == [("B", "s", "")]
+    added.clear()
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: _offer("EU Plug"))
+    m.add_to_cart("B", "s", 1, list_name="L", need="Charger")
+    assert added == [("B", "s", "")]
+
+
 def test_duplicate_notes_name_items_in_several_lines_and_shared_needs():
     lines = [dict(_ln("1", "A"), cart="main", tab=""), dict(_ln("2", "A", "UK Plug"), cart="Kombi", tab="T"),
              dict(_ln("3", "B"), cart="main", tab=""), dict(_ln("4", "C"), cart="main", tab="")]

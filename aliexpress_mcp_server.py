@@ -3201,7 +3201,8 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
             ("I2S-Mikrofon"); it is the line's name on the overview page.
         query: Search words for an alternative.
         match: Words the alternative's variant or title must contain.
-        avoid: Words that rule an alternative out.
+        avoid: Words that rule an alternative out. view_cart warns when a line has one and add_to_cart
+            refuses such a variant. Words are split at spaces; use commas for phrases ("US plug, UK plug").
         optional: True for parts that are only "to compare" or nice to have;
             the overview offers to drop them.
     """
@@ -3720,6 +3721,8 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
     notes = _duplicate_notes([dict(ln, cart="main", tab="") for ln in c["lines"]]
                              + [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in combo_lines or []], tags)
     warn = ["## Possible duplicates (check before ordering)\n" + "\n".join("- " + n for n in notes)] if notes else []
+    feat = _feature_notes([dict(ln, cart="main") for ln in c["lines"]] + [dict(ln, cart="Kombi") for ln in combo_lines or []], tags)
+    warn += ["## Required features (match / avoid words of the list tags)\n" + "\n".join("- " + n for n in feat)] if feat else []
     return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined)] + warn + [
                          page, "## Details (for you)\n" + text, _combo_text(cookies, c, combo_lines)] + previews).replace("\n\n\n\n", "\n\n")
 
@@ -3900,6 +3903,58 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
     return cid
 
 
+def _tag_terms(text: str) -> list[str]:
+    """Terms of a match/avoid tag: comma-separated phrases ("US plug, UK plug"), else single words."""
+    t = (text or "").strip()
+    return [x.strip().lower() for x in t.split(",") if x.strip()] if "," in t else _words(t)
+
+
+def _has_term(text: str, term: str) -> bool:
+    """Case-insensitive, on word edges: "us" is not in "USB", "eu" not in "Europe"."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])", (text or "").lower()) is not None
+
+
+def _feature_problems(tag_list: list[dict], text: str) -> tuple[list[str], list[str]]:
+    """(match words missing from `text`, avoid words found in it) over the match/avoid tags of one need."""
+    missing, avoided = [], []
+    for t in tag_list:
+        missing += [w for w in _tag_terms(t.get("match", "")) if not _has_term(text, w) and w not in missing]
+        avoided += [w for w in _tag_terms(t.get("avoid", "")) if _has_term(text, w) and w not in avoided]
+    return missing, avoided
+
+
+def _feature_notes(lines: list[dict], tags: dict) -> list[str]:
+    """view_cart warnings: a line whose title+variant lacks a required (match) word or has an avoided word."""
+    out = []
+    for ln in lines:
+        t = tags.get(str(ln["cart_id"])) or {}
+        missing, avoided = _feature_problems([t], f"{ln['title']} {ln['variant']}")
+        label = f"{t.get('need') or ln['title'][:40]} ({ln['variant'] or 'no variant'}, cart_id {ln['cart_id']})"
+        out += [f"{label}: MISSING REQUIRED: {w}" for w in missing] + [f"{label}: HAS AVOIDED: {w}" for w in avoided]
+    return out
+
+
+def _add_feature_check(item_id: str, sku_id: str, need: str, list_name: str, tags: dict) -> str:
+    """Refusal text when the chosen variant lacks a match word or has an avoid word of the need's tags ("" when fine or unknowable)."""
+    want = (need or "").strip().lower()
+    if not want:
+        return ""
+    group = [t for t in tags.values() if (t.get("need") or "").strip().lower() == want
+             and (not list_name or t.get("list") == list_name.strip())]
+    if not any(t.get("match") or t.get("avoid") for t in group):
+        return ""
+    offer = _pdp_offer(str(item_id))
+    var = next((v for v in (offer or {}).get("variants", []) if str(v["sku_id"]) == str(sku_id)), None)
+    if not offer or not var:
+        return ""
+    missing, avoided = _feature_problems(group, f"{offer['title']} {var['label']}")
+    if not (missing or avoided):
+        return ""
+    return ("WRONG VARIANT, nothing added: '" + var["label"] + "' for need '" + need + "': "
+            + "; ".join([f"MISSING REQUIRED: {w}" for w in missing] + [f"HAS AVOIDED: {w}" for w in avoided])
+            + ". Pick another variant (get_product_variants / get_variant_images), or force=True if it is right anyway.")
+
+
 def _cart_inventory(cookies: dict[str, str]) -> list[dict]:
     """Every line of the main and the Kombi-Knaller cart (copies), marked with `cart` ("main"/"Kombi") and `tab`. Raises when a cart cannot be read."""
     c = _read_cart(cookies)
@@ -3953,7 +4008,9 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
     Every cart line pays an import charge: prefer a bigger pack in one line.
     Both carts are read first: when the item is already in either of them (any
     variant) or another line has the same `need`, nothing is added and the
-    result starts with "ALREADY IN CART" (force=True adds anyway).
+    result starts with "ALREADY IN CART" (force=True adds anyway). A variant
+    that lacks a `match` word or has an `avoid` word of the need's list tags
+    (set_cart_list) is refused too ("WRONG VARIANT").
 
     Args:
         item_id: AliExpress item ID.
@@ -3987,6 +4044,12 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
                     + "\n".join("- " + _inv_line_text(ln, tags) for ln in have)
                     + "\nTo proceed: raise the quantity of the existing line (update_cart_quantity), or remove the wrong line "
                       "(remove_from_cart) and add again, or add anyway with force=True if a second line is really wanted.")
+        try:
+            bad = _add_feature_check(item_id, sku_id, need, list_name, tags)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        if bad:
+            return bad
     try:
         cid = _cart_add(cookies, item_id, sku_id, quantity, business=COMBO if combo else "")
     except Exception as e:
