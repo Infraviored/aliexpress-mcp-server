@@ -55,6 +55,52 @@ def test_swap_photos_fall_back_to_urls_then_to_the_product_link(monkeypatch):
     assert "no photo found" in out and "/item/77.html" in out
 
 
+def test_freight_quote_is_asked_once_per_item_and_sku(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m.deals, "freight_quote", lambda *a, **k: (calls.append(a[1]), {"A": 1.0, "B": 0.5})[1])
+    offer = {"item_id": "7", "url": "u", "choice": False, "delivery_ext": None}
+    assert m._freight(offer, "s1") == {"A": 1.0, "B": 0.5} and m._freight(offer, "s1") == {"A": 1.0, "B": 0.5}
+    m._freight(offer, "s2")
+    assert calls == ["7", "7"]                                   # s1 once, s2 once
+    monkeypatch.setattr(m.deals, "freight_quote", lambda *a, **k: None)
+    assert m._freight(dict(offer, item_id="8"), "s") is None     # a failed quote is not remembered
+    assert ("8", "s", m.COUNTRY, m.CURRENCY) not in m._FREIGHT_CACHE
+
+
+def test_price_hits_does_not_sleep_in_a_background_job(monkeypatch):
+    slept = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(m, "_ways_for", lambda i, spec, d: ([_way(1, 5.0)], []))
+    monkeypatch.setattr(m, "_PDP_CACHE", {})
+    hits = [{"item_id": "1", "title": "x"}]
+    m._CALL.background = False
+    m._price_hits(hits, 1, "", "", 3, False)
+    assert slept == [0.5]
+    slept.clear()
+    m._CALL.background = True
+    try:
+        m._price_hits(hits, 1, "", "", 3, False)
+    finally:
+        m._CALL.background = False
+    assert slept == []
+
+
+def test_kombi_check_prices_nothing_more_after_a_search_without_kombi_hit(monkeypatch):
+    tags = {"3": {"list": "L", "need": "none", "match": "w"}}
+    _world(monkeypatch, tags)
+    monkeypatch.setattr(m, "_price_hits", lambda *a: (_ for _ in ()).throw(AssertionError("priced")))
+    monkeypatch.setattr(m, "_current_way", lambda *a: (_ for _ in ()).throw(AssertionError("priced")))
+    out = m._kombi_run("L", 6, 12, 0, lambda *a: None)
+    assert "none (3)" in out and "no Kombi-Knaller offer" in out
+
+
+def test_kombi_check_does_not_price_the_line_when_no_hit_could_be_priced(monkeypatch):
+    _world(monkeypatch, {"1": {"list": "L", "need": "a", "match": "w"}})
+    monkeypatch.setattr(m, "_price_hits", lambda *a: ([], 1, []))
+    monkeypatch.setattr(m, "_current_way", lambda *a: (_ for _ in ()).throw(AssertionError("priced")))
+    assert "could not be priced" in m._kombi_run("L", 6, 12, 0, lambda *a: None)
+
+
 def test_kombi_check_without_match_words_is_unsure(monkeypatch):
     _world(monkeypatch, {"1": {"list": "L", "need": "a"}})
     out = m._kombi_run("L", 6, 12, 0, lambda *a: None)

@@ -768,8 +768,8 @@ def _price_hits(products: list[dict], pieces: int, match: str, avoid: str, rank_
         except Exception as e:
             logger.debug("ranking %s failed: %s", h["item_id"], e)
             continue
-        if not cached:
-            time.sleep(0.5)
+        if not cached and not getattr(_CALL, "background", False):
+            time.sleep(0.5)      # a background job already waits for the pacing gap before every call
         notes += n[:1] if not ways else []
         if ways:
             rows.append((ways[0], h))
@@ -899,12 +899,12 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
 
 
 # Product pages repeat within one deal search (variants, pictures, best_offer).
-PDP_TTL = 600
+PDP_TTL = 3600     # a long job (kombi_check of 17 lines runs ~10 min) must not fetch the same page twice
 _PDP_CACHE: dict[str, tuple[float, dict]] = {}
 # Also on disk, so a new server process (or a direct script run) does not fetch the same
 # product pages again: fewer calls, fewer bot checks. Prices change slowly enough for hours.
 PDP_DISK_TTL = float(os.environ.get("ALIEXPRESS_PDP_DISK_TTL", "10800"))
-PDP_DISK_MAX = 40
+PDP_DISK_MAX = 200
 _PDP_FILE = CREDENTIALS_PATH.parent / "aliexpress-pdp-cache.json"
 
 
@@ -1403,18 +1403,31 @@ def _collected_coupons() -> set[str]:
     return set(_coupon_stamps())
 
 
+# A freight quote is two paced calls (qty 1 and 2). Prices of the same item come up again and again within one job
+# (the line itself, the hits of the next line, the recheck): remember the quote for as long as the product page.
+FREIGHT_TTL = PDP_TTL
+_FREIGHT_CACHE: dict[tuple, tuple[float, Optional[dict]]] = {}
+
+
 def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
     """Shipping as A + B·(qty-1) for a non-Choice offer (None for Choice)."""
     if offer.get("choice"):
         return None
+    key = (str(offer["item_id"]), str(sku_id or ""), COUNTRY, CURRENCY)
+    hit = _FREIGHT_CACHE.get(key)
+    if hit and time.time() - hit[0] < FREIGHT_TTL:
+        return dict(hit[1])
     try:
-        return deals.freight_quote(
+        quote = deals.freight_quote(
             mtop_call, offer["item_id"], COUNTRY, CURRENCY, offer.get("delivery_ext"),
             offer["url"], sku_id=sku_id,
         )
     except Exception as e:
         logger.debug("freight quote %s failed: %s", offer["item_id"], e)
         return None
+    if quote:                       # a failed quote may be a bot check: ask again next time
+        _FREIGHT_CACHE[key] = (time.time(), dict(quote))
+    return quote
 
 
 def _words(text: str) -> list[str]:
@@ -3409,13 +3422,13 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
                 none.append(f"- {name} ({ln['cart_id']}): no Kombi-Knaller offer in the hits of '{query}'")
                 continue
             rows, _, _ = _price_hits(hits, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False)
-            cur = _current_way(ln, pieces)
+            rows = [(w, h) for w, h in rows if w["pieces"] >= pieces]
+            cur = _current_way(ln, pieces) if rows else None      # nothing to compare with: do not price the line itself
         except PermissionError:
             return AUTH_EXPIRED_MSG
         except Exception as e:
             failed.append(f"{name} ({ln['cart_id']}): {e}")
             continue
-        rows = [(w, h) for w, h in rows if w["pieces"] >= pieces]
         if not cur or not rows:
             failed.append(f"{name} ({ln['cart_id']}): Kombi offers or the line could not be priced")
             continue
@@ -3472,7 +3485,7 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
 
 
 @tool(slow=True)
-def kombi_check(list_name: str = "", rank_top: int = 6, max_lines: int = 12, skip: int = 0, job_id: str = "") -> str:
+def kombi_check(list_name: str = "", rank_top: int = 4, max_lines: int = 12, skip: int = 0, job_id: str = "") -> str:
     """
     Where would the Kombi-Knaller (Bundle Deals) be cheaper? For each cart line of
     a shopping list: searches its need, takes only the hits flagged Kombi, prices them
@@ -3487,7 +3500,7 @@ def kombi_check(list_name: str = "", rank_top: int = 6, max_lines: int = 12, ski
 
     Args:
         list_name: only lines of this shopping list (empty: all listed lines).
-        rank_top: Kombi hits priced per line (max 25).
+        rank_top: Kombi hits priced per line (max 25; each one costs 1 to 3 paced AliExpress calls).
         max_lines: lines per call; continue with skip.
         skip: lines to skip first.
         job_id: pick up a running or finished check.
