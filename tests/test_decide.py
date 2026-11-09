@@ -244,3 +244,15 @@ def test_page_sends_every_cart_line():
     h = _page([_card()])
     assert "v === r.dataset.state0" not in h     # no skipping of lines unchanged against the page's own state
     assert "it.title" in h
+
+
+
+def test_kombi_lines_are_named_by_their_tab():
+    import cart as c
+    states = [{"data": {"x": {"cartLinesInfo": [{"hsCode": "8536909500", "itemId": "1", "skuId": 2}]}}}]
+    hs = {}
+    c._hs_codes(states, hs)
+    assert hs == {("1", "2"): "8536909500"}
+    assert c.tab_name("8536909500") == "Verbinder"
+    lines = [{"hs": "8536909500", "qty": 5}, {"hs": "8536508000", "qty": 4}, {"qty": 1}]
+    assert list(m._combo_tabs(lines)) == ["Verbinder", "Schalter", "Kategorie unbekannt"]
