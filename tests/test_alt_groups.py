@@ -46,3 +46,9 @@ def test_merge_offer_groups_all_replaced_lines():
 def test_no_group_without_replacement():
     p = page([card(cart_id="1"), card(cart_id="2", item_id="3")])
     assert 'class="grp"' not in p
+
+
+def test_rows_carry_their_delivery_date_and_the_bar_shows_the_last_one():
+    p = page([card(cart_id="1", until="2026-11-24T00:00"), card(cart_id="2", item_id="3")])
+    assert 'data-until="2026-11-24"' in p and p.count("data-until=") == 1
+    assert 'id="sb-dl"' in p and "Lieferung bis " in p
