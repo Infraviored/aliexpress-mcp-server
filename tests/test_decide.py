@@ -126,7 +126,7 @@ def test_decide_cart_offers_the_choice_alternative_of_a_global_line(monkeypatch)
     assert 'data-replaces="11"' not in written["page"] and "NOT ON THE PAGE YET" in out and "11 " in out   # not approved: held back
     out = m.decide_cart(approved_alternatives=["11"])
     p = written["page"]
-    assert 'data-replaces="11"' in p and 'data-item="99"' in p and 'class="pill">Günstiger' in p and "spart" in p
+    assert 'data-replaces="11"' in p and 'data-item="99"' in p and 'class="pill save">spart' in p and "spart" in p
     assert "NOT ON THE PAGE YET" not in out
 
 
