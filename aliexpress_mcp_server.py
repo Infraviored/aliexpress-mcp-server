@@ -3307,7 +3307,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
             # Without match words nothing says the offer is the same article (a 120 W charging station is no 30 W PSU).
             w, h = best
             unsure.append(f"- {name} (cart_id {ln['cart_id']}): cheapest hit {h['title'][:70]} ({h['item_id']}) would be {gain:.2f} "
-                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked")
+                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked\n"
+                          + _swap_photos(ln, h, w["lines"][0][0]["sku_id"]))
         elif best:
             w, h = best
             swaps.append((gain, f"- {name} x{pieces} (cart_id {ln['cart_id']}): now {cur['net']:.2f} net -> {w['net']:.2f} net, "
@@ -3315,7 +3316,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
                                 + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
                                 + f"\n  {_way_text(w)}\n  do: item {h['item_id']} "
                                 + ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])
-                                + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}"))
+                                + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}\n"
+                                + _swap_photos(ln, h, w["lines"][0][0]["sku_id"])))
         elif cur and not rows:
             failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced (bot check or no hit with the match words)"
                           f" - search by hand; the line itself costs {cur['net']:.2f} net")
@@ -3352,6 +3354,32 @@ def _kombi_orders(picks: list[dict], limit: int) -> list[list[dict]]:
         small = orders.pop(0)
         orders[0] += small
     return orders
+
+
+def _swap_photos(ln: dict, cand: dict, sku_id: str = "") -> str:
+    """Text for a swap proposal: the comparison picture (cart line left, candidate right) and the candidate's main photo URL.
+    A proposal never goes out without a way to look at the candidate: picture, else URLs, else the product link."""
+    item_id = str(cand.get("item_id") or "")
+    url = f"{BASE_URL}/item/{item_id}.html"
+    try:
+        offer = _pdp_offer(item_id) or {}       # cached: the candidate was just priced
+    except PermissionError:
+        raise
+    except Exception as e:
+        logger.debug("photos of %s: %s", item_id, e)
+        offer = {}
+    photos = [u for u in [*(offer.get("images") or []), offer.get("image")] if u]
+    var_img = next((v.get("image") for v in offer.get("variants", []) if sku_id and str(v.get("sku_id")) == str(sku_id) and v.get("image")), "")
+    main = photos[0] if photos else var_img
+    mine = ln.get("image") or ""
+    pic = None
+    if main and mine:
+        pic = _compare_image(f"swap-{ln['cart_id']}", _report_image({"image": mine}), _report_image({"image": main}))
+    urls = ((f"candidate photo: {'https:' + main if main.startswith('//') else main}" if main else "")
+            + (f"; cart line photo: {'https:' + mine if mine.startswith('//') else mine}" if mine else ""))
+    if pic:
+        return f"  Comparison picture, READ IT (cart line left, candidate right): {pic}" + (f"\n  ({urls})" if urls else "")
+    return "  No comparison picture; " + (urls + f"; product page {url}" if urls else f"no photo found, open {url} and look before judging")
 
 
 def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
@@ -3398,13 +3426,16 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
         gain = cur["net"] - kombi_net
         entry = {"name": name, "cart_id": ln["cart_id"], "pieces": w["pieces"], "gain": gain, "kombi_net": kombi_net,
                  "now": cur["net"], "item_id": h["item_id"], "title": h["title"][:70], "way": w,
-                 "do": ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])}
+                 "do": ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"]),
+                 "photos": ""}
         if gain <= 0.004:
             none.append(f"- {name} ({ln['cart_id']}): Kombi is not cheaper ({kombi_net:.2f} vs {cur['net']:.2f} net)")
         elif not t.get("match"):
             unsure.append(f"- {name} ({ln['cart_id']}): Kombi {h['title'][:60]} ({h['item_id']}) would save {gain:.2f} - UNVERIFIED, "
-                          "no match words on this line; check that it is the same article first")
+                          "no match words on this line; check that it is the same article first\n"
+                          + _swap_photos(ln, h, w["lines"][0][0]["sku_id"]))
         else:
+            entry["photos"] = _swap_photos(ln, h, w["lines"][0][0]["sku_id"])
             moves.append(entry)
     out = [f"Kombi-Knaller check of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, discounts; Kombi without "
            "import charge, which needs 3+ Kombi pieces in the order):"]
@@ -3414,7 +3445,7 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
         for m_ in sorted(moves, key=lambda x: -x["gain"]):
             out.append(f"- {m_['name']} x{m_['pieces']} (cart_id {m_['cart_id']}): now {m_['now']:.2f} -> Kombi {m_['kombi_net']:.2f}, "
                        f"SAVES {m_['gain']:.2f}\n  {m_['title']}\n  do: add_to_cart item {m_['item_id']} {m_['do']} combo=True, "
-                       f"then remove_from_cart {m_['cart_id']}")
+                       f"then remove_from_cart {m_['cart_id']}\n{m_['photos']}")
         limit = COMBO_MAX_LINES or 10
         orders = _kombi_orders(moves, limit) if pcs >= COMBO_MIN_PIECES else []
         if not orders:

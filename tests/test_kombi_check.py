@@ -8,7 +8,7 @@ def _way(pieces, net, combo=True, free=False, duty_back=3.57):
 
 
 def _line(cid, item, qty=3):
-    return {"cart_id": cid, "item_id": item, "sku_id": "s", "qty": qty, "variant": "1PCS", "title": f"title {item}"}
+    return {"cart_id": cid, "item_id": item, "sku_id": "s", "qty": qty, "variant": "1PCS", "title": f"title {item}", "image": "//img/mine.jpg"}
 
 
 def _world(monkeypatch, tags):
@@ -19,6 +19,7 @@ def _world(monkeypatch, tags):
     monkeypatch.setattr(m, "_search", lambda q, *a, **k: [{"item_id": "K" + q, "title": f"kombi {q}", "combo": q != "none"}])
     monkeypatch.setattr(m, "_price_hits", lambda hits, p, ma, av, rt, co: ([(_way(p, 10.0), hits[0])], 1, []))
     monkeypatch.setattr(m, "_current_way", lambda ln, p: {"net": {"A": 20.0, "B": 10.5, "C": 5.0}[ln["item_id"]], "pieces": p})
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: None)      # never the live product page
 
 
 def test_kombi_check_lists_wins_without_import_charge_and_orders(monkeypatch):
@@ -29,6 +30,29 @@ def test_kombi_check_lists_wins_without_import_charge_and_orders(monkeypatch):
     assert "KOMBI IS CHEAPER for 2 line(s)" in out            # A: 20.00 -> 10.00 - 3.57 = 6.43 (not free yet: duty taken off)
     assert "a x3 (cart_id 1)" in out and "combo=True" in out and "remove_from_cart 1" in out
     assert "Order 1:" in out and "none (3)" in out             # C has no Kombi hit
+
+
+def test_kombi_proposals_always_carry_photos(monkeypatch):
+    tags = {"1": {"list": "L", "need": "a", "match": "w"}, "2": {"list": "L", "need": "b"}}
+    _world(monkeypatch, tags)
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: {"images": ["//img/main.jpg"], "image": "//img/main.jpg", "variants": []})
+    monkeypatch.setattr(m, "_report_image", lambda card: "data:image/png;base64,xx")
+    monkeypatch.setattr(m, "_compare_image", lambda cid, a, b: f"/r/vergleich-{cid}.png")
+    out = m._kombi_run("L", 6, 12, 0, lambda *a: None)
+    assert "Comparison picture, READ IT" in out and "/r/vergleich-swap-1.png" in out and "/r/vergleich-swap-2.png" in out
+    unsure = out.split("UNSURE")[1]
+    assert "UNVERIFIED" in unsure and "vergleich-swap-2.png" in unsure          # no bare UNVERIFIED
+
+
+def test_swap_photos_fall_back_to_urls_then_to_the_product_link(monkeypatch):
+    ln = {"cart_id": "9", "image": "//img/mine.jpg"}
+    monkeypatch.setattr(m, "_report_image", lambda card: None)
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: {"images": ["//img/main.jpg"], "variants": []})
+    out = m._swap_photos(ln, {"item_id": "77"})
+    assert "No comparison picture" in out and "https://img/main.jpg" in out and "/item/77.html" in out
+    monkeypatch.setattr(m, "_pdp_offer", lambda i: None)
+    out = m._swap_photos({"cart_id": "9"}, {"item_id": "77"})
+    assert "no photo found" in out and "/item/77.html" in out
 
 
 def test_kombi_check_without_match_words_is_unsure(monkeypatch):
