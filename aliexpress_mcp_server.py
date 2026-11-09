@@ -4072,16 +4072,70 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
     return _write_report(f"{safe}.html", page)
 
 
-def _apply_cart_selection(cart: list[tuple[str, str, int, int]], dry_run: bool) -> str:
-    """Lines already in the cart: delete = remove, yes = check for checkout, no/maybe = uncheck, quantity changes."""
-    dele = [c for c, st, _, _ in cart if st == "delete"]
-    keep = [(c, st, q, q0) for c, st, q, q0 in cart if st != "delete"]
-    on = [c for c, st, _, _ in keep if st == "yes"]
-    off = [c for c, st, _, _ in keep if st != "yes"]
-    qty = [(c, q) for c, _, q, q0 in keep if q != q0]
+def _live_lines() -> Optional[dict[str, dict]]:
+    """Every line of the main and the Kombi-Knaller cart as it is now, by cart_id (with "combo": True for the latter)."""
+    cookies = load_cookies()
+    if not cookies:
+        return None
+    c = _read_cart(cookies)
+    out = {ln["cart_id"]: {**ln, "combo": False} for ln in c["lines"]}
+    out.update({ln["cart_id"]: {**ln, "combo": True} for ln in (_combo_lines(cookies, c) or [])})
+    return out
+
+
+def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
+    """Lines the page showed as in the cart, matched against the cart as it is NOW: delete = remove, yes = check,
+    no/maybe = uncheck, quantity changes. A Ja line that is gone from the cart is added again; one AliExpress marks
+    unavailable is named. Every Ja line is checked; the checkout links per list hold every Ja line of the main cart.
+    Starts with a German summary line ("Ergebnis: ...")."""
+    head: list[str] = []
+    try:
+        live = _live_lines() if not dry_run else None
+    except Exception as e:
+        live = None
+        head.append(f"Warenkorb nicht lesbar ({e}), Abgleich übersprungen.")
+    gone, dead, readd = [], [], []
+    if live is not None:
+        rows = []
+        for c, st, q, q0, item_id, sku_id, cat, combo, title in cart:
+            ln = live.get(c)
+            if ln is None:
+                if st == "yes":
+                    readd.append((item_id, sku_id, q, cat, combo, title))
+                else:
+                    gone.append(title)
+                continue
+            if st == "yes" and not ln.get("valid", True):
+                dead.append(title)
+            rows.append((c, st, q, q0, item_id, sku_id, cat, ln["combo"], title))
+        cart = rows
+    dele = [x[0] for x in cart if x[1] == "delete"]
+    keep = [x for x in cart if x[1] != "delete"]
+    on_all = [x for x in keep if x[1] == "yes"]
+    main_on = [x for x in on_all if not x[7]]
+    on = [x[0] for x in on_all]
+    off = [x[0] for x in keep if x[1] != "yes"]
+    qty = [(x[0], x[2]) for x in keep if x[2] != x[3]]
     if dry_run:
         return (f"WOULD DELETE {len(dele)}, CHECK {len(on)}, UNCHECK {len(off)}, CHANGE QUANTITY of {len(qty)} cart line(s)")
     out = []
+    for item_id, sku_id, q, cat, combo, title in readd:
+        res = add_to_cart(item_id, sku_id, q, need=cat, combo=combo)
+        ok = res.startswith("Added")
+        head.append(f"{title}: war nicht mehr im Korb, " + ("neu hinzugefügt." if ok else "neu hinzufügen ging nicht (nicht lieferbar?)."))
+        out.append(f"Re-add {item_id} / {sku_id} x{q}: {res}")
+    for t in dead:
+        head.append(f"{t}: nicht lieferbar (AliExpress hat die Zeile gesperrt).")
+    for t in gone:
+        head.append(f"{t}: ist schon nicht mehr im Korb.")
+    if main_on:
+        by_cat: dict[str, list[str]] = {}
+        for x in main_on:
+            by_cat.setdefault(x[6] or "Hauptkorb", []).append(x[0])
+        for cat, ids in by_cat.items():
+            head.append(f"Kassen-Link {cat} ({len(ids)} Zeilen): {cartlib.checkout_url(ids)}")
+    if any(x[7] for x in on_all):
+        head.append("Kombi-Knaller-Korb: wird auf seiner eigenen Aktionsseite bestellt.")
     if dele:
         out.append("Deleted: " + remove_from_cart(dele).split("\n")[0])
     for c, q in qty:
@@ -4092,8 +4146,13 @@ def _apply_cart_selection(cart: list[tuple[str, str, int, int]], dry_run: bool) 
     if off:
         out.append("Unchecked: " + report(select_cart_items(off, only=False, selected=False)))
     if on:
-        out.append("Checked: " + report(select_cart_items(on, only=False, selected=True)))
-    return "\n".join(out) or "No change in the cart lines."
+        res = select_cart_items(on, only=False, selected=True)
+        out.append("Checked: " + report(res))
+        if "NOT checked" in res or "Failed" in res:
+            head.append("Nicht alles ließ sich anhaken (siehe Einzelheiten unten); die Kassen-Links enthalten trotzdem alle Ja-Zeilen.")
+    bad = any(h for h in head if "nicht lieferbar" in h or "ging nicht" in h or "Nicht alles" in h or "nicht lesbar" in h)
+    summary = ("Ergebnis: im Warenkorb, mit Hinweisen." if bad else "Ergebnis: alles im Warenkorb, wie ausgewählt.")
+    return "\n".join([summary] + head + ["", "Einzelheiten:"] + out)
 
 
 def _parse_selection(text: str) -> dict:
@@ -4138,7 +4197,8 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         if it.get("state") not in ("yes", "maybe", "no", "delete"):
             return f"Bad state in the selection: {it!r}. Nothing was changed."
         if cid:
-            cart.append((cid, it["state"], qty, qty0))
+            cart.append((cid, it["state"], qty, qty0, item_id, sku_id, str(it.get("category") or ""),
+                         bool(it.get("combo")), str(it.get("title") or f"{item_id}/{sku_id}")[:60]))
         else:
             (yes if it.get("state") == "yes" else rest).append(
                 (item_id, sku_id, qty, str(it.get("category") or ""), repl, bool(it.get("combo"))))

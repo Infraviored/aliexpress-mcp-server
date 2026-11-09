@@ -712,11 +712,11 @@ _DECIDE_JS = r"""<script>
       cnt[v]++;
       if (v === "delete") dels.push(r.dataset.title.slice(0, 28));
       if (r.dataset.done) return;   // already put into the cart from this page
-      if (cid && v === r.dataset.state0 && q === parseInt(r.dataset.qty0, 10) && !r.querySelector(".note-in").value.trim()) return;
       var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
       if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
       if (r.dataset.replaces) { if (v !== "yes") return; it.replaces = r.dataset.replaces.split(","); }
-      if (r.dataset.combo) it.combo = true;
+      if (r.dataset.combo || r.closest("section").dataset.cat === "Kombi-Knaller-Korb") it.combo = true;
+      it.title = r.dataset.title.slice(0, 60);
       var nt = r.querySelector('.note-in').value.trim(); if (nt) it.note = nt;
       items.push(it);
     });
@@ -755,8 +755,8 @@ _DECIDE_JS = r"""<script>
     fetch("apply/" + job, { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
       if (!j.done) { setTimeout(function () { poll(job); }, 3000); return; }
       box.value = j.result; box.hidden = false;
-      var bad = /NOT checked|NOT removed|failed|Failed|Fehler|Cannot|Bad /.test(j.result);
-      stEl.textContent = j.ok === false ? "Fehlgeschlagen, siehe Text." : bad ? "Ausgeführt, mit Fehlern: siehe Text." : "Im Warenkorb ✓";
+      var first = (j.result || "").split("\n")[0], bad = /NOT checked|NOT removed|failed|Failed|Fehler|Cannot|Bad |Hinweisen/.test(j.result);
+      stEl.textContent = j.ok === false ? "Fehlgeschlagen, siehe Text." : /^Ergebnis:/.test(first) ? first.replace("Ergebnis: ", "") + (bad ? " Siehe Text." : " ✓") : bad ? "Ausgeführt, mit Fehlern: siehe Text." : "Im Warenkorb ✓";
       cartB.disabled = false; cartB.textContent = "In den Korb";
       if (j.ok !== false) rebase();
     }, function () { setTimeout(function () { poll(job); }, 5000); });

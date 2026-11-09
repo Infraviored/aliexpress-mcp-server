@@ -171,6 +171,7 @@ def test_apply_selection_cart_lines(monkeypatch):
     monkeypatch.setattr(m, "update_cart_quantity", lambda c, q: (calls.append(("qty", c, q)), "ok")[1])
     monkeypatch.setattr(m, "select_cart_items", lambda ids, only=False, selected=True: (calls.append(("sel", ids, selected)), "ok")[1])
     monkeypatch.setattr(m, "add_to_cart", lambda *a, **k: pytest.fail("a cart line is not added again"))
+    monkeypatch.setattr(m, "_live_lines", lambda: {c: {"cart_id": c, "valid": True, "combo": False} for c in ("11", "12", "13")})
     m.apply_selection(_msg([
         {"item_id": "1", "sku_id": "2", "cart_id": "11", "qty": 1, "qty0": 1, "state": "delete"},
         {"item_id": "1", "sku_id": "3", "cart_id": "12", "qty": 3, "qty0": 1, "state": "yes"},
@@ -215,3 +216,31 @@ def test_select_checks_every_line_and_names_the_ones_that_did_not_stick(monkeypa
     text = m._select({"a": "b"}, [str(i) for i in range(12)])[0]
     assert len(sent) == 12                                   # no 10-line cap any more
     assert "NOT checked after the call (1): Teil 11" in text
+
+
+def test_apply_selection_matches_the_live_cart(monkeypatch):
+    """A Ja line gone from the cart is added again, an unavailable one is named, every Ja line is checked (no cap)."""
+    calls = []
+    monkeypatch.setattr(m, "select_cart_items", lambda ids, only=False, selected=True: (calls.append(("sel", ids, selected)), "ok")[1])
+    monkeypatch.setattr(m, "add_to_cart", lambda *a, **k: (calls.append(("add", a, k)), "Added 2 x item")[1])
+    live = {str(c): {"cart_id": str(c), "valid": True, "combo": False} for c in range(20, 32)}
+    live["31"]["valid"] = False
+    monkeypatch.setattr(m, "_live_lines", lambda: live)
+    items = [{"item_id": "1", "sku_id": str(c), "cart_id": str(c), "qty": 1, "qty0": 1, "state": "yes",
+              "category": "Extras", "title": f"Teil {c}"} for c in range(20, 32)]
+    items.append({"item_id": "5", "sku_id": "6", "cart_id": "99", "qty": 2, "qty0": 2, "state": "yes",
+                  "category": "Kombi-Knaller-Korb", "combo": True, "title": "Ladegerät"})
+    out = m.apply_selection(_msg(items))
+    assert out.startswith("Ergebnis:")
+    assert ("add", ("5", "6", 2), {"need": "Kombi-Knaller-Korb", "combo": True}) in calls
+    assert "Ladegerät: war nicht mehr im Korb, neu hinzugefügt." in out
+    assert "Teil 31: nicht lieferbar" in out
+    sel = [c for c in calls if c[0] == "sel"][0]
+    assert len(sel[1]) == 12                     # all twelve Ja lines, no 10-line cap
+    assert "Kassen-Link Extras (12 Zeilen)" in out
+
+
+def test_page_sends_every_cart_line():
+    h = _page([_card()])
+    assert "v === r.dataset.state0" not in h     # no skipping of lines unchanged against the page's own state
+    assert "it.title" in h
