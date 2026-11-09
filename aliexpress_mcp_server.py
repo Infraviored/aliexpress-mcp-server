@@ -3159,7 +3159,7 @@ def real_cost(cart_ids: Optional[list[str]] = None, item_id: str = "", sku_id: s
                 notes.append("This item+sku is already in the cart: not added (that would raise its quantity); "
                              "the existing line is measured with its current quantity.")
             else:
-                res = add_to_cart(str(item_id), str(sku_id), int(quantity), combo=False)
+                res = add_to_cart(str(item_id), str(sku_id), int(quantity), combo=False, force=True)   # temporary measuring line, removed again
                 m = re.search(r"cart_id\s+(\d+)", res or "")
                 if not str(res).startswith("Added") or not m:
                     return f"Could not add the candidate to measure it: {res}"
@@ -3717,7 +3717,10 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                 + (f" — do: {d['do']}" if d.get("do") else "") for i, d in enumerate(real, 1)))
     except Exception as e:
         page = f"(page not written: {e})"
-    return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined),
+    notes = _duplicate_notes([dict(ln, cart="main", tab="") for ln in c["lines"]]
+                             + [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in combo_lines or []], tags)
+    warn = ["## Possible duplicates (check before ordering)\n" + "\n".join("- " + n for n in notes)] if notes else []
+    return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined)] + warn + [
                          page, "## Details (for you)\n" + text, _combo_text(cookies, c, combo_lines)] + previews).replace("\n\n\n\n", "\n\n")
 
 
@@ -3897,15 +3900,60 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
     return cid
 
 
+def _cart_inventory(cookies: dict[str, str]) -> list[dict]:
+    """Every line of the main and the Kombi-Knaller cart (copies), marked with `cart` ("main"/"Kombi") and `tab`. Raises when a cart cannot be read."""
+    c = _read_cart(cookies)
+    inv = [dict(ln, cart="main", tab="") for ln in c["lines"]]
+    if _combo_channel(c):
+        inv += [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in _read_cart(cookies, COMBO)["lines"]]
+    return inv
+
+
+def _inv_line_text(ln: dict, tags: dict) -> str:
+    where = "Kombi-Knaller cart, tab " + (ln.get("tab") or "?") if ln.get("cart") == "Kombi" else "main cart"
+    need = (tags.get(str(ln["cart_id"])) or {}).get("need")
+    return (f"{where}: {ln['qty']} x {ln['title'][:45]} ({ln['variant'] or 'no variant'}), cart_id {ln['cart_id']}"
+            + (f", need '{need}'" if need else ""))
+
+
+def _duplicate_notes(lines: list[dict], tags: dict) -> list[str]:
+    """Possible duplicates among cart lines: one item in several lines (any variant, either cart), and lines sharing one need."""
+    out = []
+    by_item: dict[str, list[dict]] = {}
+    by_need: dict[str, list[dict]] = {}
+    for ln in lines:
+        by_item.setdefault(str(ln.get("item_id")), []).append(ln)
+        need = ((tags.get(str(ln["cart_id"])) or {}).get("need") or "").strip().lower()
+        if need:
+            by_need.setdefault(need, []).append(ln)
+    for item, lns in by_item.items():
+        if len(lns) > 1:
+            out.append(f"Same item {item} in {len(lns)} lines: " + "; ".join(_inv_line_text(x, tags) for x in lns))
+    for need, lns in by_need.items():
+        if len(lns) > 1 and len({str(x.get("item_id")) for x in lns}) > 1:
+            out.append(f"One need '{need}' on {len(lns)} lines: " + "; ".join(_inv_line_text(x, tags) for x in lns))
+    return out
+
+
+def _already_in_cart(inv: list[dict], tags: dict, item_id: str, need: str) -> list[dict]:
+    """Cart lines that make an add a duplicate: the same item (any variant, either cart) or another line for the same need."""
+    need = (need or "").strip().lower()
+    return [ln for ln in inv if str(ln.get("item_id")) == str(item_id)
+            or (need and ((tags.get(str(ln["cart_id"])) or {}).get("need") or "").strip().lower() == need)]
+
+
 @tool()
 def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "",
-                combo: bool = False) -> str:
+                combo: bool = False, force: bool = False) -> str:
     """
     Add a product variant to the AliExpress cart and check it for checkout (the
     Kombi-Knaller cart ticks new lines itself).
     This changes the real cart (it does not buy anything). Adding a variant
     that is already in the cart raises that line's quantity instead.
     Every cart line pays an import charge: prefer a bigger pack in one line.
+    Both carts are read first: when the item is already in either of them (any
+    variant) or another line has the same `need`, nothing is added and the
+    result starts with "ALREADY IN CART" (force=True adds anyway).
 
     Args:
         item_id: AliExpress item ID.
@@ -3917,12 +3965,28 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
             in search_products): 3+ pieces there are ordered without import
             charge. Adding a variant that is already there REPLACES that line
             (new cart_id): give the TOTAL quantity you want, not the extra.
+        force: Add even though the item or the need is already in a cart (a
+            deliberate second line, or a replacement whose old line is removed afterwards).
     """
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
     if quantity < 1:
         return "quantity must be at least 1."
+    if not force:
+        try:
+            inv = _cart_inventory(cookies)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            return f"Nothing added: the carts could not be read to check for duplicates ({e}). Try again, or force=True."
+        tags = _line_store()
+        have = _already_in_cart(inv, tags, item_id, need)
+        if have:
+            return ("ALREADY IN CART, nothing added. These lines are in the way:\n"
+                    + "\n".join("- " + _inv_line_text(ln, tags) for ln in have)
+                    + "\nTo proceed: raise the quantity of the existing line (update_cart_quantity), or remove the wrong line "
+                      "(remove_from_cart) and add again, or add anyway with force=True if a second line is really wanted.")
     try:
         cid = _cart_add(cookies, item_id, sku_id, quantity, business=COMBO if combo else "")
     except Exception as e:
@@ -4274,7 +4338,7 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
         return (f"WOULD DELETE {len(dele)}, CHECK {len(on)}, UNCHECK {len(off)}, CHANGE QUANTITY of {len(qty)} cart line(s)")
     out = []
     for item_id, sku_id, q, cat, combo, title in readd:
-        res = add_to_cart(item_id, sku_id, q, need=cat, combo=combo)
+        res = add_to_cart(item_id, sku_id, q, need=cat, combo=combo, force=True)   # the line vanished: a re-add can only restore it
         ok = res.startswith("Added")
         head.append(f"{title}: war nicht mehr im Korb, " + ("neu hinzugefügt." if ok else "neu hinzufügen ging nicht (nicht lieferbar?)."))
         out.append(f"Re-add {item_id} / {sku_id} x{q}: {res}")
@@ -4375,7 +4439,7 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         if dry_run:
             out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line(s) {', '.join(repl)}" if repl else ""))
             continue
-        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo)
+        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo, force=bool(repl))   # a replacement: the old line goes after
         out.append(f"{item_id} / {sku_id} x{qty}: " + res)
         if repl:   # the offer replaces a line (a cheaper way to buy the same): drop the old line only when the new one is in
             out.append(f"Replaced line(s) {', '.join(repl)}: " + (remove_from_cart(repl) if res.startswith("Added") else "NOT removed, the add failed"))

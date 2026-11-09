@@ -50,7 +50,7 @@ def _msg(items):
 
 def test_apply_selection_adds_only_yes(monkeypatch):
     seen = []
-    monkeypatch.setattr(m, "add_to_cart", lambda i, s, q, list_name="", need="", combo=False: (seen.append((i, s, q, need)), "ok")[1])
+    monkeypatch.setattr(m, "add_to_cart", lambda i, s, q, list_name="", need="", combo=False, force=False: (seen.append((i, s, q, need)), "ok")[1])
     out = m.apply_selection(_msg([
         {"item_id": "1", "sku_id": "2", "qty": 2, "state": "yes", "category": "Frunk"},
         {"item_id": "3", "sku_id": "4", "qty": 1, "state": "maybe", "category": "Frunk"},
@@ -232,7 +232,7 @@ def test_apply_selection_matches_the_live_cart(monkeypatch):
                   "category": "Kombi-Knaller-Korb", "combo": True, "title": "Ladegerät"})
     out = m.apply_selection(_msg(items))
     assert out.startswith("Ergebnis:")
-    assert ("add", ("5", "6", 2), {"need": "Kombi-Knaller-Korb", "combo": True}) in calls
+    assert ("add", ("5", "6", 2), {"need": "Kombi-Knaller-Korb", "combo": True, "force": True}) in calls
     assert "Ladegerät: war nicht mehr im Korb, neu hinzugefügt." in out
     assert "Teil 31: nicht lieferbar" in out
     assert not [c for c in calls if c[0] == "sel" and c[2]]   # Extras (12) does not fit the 10 stored checks
