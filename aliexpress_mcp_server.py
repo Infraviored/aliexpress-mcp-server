@@ -10,6 +10,7 @@ Auth: Session cookies from MCP Auth Bridge extension at
 """
 
 import base64
+import datetime
 import gzip
 import json
 import os
@@ -4292,7 +4293,17 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
                 when = f"Lieferung in etwa {w['days']} Tagen" if w.get("days") else ""
                 kombi = "im Kombi-Knaller-Korb, ab 3 Teilen ohne Abgabe. " if w["combo"] else ""
                 cards[-1]["default"] = "no"
-                cards.append({"title": f"{need} · {w['buy']}", "badge": "Kombi-Knaller" if w["combo"] else "Günstiger", "item_id": w["item_id"],
+                faster = None
+                if w.get("days") and ln.get("delivery") and ln["delivery"][1]:
+                    try:
+                        faster = (datetime.date.fromisoformat(ln["delivery"][1][:10]) - datetime.date.today()).days - int(w["days"])
+                    except (ValueError, TypeError):
+                        faster = None
+                pills = [{"t": f"spart {report.eur(diff)}", "k": "save"}]
+                if faster and abs(faster) >= 2:
+                    pills.append({"t": f"{faster} Tage schneller", "k": "fast"} if faster > 0 else {"t": f"{-faster} Tage langsamer", "k": "slow"})
+                pills.append({"t": "Kombi-Knaller", "k": "info"} if w["combo"] else {"t": "Choice", "k": "info"} if w["choice"] else {"t": "anderer Händler", "k": "info"})
+                cards.append({"title": f"{need} · {w['buy']}", "pills": pills, "saving": round(diff, 2), "item_id": w["item_id"],
                               "sku_id": w["sku_id"], "replaces": ln["cart_id"], "price": round(w["cost"] / q, 2), "ship": 0,
                               "choice": w["choice"], "duty": 0, "qty": q, "default": "yes", "combo": w["combo"],
                               "verdict": (f"{w['buy']} für {report.eur(w['cost'])} statt {report.eur(now)} (Ware, Versand, Abgabe): "
@@ -4305,7 +4316,8 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
             win, need = mg["win"], mg["need"]
             old = " + ".join(f"{ln['qty']}× {ln.get('variant') or ln['title'][:30]}" for ln in mg["lines"])
             if mg["keep"] is None:
-                cards.append({"title": f"{need} · {win['buy']}", "badge": "Zusammengelegt", "item_id": win["item_id"], "sku_id": win["sku_id"],
+                cards.append({"title": f"{need} · {win['buy']}", "pills": [{"t": f"spart {report.eur(mg['saving'])}", "k": "save"}, {"t": "eine Zeile", "k": "info"}],
+                              "saving": round(mg["saving"], 2), "item_id": win["item_id"], "sku_id": win["sku_id"],
                               "replaces": [ln["cart_id"] for ln in mg["lines"]], "price": round(win["cost"] / win["qty"], 2), "ship": 0,
                               "choice": False, "duty": 0, "qty": win["qty"], "default": "yes",
                               "verdict": f"{win['buy']} in einer Zeile für {report.eur(win['cost'])} statt {old} für {report.eur(mg['split'])}: spart {report.eur(mg['saving'])}",

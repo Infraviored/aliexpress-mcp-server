@@ -533,7 +533,18 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
 .tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
 .tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.tx .pills { display: flex; flex-wrap: wrap; gap: 4px; }
 .tx .pill { justify-self: start; padding: 1px 8px; border-radius: 99px; font: 600 .68rem var(--body); background: var(--accent); color: var(--surface); }
+.tx .pill.save { font-weight: 800; }
+.tx .pill.cart { background: var(--line); color: var(--fg); }
+.tx .pill.slow { background: var(--warn-bg); color: var(--warn); }
+.tx .pill.info { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.tx .pr .save { font: 800 .9rem var(--mono); color: var(--accent); margin-left: 8px; white-space: nowrap; }
+.grp { border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; margin: 8px 0; padding: 0 10px; }
+.grp + .row.dec, .row.dec + .grp { border-top: 0; }
+.grp-h { padding: 8px 0 2px; font: 600 .78rem var(--body); color: var(--accent); }
+.grp-h span { color: var(--muted); font-weight: 400; }
+.grp .grp-h + .row.dec { border-top: 0; }
 .tx .pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
 .stp { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--surface); }
 .stp button { width: 26px; height: 26px; padding: 0; border: 0; background: none; color: var(--fg); font: 600 1rem var(--body); cursor: pointer; }
@@ -599,14 +610,21 @@ _DECIDE_JS = r"""<script>
   function qty(r) { return Math.max(1, parseInt(r.querySelector(".qty").value, 10) || 1); }
   rows.forEach(function (r) {
     var s = saved[r.dataset.id];
-    if (s) { var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true; r.querySelector(".qty").value = s.q; if (s.n) r.querySelector(".note-in").value = s.n; }
+    // a choice counts only for the page it was made on: a row whose default changed since then starts from the new default
+    if (s && s.d === r.dataset.def) { var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true; r.querySelector(".qty").value = s.q; if (s.n) r.querySelector(".note-in").value = s.n; }
   });
+  function setSt(row, v) { var el = row.querySelector('input[value="' + v + '"]'); if (el) el.checked = true; }
+  function exclusive(r) {   // the same part bought two ways: Ja on one way sets the other ways to Nein
+    if (r.dataset.replaces) { var ids = r.dataset.replaces.split(","); rows.forEach(function (o) { if (ids.indexOf(o.dataset.cart) >= 0 && st(o) === "yes") setSt(o, "no"); }); }
+    else if (r.dataset.cart) rows.forEach(function (o) { if (o.dataset.replaces && o.dataset.replaces.split(",").indexOf(r.dataset.cart) >= 0 && st(o) === "yes") setSt(o, "no"); });
+  }
+  rows.forEach(function (r) { if (r.dataset.replaces && st(r) === "yes") exclusive(r); });
   var total = 0, stEl = document.getElementById("sb-state"), send = document.getElementById("sb-send");
   function calc() {
     var goods = 0, duty = 0, ship = 0, ch = 0, n = 0, keep = {};
     rows.forEach(function (r) {
       var v = st(r), q = qty(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
-      keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value };
+      keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value, d: r.dataset.def };
       if (v !== "yes") return;
       n++; var g = parseFloat(r.dataset.price) * q; goods += g; duty += parseFloat(r.dataset.duty);
       if (r.dataset.choice === "1") ch += g; else ship += parseFloat(r.dataset.ship);
@@ -729,17 +747,45 @@ _DECIDE_JS = r"""<script>
     if (tx && !(t.closest && t.closest("a, input, button"))) tx.closest(".row").classList.toggle("open");
   });
   document.addEventListener("input", function () { send.textContent = cartB.hidden ? "Senden" : "Chat"; calc(); });
-  function setSt(row, v) { var el = row.querySelector('input[value="' + v + '"]'); if (el) el.checked = true; }
   document.addEventListener("change", function (e) {
     var r = e.target.closest && e.target.closest(".row.dec");
-    if (!r || e.target.value !== "yes") return;
-    if (r.dataset.replaces) { var ids = r.dataset.replaces.split(","); rows.forEach(function (o) { if (ids.indexOf(o.dataset.cart) >= 0) setSt(o, "no"); }); }
-    else if (r.dataset.cart) rows.forEach(function (o) { if (o.dataset.replaces && o.dataset.replaces.split(",").indexOf(r.dataset.cart) >= 0) setSt(o, "no"); });
+    if (r && e.target.value === "yes") exclusive(r);
   });
   document.addEventListener("change", calc);
   calc();
 })();
 </script>"""
+
+
+def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) -> list[str]:
+    """The rows in page order, each offer that replaces cart lines framed together with those lines (originals first)."""
+    idx_of = {str(c.get("cart_id")): i for i, c in enumerate(cards) if c.get("cart_id")}
+    member = {}   # row index -> group leader (the replacing offer)
+    for ci, ids in repl_of.items():
+        member.setdefault(ci, ci)
+        for x in ids:
+            if x in idx_of and idx_of[x] not in member:
+                member[idx_of[x]] = ci
+    groups: dict[int, list[int]] = {}
+    for i in range(len(rows)):
+        if i in member:
+            groups.setdefault(member[i], []).append(i)
+    out, done = [], set()
+    for i in range(len(rows)):
+        if i in done:
+            continue
+        g = groups.get(member.get(i, -1))
+        if not g or len(g) < 2:
+            out.append(rows[i])
+            continue
+        lead = member[i]
+        olds = [j for j in g if j != lead]
+        order = olds + [lead]
+        done.update(order)
+        head = (f"Dasselbe Teil, {len(order)} Wege <span>· nur einer auf Ja</span>" if len(olds) == 1 else
+                f"Ein Bedarf: {len(olds)} Zeilen oder eine <span>· Ja auf der einen setzt die anderen auf Nein</span>")
+        out.append(f'<div class="grp"><div class="grp-h">{head}</div>{"".join(rows[j] for j in order)}</div>')
+    return out
 
 
 def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: list[dict],
@@ -754,7 +800,10 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
     categories: [{heading, cards: [{title (short), img (data: URI), price (EUR per piece), ship (EUR per line, 0 = free),
                   choice (bool), duty (EUR per line), qty, default (yes|maybe|no), verdict (the agent's opinion, one sentence),
                   rating ("4,8★ 208"), fit ("✓ Highland genannt" / "Modell nicht genannt"), tags, text, url,
-                  item_id, sku_id, cart_id}]}]
+                  item_id, sku_id, cart_id, replaces (cart id(s) this offer replaces), pills ([{t, k}] reasons next to
+                  the picture; k: save (bold), fast, slow, cart, info), saving (EUR, shown bold next to the price)}]}]
+    An offer that replaces cart lines is shown together with them in one framed group: the same part, several ways;
+    Ja on one way sets the others to Nein.
     Raises ValueError when a card has no picture or no item_id/sku_id.
     """
     import json as _json
@@ -775,6 +824,13 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
         cart_mode = any(c.get("cart_id") for c in sec["cards"])
         order = ("yes", "maybe", "no", "delete")
         rows = []
+        repl_of = {}   # card index -> cart ids it replaces
+        for ci, c in enumerate(sec["cards"]):
+            rp = c.get("replaces")
+            rp = [str(x) for x in (rp if isinstance(rp, (list, tuple)) else [rp] if rp else [])]
+            if rp:
+                repl_of[ci] = rp
+        replaced = {x for v in repl_of.values() for x in v}
         for ci, c in enumerate(sec["cards"]):
             state = c.get("default") if c.get("default") in ("yes", "maybe", "no") or (cart_mode and c.get("default") == "delete") else "no"
             if cart_mode and state == "maybe":
@@ -796,7 +852,14 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             more = (f'<div class="more">{meta_html}{text_html}'
                     f'{link}</div>')
             rid = f"r{si}_{ci}"
-            pill = f'<span class="pill">{_e(c["badge"])}</span>' if c.get("badge") else ""
+            pl = [{"t": c["badge"], "k": ""}] if c.get("badge") and not c.get("pills") else []
+            pl += [x if isinstance(x, dict) else {"t": x, "k": ""} for x in c.get("pills") or []]
+            if c.get("cart_id") and str(c["cart_id"]) in replaced and not any(x["k"] == "cart" for x in pl):
+                pl.insert(0, {"t": "jetzt im Korb", "k": "cart"})
+            pill = ('<span class="pills">' + "".join(f'<span class="pill {_e(x.get("k") or "")}">{_e(x["t"])}</span>' for x in pl)
+                    + "</span>") if pl else ""
+            saving = float(c.get("saving") or 0)
+            save_html = f'<b class="save">\u2212{eur(saving)}</b>' if saving > 0.004 else ""
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
                 f'<label class="{v[0]}" for="{rid}{v[0]}" title="{icons[v][1]}" aria-label="{icons[v][1]}">{icons[v][0]}</label>'
@@ -814,17 +877,17 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             rows.append(
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
-                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-qty0="{int(c.get("qty0") or qty)}">'
+                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}" data-qty0="{int(c.get("qty0") or qty)}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
-                f'<div class="pr"><span>{eur(price)}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
+                f'<div class="pr"><span>{eur(price)}{save_html}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
                 f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
                 f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
                 f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
         out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
                    f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'
-                   f'<div class="rows">{"".join(rows)}</div></section>')
+                   f'<div class="rows">{"".join(_grouped(sec["cards"], rows, repl_of))}</div></section>')
     out.append('<div class="dbar"><div class="in"><div class="bulk" id="sb-bulk" hidden><span id="sb-marked"></span>'
                f'<button type="button" class="y" data-bulk="yes" aria-label="Ja">{_ICON_YES}</button>'
                f'<button type="button" data-bulk="no" aria-label="Nein">{_ICON_NO}</button>'
