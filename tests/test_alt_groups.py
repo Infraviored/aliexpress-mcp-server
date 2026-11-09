@@ -26,9 +26,9 @@ def test_offer_and_replaced_line_share_one_group_original_first():
     assert "Alternative: 0,86 € billiger, aber Lieferung 16.11. statt 09.11." in grp
     assert grp.index('data-title="Original"') < grp.index('data-title="Alternative"')
     assert 'data-title="Andere Zeile"' not in grp
-    assert ">16,10 €<" in grp and ">15,24 €<" in grp      # the same basis: goods + shipping + import
-    assert "3,22 €/Stück" in grp and "1,52 €/Stück" in grp
-    assert "Lieferung bis <b>09.11.</b> · Shop X · jetzt im Korb" in grp
+    assert ">16,10\u202f€<" in grp and ">15,24\u202f€<" in grp      # the same basis: goods + shipping + import
+    assert "=\u00a03,22\u00a0€/Stück" in grp and "=\u00a01,52\u00a0€/Stück" in grp
+    assert "Lieferung bis <b>09.11.</b>, Shop X, jetzt im Korb" in grp
     assert 'class="pill' not in grp
 
 
