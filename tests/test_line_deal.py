@@ -30,7 +30,7 @@ def test_cheaper_other_seller_for_a_choice_line_becomes_a_pre_selected_card(monk
     written = _cart(monkeypatch, {"now": 50.0, "best": _cand(40.0, choice=True), "kombi": None})
     out = m.decide_cart(approved_alternatives=["11"])
     p = written["page"]
-    assert 'class="pill save">spart' in p and 'data-replaces="11"' in p and "data-combo" not in p
+    assert 'billiger' in p and 'data-replaces="11"' in p and "data-combo" not in p
     assert p.count('value="yes" checked') == 1 and p.count('value="no" checked') == 1   # new row yes, the old line no
     assert "BETTER DEALS FOUND" in out and "on the page" in out
 
@@ -51,7 +51,7 @@ def test_kombi_wins_only_with_three_combo_pieces(monkeypatch):
     written = _cart(monkeypatch, {"now": 50.0, "best": _cand(52.0), "kombi": _cand(45.0, combo=True, pieces=3)})
     m.decide_cart(approved_alternatives=["11"])
     p = written["page"]
-    assert 'data-combo="1"' in p and 'class="pill info">Kombi-Knaller' in p and "ohne Abgabe" in p
+    assert 'data-combo="1"' in p and 'Kombi-Knaller' in p and "ohne Abgabe" in p
     written = _cart(monkeypatch, {"now": 50.0, "best": _cand(52.0), "kombi": _cand(45.0, combo=True, pieces=2)})
     m.decide_cart(approved_alternatives=["11"])
     assert "data-replaces" not in written["page"]                  # 2 pieces: its normal net (52) is not cheaper

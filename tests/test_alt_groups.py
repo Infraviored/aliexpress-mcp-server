@@ -1,4 +1,4 @@
-"""The decision page frames an offer together with the cart line it replaces, with reasons as pills."""
+"""The decision page frames an offer together with the cart line it replaces and compares both on one price basis."""
 import re
 
 import report
@@ -17,17 +17,19 @@ def page(cards):
 
 
 def test_offer_and_replaced_line_share_one_group_original_first():
-    p = page([card(title="Alternative", item_id="9", sku_id="8", replaces="111", default="yes", saving=0.6,
-                   pills=[{"t": "spart 0,60 €", "k": "save"}]),
-              card(title="Original", cart_id="111", default="no"),
+    p = page([card(title="Alternative", item_id="9", sku_id="8", replaces="111", default="yes", price=7.62, qty=2,
+                   until="2026-11-16", seller="Choice", pieces=10),
+              card(title="Original", cart_id="111", default="no", qty=5, until="2026-11-09", seller="Shop X", pieces=5,
+                   parts={"goods": 13.45, "ship": 2.21, "duty": 0.44, "save": 0}),
               card(title="Andere Zeile", cart_id="222", default="yes")])
     grp = re.search(r'<div class="grp">.*?(?=<div class="row dec"[^>]*data-cart="222")', p, re.S).group(0)
-    assert "Dasselbe Teil, 2 Wege" in grp
+    assert "Alternative: 0,86 € billiger, aber Lieferung 16.11. statt 09.11." in grp
     assert grp.index('data-title="Original"') < grp.index('data-title="Alternative"')
     assert 'data-title="Andere Zeile"' not in grp
-    assert '<span class="pill cart">jetzt im Korb</span>' in grp
-    assert '<span class="pill save">spart 0,60 €</span>' in grp
-    assert '<b class="save">−0,60 €</b>' in grp
+    assert ">16,10 €<" in grp and ">15,24 €<" in grp      # the same basis: goods + shipping + import
+    assert "3,22 €/Stück" in grp and "1,52 €/Stück" in grp
+    assert "Lieferung bis <b>09.11.</b> · Shop X · jetzt im Korb" in grp
+    assert 'class="pill' not in grp
 
 
 def test_rows_carry_their_default_so_a_stale_saved_choice_is_ignored():
@@ -39,7 +41,7 @@ def test_rows_carry_their_default_so_a_stale_saved_choice_is_ignored():
 def test_merge_offer_groups_all_replaced_lines():
     p = page([card(title="A", cart_id="1"), card(title="B", cart_id="2"),
               card(title="Neu", item_id="9", replaces=["1", "2"], default="yes")])
-    assert "Ein Bedarf: 2 Zeilen oder eine" in p
+    assert "Eine Zeile statt 2:" in p
     assert p.count('class="grp"') == 1
 
 
