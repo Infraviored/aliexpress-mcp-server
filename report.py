@@ -538,6 +538,9 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .pill.save { font-weight: 800; }
 .tx .pill.cart { background: var(--line); color: var(--fg); }
 .tx .pill.slow { background: var(--warn-bg); color: var(--warn); }
+.tx .pill.eta { background: var(--warn-bg); color: var(--warn); }
+.tx .pill.eta.fast { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.tx .pill.eta.same { background: none; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
 .tx .pill.info { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .tx .pr .save { font: 800 .9rem var(--mono); color: var(--accent); margin-left: 8px; white-space: nowrap; }
 .grp { border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; margin: 8px 0; padding: 0 10px; }
@@ -587,6 +590,7 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .dbar .main { display: flex; align-items: center; gap: 8px; }
 .dbar .dsum { flex: 1; min-width: 0; display: grid; }
 .dbar .tot { font: 600 1.05rem var(--mono); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.dbar .tot .dl { font: 600 .78rem var(--body); color: var(--accent); margin-left: 8px; white-space: nowrap; }
 .dbar .st { font-size: .72rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dbar .send { font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px; padding: 0 16px; height: 38px;
   background: var(--accent); color: var(--surface); }
@@ -637,8 +641,37 @@ _DECIDE_JS = r"""<script>
       s.querySelector(".sub").textContent = k + " · " + f(g);
     });
     document.getElementById("sb-total").textContent = f(total);
+    eta();
     stEl.textContent = n + " ja · Ware " + f(goods) + " · Versand " + f(ship) + " · Abgabe " + f(duty) + " (gesch.)";
     try { localStorage.setItem(key, JSON.stringify(keep)); } catch (e) {}
+  }
+  function day(s) { return Date.parse(s + "T00:00:00Z") / 864e5; }
+  function dm(s) { return s.slice(8, 10) + "." + s.slice(5, 7) + "."; }
+  function eta() {   // when the last Ja part arrives, and what each dated row does to that date
+    var yes = rows.filter(function (r) { return st(r) === "yes" && r.dataset.until; });
+    var last = yes.reduce(function (m, r) { return !m || r.dataset.until > m ? r.dataset.until : m; }, "");
+    var dl = document.getElementById("sb-dl"), undated = rows.some(function (r) { return st(r) === "yes" && !r.dataset.until; });
+    dl.textContent = last ? "Lieferung bis " + dm(last) + (undated ? "*" : "") : "";
+    dl.title = undated ? "Ohne Datum: mindestens eine Ja-Zeile hat keine Lieferangabe" : "";
+    rows.forEach(function (r) {
+      var p = r.querySelector(".pill.eta"); if (p) p.remove();
+      if (!r.dataset.until) return;
+      var g = r.closest(".grp");   // the other ways of the same part do not count against this one
+      var others = yes.filter(function (o) { return o !== r && !(g && o.closest(".grp") === g); })
+        .reduce(function (m, o) { return o.dataset.until > m ? o.dataset.until : m; }, "");
+      var on = st(r) === "yes", t = "", k = "eta", n = function (x) { return x + (x === 1 ? " Tag" : " Tage"); };
+      if (on) { var d = others ? Math.round(day(r.dataset.until) - day(others)) : 0; if (d > 0) t = "letztes Teil, +" + n(d); }
+      else {   // picking this row instead: the last date then, against the last date now
+        var then = others && others > r.dataset.until ? others : r.dataset.until, c = last ? Math.round(day(then) - day(last)) : 0;
+        if (c > 0) t = "würde Lieferung um " + n(c) + " verschieben";
+        else if (c < 0 && g) { t = "Lieferung " + n(-c) + " früher"; k = "eta fast"; }
+        else if (g) { t = "Gesamtlieferung unverändert"; k = "eta same"; }
+      }
+      if (!t) return;
+      var box = r.querySelector(".tx .pills");
+      if (!box) { box = document.createElement("span"); box.className = "pills"; r.querySelector(".tx").insertBefore(box, r.querySelector(".tx .need")); }
+      var s = document.createElement("span"); s.className = "pill " + k; s.textContent = t; box.appendChild(s);
+    });
   }
   function msg() {
     var items = [], cnt = { yes: 0, maybe: 0, no: 0, "delete": 0 }, dels = [];
@@ -801,7 +834,9 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                   choice (bool), duty (EUR per line), qty, default (yes|maybe|no), verdict (the agent's opinion, one sentence),
                   rating ("4,8★ 208"), fit ("✓ Highland genannt" / "Modell nicht genannt"), tags, text, url,
                   item_id, sku_id, cart_id, replaces (cart id(s) this offer replaces), pills ([{t, k}] reasons next to
-                  the picture; k: save (bold), fast, slow, cart, info), saving (EUR, shown bold next to the price)}]}]
+                  the picture; k: save (bold), fast, slow, cart, info), saving (EUR, shown bold next to the price),
+                  until (latest delivery date, YYYY-MM-DD)}]}]
+    The bar shows when the last Ja part arrives; each dated row says live whether it is that last part or would move it.
     An offer that replaces cart lines is shown together with them in one framed group: the same part, several ways;
     Ja on one way sets the others to Nein.
     Raises ValueError when a card has no picture or no item_id/sku_id.
@@ -872,12 +907,13 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             repl = ",".join(str(x) for x in repl) if isinstance(repl, (list, tuple)) else str(repl or "")
             cart += f' data-replaces="{_e(repl)}"' if repl else ""
             cart += ' data-combo="1"' if c.get("combo") else ""
+            until = f' data-until="{_e(str(c["until"])[:10])}"' if c.get("until") else ""
             # a page default that is itself a change (merged lines) starts from the cart's state
             state0 = c.get("state0") if c.get("state0") in ("yes", "maybe", "no", "delete") else state
             rows.append(
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
-                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}" data-qty0="{int(c.get("qty0") or qty)}">'
+                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}"{until} data-qty0="{int(c.get("qty0") or qty)}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
                 f'<div class="pr"><span>{eur(price)}{save_html}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
@@ -894,7 +930,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                f'<button type="button" class="d" data-bulk="delete" aria-label="Löschen">{_ICON_DEL}</button>'
                '<button type="button" data-bulk="none" aria-label="Markierung aufheben">↺</button></div>'
                '<textarea id="sb-text" readonly hidden aria-label="Nachricht"></textarea>'
-               '<div class="main"><div class="dsum"><span class="tot" id="sb-total"></span><span class="st" id="sb-state"></span></div>'
+               '<div class="main"><div class="dsum"><span class="tot"><span id="sb-total"></span><span class="dl" id="sb-dl"></span></span><span class="st" id="sb-state"></span></div>'
                '<button type="button" id="sb-copy" class="cp" aria-label="Kopieren">⧉</button>'
                '<button type="button" id="sb-send" class="send">Senden</button>'
                '<button type="button" id="sb-cart" class="send cart" hidden>In den Korb</button></div></div></div>')
