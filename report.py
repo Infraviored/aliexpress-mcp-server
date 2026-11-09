@@ -594,17 +594,19 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
   background: var(--bg); color: var(--fg); cursor: pointer; font: inherit; }
 .dbar .bulk button.y { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 .dbar .bulk button.d { background: var(--warn); border-color: var(--warn); color: var(--surface); }
-.dbar .main { display: flex; align-items: center; gap: 8px; }
-.dbar .dsum { flex: 1; min-width: 0; display: grid; }
+.dbar .main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dbar .dsum { flex: 1 1 220px; min-width: 0; display: grid; }
+.dbar .why { margin: 0; font-size: .74rem; line-height: 1.35; color: var(--warn); overflow-wrap: anywhere; }
+@media (max-width: 520px) { .dbar .dsum { flex-basis: 100%; } .dbar #sb-cart { flex: 1; } }
 .dbar .tot { font: 600 1.05rem var(--mono); font-variant-numeric: tabular-nums; line-height: 1.1; }
 .dbar .tot .dl { font: 600 .78rem var(--body); color: var(--accent); margin-left: 8px; white-space: nowrap; }
-.dbar .st { font-size: .72rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbar .st { font-size: .72rem; line-height: 1.35; color: var(--muted); }
 .dbar .send { font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px; padding: 0 16px; height: 38px;
   background: var(--accent); color: var(--surface); }
 .dbar .send.cart { background: var(--fg); color: var(--surface); }
 .dbar .send.cart.sure { background: var(--warn); }
-.dbar .send:disabled { opacity: .6; }
-.dbar .main:has(#sb-cart:not([hidden])) #sb-send { background: var(--bg); color: var(--fg); border: 1px solid var(--line); padding: 0 10px; }
+.dbar .send:disabled { opacity: .45; cursor: default; }
+.dbar .main.live #sb-send { background: var(--bg); color: var(--fg); border: 1px solid var(--line); padding: 0 10px; }
 .dbar .cp { width: 38px; height: 38px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); cursor: pointer; font: inherit; }
 .dbar textarea { width: 100%; min-height: 4.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
   font: .72rem var(--mono); padding: 6px 8px; box-sizing: border-box; }
@@ -632,26 +634,29 @@ _DECIDE_JS = r"""<script>
   rows.forEach(function (r) { if (r.dataset.replaces && st(r) === "yes") exclusive(r); });
   var total = 0, stEl = document.getElementById("sb-state"), send = document.getElementById("sb-send");
   function calc() {
-    var goods = 0, duty = 0, ship = 0, ch = 0, n = 0, keep = {};
+    var goods = 0, duty = 0, ship = 0, save = 0, ch = 0, chs = 0, n = 0, keep = {};
     rows.forEach(function (r) {
       var v = st(r), q = qty(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
       keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value, d: r.dataset.def };
       if (v !== "yes") return;
-      n++; var g = parseFloat(r.dataset.price) * q; goods += g; duty += parseFloat(r.dataset.duty);
-      if (r.dataset.choice === "1") ch += g; else ship += parseFloat(r.dataset.ship);
+      n++; var d = r.dataset, g = parseFloat(d.g) * q; goods += g; ship += parseFloat(d.s); duty += parseFloat(d.d); save += parseFloat(d.r);
+      if (d.choice === "1") { ch += g; chs += parseFloat(d.s); }
     });
-    if (ch > 0 && ch < TH) ship += CS;
-    total = goods + ship + duty;
+    if (ch > 0 && ch < TH && chs < 0.005) ship += CS;   // Choice under the free-shipping line pays once per order
+    total = goods + ship + duty - save;
     [].forEach.call(document.querySelectorAll("section[data-cat]"), function (s) {
       var g = 0, k = 0;
-      [].forEach.call(s.querySelectorAll(".row.dec"), function (r) { if (st(r) === "yes") { k++; g += parseFloat(r.dataset.price) * qty(r); } });
+      [].forEach.call(s.querySelectorAll(".row.dec"), function (r) { if (st(r) === "yes") { k++; g += lineTotal(r); } });
       s.querySelector(".sub").textContent = k + " · " + f(g);
     });
     document.getElementById("sb-total").textContent = f(total);
     rows.forEach(line);
     eta();
-    stEl.textContent = n + " ja · Ware " + f(goods) + " · Versand " + f(ship) + " · Abgabe " + f(duty) + " (gesch.)";
+    stEl.textContent = n + " ja: Ware " + f(goods) + " + Versand " + f(ship) + " + Abgabe " + f(duty) + (save > 0.004 ? " − Rabatt " + f(save) : "");
     try { localStorage.setItem(key, JSON.stringify(keep)); } catch (e) {}
+  }
+  function lineTotal(r) {
+    var d = r.dataset; return parseFloat(d.g) * qty(r) + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
   }
   function line(r) {   // what the line costs at checkout, the same way for every row: goods + shipping + import - discount
     var d = r.dataset, q = qty(r), g = parseFloat(d.g) * q, t = g + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
@@ -722,11 +727,23 @@ _DECIDE_JS = r"""<script>
     return head + "\n```json\n" + JSON.stringify({ action: "select", report: NAME, items: items }) + "\n```";
   }
   // "In den Korb": only where the page comes from the report server (it runs the selection itself).
-  var cartB = document.getElementById("sb-cart"), sure = 0;
-  try {
-    fetch("apply", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) { if (j && j.ok) { cartB.hidden = false; send.textContent = "Chat"; } }, function () {});
-  } catch (e) {}
+  var cartB = document.getElementById("sb-cart"), note = document.getElementById("sb-note"), sure = 0;
+  function off(t) { cartB.disabled = true; note.textContent = t; note.hidden = false; }
+  function link() {
+    off("In den Korb geht nur, wenn die Seite vom Korb-Server kommt: den Link aus dem Chat öffnen (http://homeserver:8765/…/"
+      + location.pathname.split("/").pop() + ").");
+  }
+  function probe() {   // is the report server behind this page, and is a cart run going on right now?
+    try {
+      fetch("apply", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+        if (!j || !j.ok) { link(); return; }
+        document.querySelector(".dbar .main").classList.add("live"); send.textContent = "Chat";
+        if (j.busy) { off("Ein Korb-Durchgang läuft gerade, der Knopf kommt zurück, sobald er fertig ist."); cartB.textContent = "Läuft …"; setTimeout(probe, 5000); return; }
+        cartB.disabled = false; cartB.textContent = "In den Korb"; note.hidden = true;
+      }, link);
+    } catch (e) { link(); }
+  }
+  probe();
   function rebase() {   // the cart now matches the page: the next run sends only new changes
     rows.forEach(function (r) {
       var v = st(r);
@@ -988,7 +1005,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                '<div class="main"><div class="dsum"><span class="tot"><span id="sb-total"></span><span class="dl" id="sb-dl"></span></span><span class="st" id="sb-state"></span></div>'
                '<button type="button" id="sb-copy" class="cp" aria-label="Kopieren">⧉</button>'
                '<button type="button" id="sb-send" class="send">Senden</button>'
-               '<button type="button" id="sb-cart" class="send cart" hidden>In den Korb</button></div></div></div>')
+               '<button type="button" id="sb-cart" class="send cart" disabled>In den Korb</button></div>'
+               '<p class="why" id="sb-note" hidden></p></div></div>')
     js = (_DECIDE_JS.replace("__NAME__", _json.dumps(name).replace("</", "<\\/"))
           .replace("__TH__", repr(float(choice_threshold))).replace("__CS__", repr(float(choice_ship))))
     out.append(js)
