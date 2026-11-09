@@ -3623,13 +3623,14 @@ def _combo_channel(cart: dict) -> Optional[dict]:
 
 def _combo_lines(cookies: dict[str, str], cart: dict) -> Optional[list[dict]]:
     """The lines of the Kombi-Knaller cart; None when there is none, [] when it could not be read."""
-    if not _combo_channel(cart):
+    # An empty main cart sends no channel header, so its silence says nothing about the Kombi cart: read it then.
+    if not _combo_channel(cart) and cart["lines"]:
         return None
     try:
-        return _read_cart(cookies, COMBO)["lines"]
+        return _read_cart(cookies, COMBO)["lines"] or (None if not _combo_channel(cart) else [])
     except Exception as e:
         logger.debug("combo cart not readable: %s", e)
-        return []
+        return None if not _combo_channel(cart) else []
 
 
 def _round_state(r: dict, have: dict) -> str:
@@ -4003,8 +4004,8 @@ def _cart_inventory(cookies: dict[str, str]) -> list[dict]:
     """Every line of the main and the Kombi-Knaller cart (copies), marked with `cart` ("main"/"Kombi") and `tab`. Raises when a cart cannot be read."""
     c = _read_cart(cookies)
     inv = [dict(ln, cart="main", tab="") for ln in c["lines"]]
-    if _combo_channel(c):
-        inv += [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in _read_cart(cookies, COMBO)["lines"]]
+    # Always read it: an empty main cart sends no channel header, and a missed Kombi line is how duplicates slip in.
+    inv += [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in _read_cart(cookies, COMBO)["lines"]]
     return inv
 
 

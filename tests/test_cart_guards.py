@@ -99,3 +99,13 @@ def test_duplicate_notes_name_items_in_several_lines_and_shared_needs():
     assert any(n.startswith("Same item A in 2 lines") for n in notes)
     assert any("One need 'cover' on 2 lines" in n for n in notes)
     assert m._duplicate_notes(lines[2:3], tags) == []
+
+
+def test_inventory_reads_kombi_cart_when_main_cart_is_empty(monkeypatch):
+    """An empty main cart has no channel header; the Kombi cart must still be checked (live miss 2026-11-09)."""
+    kombi = {"cart_id": "9", "item_id": "1005008868115239", "sku_id": "1", "qty": 4, "title": "Essager 30W",
+             "variant": "White EU Plug", "hs": "8504409590"}
+    monkeypatch.setattr(m, "_read_cart", lambda ck, b="": {"header": {}, "lines": [kombi] if b == m.COMBO else []})
+    inv = m._cart_inventory({})
+    assert [(x["cart"], x["cart_id"]) for x in inv] == [("Kombi", "9")]
+    assert m._combo_lines({}, {"header": {}, "lines": []}) == [kombi]
