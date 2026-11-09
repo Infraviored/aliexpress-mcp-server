@@ -28,7 +28,7 @@ global, a note when the rows do not add up to the checkout). Its numbered "Zu en
 items change price or date and have no buttons: add one `decide add` card per item
 (`--option` per choice, `--recommend`), as `view_cart` tells you. Items that change nothing
 are notes; do not turn those into questions. (Product comparisons stay on the pick page below.)
-Real total for any lines: `checkout_preview`. One product, N pieces: `best_offer`.
+Real total for any lines: `checkout_preview`. What one article (or Choice vs Kombi vs global offer) really costs, with import charges and cart interaction: `real_cost` (prices the cart with and without it; never estimate). One product, N pieces: `best_offer`.
 
 ## Reports
 

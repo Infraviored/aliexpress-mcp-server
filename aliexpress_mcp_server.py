@@ -3069,6 +3069,116 @@ def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") 
     except Exception as e:
         return f"Checkout preview failed: {e}"
 
+def _real_cost_parts(p: dict) -> dict[str, float]:
+    return {"goods": p.get("subtotal") or 0.0, "discounts": -(p.get("discounts") or 0.0),
+            "shipping": p.get("shipping") or 0.0, "import charges": p.get("duty") or 0.0,
+            "duty reduction": -(p.get("duty_off") or 0.0), "total": p.get("total") or 0.0}
+
+
+def _real_cost_measure(cookies: dict[str, str], cart: dict, ids: list[str], notes: list[str]) -> str:
+    """Price the main cart's valid lines with and without `ids` (two renderOrder calls)."""
+    lines = {str(ln["cart_id"]): ln for ln in cart["lines"]}
+    unknown = [c for c in ids if c not in lines]
+    if unknown:
+        return "Unknown cart id(s) in the main cart: " + ", ".join(unknown)
+    invalid = [c for c in ids if not lines[c].get("valid", True)]
+    if invalid:
+        return "Cart line(s) not orderable (invalid): " + ", ".join(invalid)
+    base = [c for c, ln in lines.items() if ln.get("valid", True)]
+    rest = [c for c in base if c not in ids]
+    with_p = _real_cost_parts(_render_order(cookies, base))
+    without_p = _real_cost_parts(_render_order(cookies, rest)) if rest else {k: 0.0 for k in with_p}
+    pieces = sum(int(lines[c].get("qty") or 0) for c in ids)
+    out = list(notes)
+    out.append("Measured lines: " + "; ".join(
+        f"{int(lines[c].get('qty') or 0)} × {str(lines[c].get('title') or '')[:60]} ({lines[c].get('variant') or '-'})"
+        f" [cart_id {c}]" for c in ids))
+    out.append(f"Cart priced at checkout with {len(base)} line(s) and without them ({len(rest)} line(s)); nothing bought.")
+    for k in with_p:
+        out.append(f"  {k:<15} WITH {with_p[k]:9.2f}   WITHOUT {without_p[k]:9.2f}   DIFFERENCE {with_p[k] - without_p[k]:9.2f}")
+    diff = with_p["total"] - without_p["total"]
+    per = f"{diff / pieces:.2f}" if pieces else "n/a"
+    out.append(f"real cost of these lines: {diff:.2f} EUR for {pieces} pieces = {per} EUR per piece")
+    return "\n".join(out)
+
+
+@tool()
+def real_cost(cart_ids: Optional[list[str]] = None, item_id: str = "", sku_id: str = "",
+              quantity: int = 0, keep: bool = False) -> str:
+    """
+    The REAL price of cart lines, measured at AliExpress checkout: the main
+    cart is priced once WITH the lines and once WITHOUT them; the difference
+    is goods + shipping + import charges - duty reduction - discounts,
+    including how the lines interact with the rest of the cart. Nothing is bought.
+
+    Use this whenever you compare offers (Choice vs Kombi vs global seller) or
+    are asked what one article really costs. Never extrapolate import charges
+    from another line or estimate them: they depend on the whole cart and are
+    only known at checkout.
+
+    Base = every valid line of the main cart (checked or not).
+    Mode A, `cart_ids`: lines already in the main cart.
+    Mode B, `item_id` + `sku_id` + `quantity`: a candidate not in the cart. It
+    is added to the main cart, measured, and removed again (unless `keep`).
+    If the cart already holds that item+sku, nothing is added (that would raise
+    the line's quantity): that existing line is measured instead, as it is.
+
+    Kombi-Knaller lines are NOT measured this way: the main-cart checkout
+    charges them import. Their price is the Kombi page total (3+ pieces per
+    tab without import charge).
+
+    Output: per component (goods, discounts, shipping, import charges, duty
+    reduction, total) WITH / WITHOUT / DIFFERENCE, then "real cost of these
+    lines: X EUR for N pieces = Y EUR per piece".
+
+    Args:
+        cart_ids: Main-cart lines to measure (mode A).
+        item_id: Candidate product (mode B).
+        sku_id: Candidate variant (mode B).
+        quantity: Candidate pieces (mode B).
+        keep: Mode B: leave the added line in the cart.
+    """
+    cookies = load_cookies()
+    if not cookies:
+        return AUTH_EXPIRED_MSG
+    ids = [str(c) for c in cart_ids or []]
+    cand = bool(item_id or sku_id or quantity)
+    if ids and cand:
+        return "Give either cart_ids or item_id+sku_id+quantity, not both."
+    if not ids and not (item_id and sku_id and quantity > 0):
+        return "Give cart_ids (lines in the cart) or item_id + sku_id + quantity (a candidate)."
+    new_id = ""
+    try:
+        cart = _read_cart(cookies)
+        notes: list[str] = []
+        if not ids:
+            same = [str(ln["cart_id"]) for ln in cart["lines"]
+                    if str(ln.get("item_id")) == str(item_id) and str(ln.get("sku_id")) == str(sku_id)]
+            if same:
+                ids = same
+                notes.append("This item+sku is already in the cart: not added (that would raise its quantity); "
+                             "the existing line is measured with its current quantity.")
+            else:
+                res = add_to_cart(str(item_id), str(sku_id), int(quantity), combo=False)
+                m = re.search(r"cart_id\s+(\d+)", res or "")
+                if not str(res).startswith("Added") or not m:
+                    return f"Could not add the candidate to measure it: {res}"
+                new_id = m.group(1)
+                ids = [new_id]
+                cart = _read_cart(cookies)
+                notes.append(f"Candidate added temporarily as cart_id {new_id}" + (" (kept)." if keep else " and removed again."))
+        return _real_cost_measure(cookies, cart, ids, notes)
+    except PermissionError:
+        return AUTH_EXPIRED_MSG
+    except Exception as e:
+        return f"Real cost measurement failed: {e}" + (f" (candidate cart_id {new_id} {'kept' if keep else 'removed'})" if new_id else "")
+    finally:
+        if new_id and not keep:
+            try:
+                remove_from_cart([new_id])
+            except Exception:
+                pass
+
 
 @tool()
 def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: str = "", match: str = "",
