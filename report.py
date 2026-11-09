@@ -633,6 +633,7 @@ _DECIDE_JS = r"""<script>
       var it = { item_id: r.dataset.item, sku_id: r.dataset.sku, qty: q, state: v, category: r.closest("section").dataset.cat };
       if (cid) { it.cart_id = cid; it.qty0 = parseInt(r.dataset.qty0, 10); }
       if (r.dataset.replaces) { if (v !== "yes") return; it.replaces = r.dataset.replaces.split(","); }
+      if (r.dataset.combo) it.combo = true;
       var nt = r.querySelector('.note-in').value.trim(); if (nt) it.note = nt;
       items.push(it);
     });
@@ -807,6 +808,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             repl = c.get("replaces")
             repl = ",".join(str(x) for x in repl) if isinstance(repl, (list, tuple)) else str(repl or "")
             cart += f' data-replaces="{_e(repl)}"' if repl else ""
+            cart += ' data-combo="1"' if c.get("combo") else ""
             # a page default that is itself a change (merged lines) starts from the cart's state
             state0 = c.get("state0") if c.get("state0") in ("yes", "maybe", "no", "delete") else state
             rows.append(

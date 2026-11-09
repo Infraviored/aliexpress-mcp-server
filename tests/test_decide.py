@@ -112,13 +112,13 @@ def test_decide_cart_offers_the_choice_alternative_of_a_global_line(monkeypatch)
     line = {"cart_id": "11", "item_id": "1", "sku_id": "2", "title": "Sensor", "variant": "Purple", "price": 14.59, "qty": 3,
             "checked": True, "valid": True, "ship": 3.38, "group": "global", "choice": False, "image": "", "delivery": ("16.11.", "24.11.")}
     alt = {"item_id": "99", "title": "Sensor Choice", "url": "https://x/99", "img": None, "buy": "3× Purple", "cost": 40.0, "days": 5,
-           "lines": [{"sku_id": "77", "qty": 3}], "ambiguous": False}
+           "sku_id": "77", "qty": 3, "ambiguous": False, "combo": False, "choice": True, "pieces": 3}
     monkeypatch.setattr(m, "load_cookies", lambda: {"a": "b"})
     monkeypatch.setattr(m, "_read_cart", lambda cookies, business="": {"lines": [line], "header": {}})
     monkeypatch.setattr(m, "_combo_lines", lambda cookies, cart: [])
     monkeypatch.setattr(m, "_line_store", lambda: {})
     monkeypatch.setattr(m, "_alt_cache", lambda: {})
-    monkeypatch.setattr(m, "_choice_alternative", lambda ln, tag, cache: alt)
+    monkeypatch.setattr(m, "_line_deal", lambda ln, tag, cache: {"now": 60.0, "best": alt, "kombi": None})
     monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
     written = {}
     monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(page=page), "ok")[1])
@@ -126,7 +126,7 @@ def test_decide_cart_offers_the_choice_alternative_of_a_global_line(monkeypatch)
     assert 'data-replaces="11"' not in written["page"] and "NOT ON THE PAGE YET" in out and "11 " in out   # not approved: held back
     out = m.decide_cart(approved_alternatives=["11"])
     p = written["page"]
-    assert 'data-replaces="11"' in p and 'data-item="99"' in p and 'class="pill">Choice-Alternative' in p and "spart" in p
+    assert 'data-replaces="11"' in p and 'data-item="99"' in p and 'class="pill">Günstiger' in p and "spart" in p
     assert "NOT ON THE PAGE YET" not in out
 
 
@@ -134,18 +134,18 @@ def test_decide_cart_rejects_an_implausibly_cheap_alternative(monkeypatch):
     line = {"cart_id": "11", "item_id": "1", "sku_id": "2", "title": "Hotend", "variant": "", "price": 20.3, "qty": 1,
             "checked": True, "valid": True, "ship": 2.66, "group": "global", "choice": False, "image": "", "delivery": None}
     alt = {"item_id": "99", "title": "Silicone sock", "url": "https://x/99", "img": None, "buy": "1× sock", "cost": 0.78, "days": 5,
-           "lines": [{"sku_id": "77", "qty": 1}], "ambiguous": False}
+           "sku_id": "77", "qty": 1, "ambiguous": False, "combo": False, "choice": False, "pieces": 1}
     monkeypatch.setattr(m, "load_cookies", lambda: {"a": "b"})
     monkeypatch.setattr(m, "_read_cart", lambda cookies, business="": {"lines": [line], "header": {}})
     monkeypatch.setattr(m, "_combo_lines", lambda cookies, cart: [])
     monkeypatch.setattr(m, "_line_store", lambda: {})
     monkeypatch.setattr(m, "_alt_cache", lambda: {})
-    monkeypatch.setattr(m, "_choice_alternative", lambda ln, tag, cache: alt)
+    monkeypatch.setattr(m, "_line_deal", lambda ln, tag, cache: {"now": 60.0, "best": alt, "kombi": None})
     monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
     written = {}
     monkeypatch.setattr(m, "_write_report", lambda name, page: (written.update(page=page), "ok")[1])
     out = m.decide_cart(approved_alternatives=["11"])   # even approved: the price guard holds it back
-    assert 'data-replaces' not in written["page"] and "a different article" in out
+    assert 'data-replaces' not in written["page"] and "BETTER DEALS" not in out   # a bait price never wins
 
 
 def test_apply_selection_swaps_in_the_alternative_and_removes_the_old_line(monkeypatch):
