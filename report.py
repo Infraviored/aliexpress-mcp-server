@@ -513,8 +513,8 @@ _DECIDE_CSS = """<style>
 .cat-h { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 9px 2px 7px;
   background: var(--bg); border-bottom: 1px solid var(--line); }
 .cat-h h2 { flex: 1; min-width: 0; margin: 0; font: 600 .95rem var(--body); letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cat-h .sub { font: .78rem var(--mono); color: var(--muted); white-space: nowrap; }
-.cat-h button { font: inherit; font-size: .78rem; background: none; border: 0; padding: 4px 2px; color: var(--accent); cursor: pointer; }
+.cat-h .sub { font: .78rem var(--body); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.cat-h button { font: inherit; font-size: .78rem; background: none; border: 0; padding: 4px 4px; color: var(--fg); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; cursor: pointer; }
 section[data-cat] .rows { display: block; background: none; border: 0; border-radius: 0; }
 .row.dec { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 4px 8px; align-items: start; padding: 8px 0;
   border-top: 1px solid var(--line); background: none; }
@@ -533,29 +533,25 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
 .tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
 .tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.tx .pills { display: flex; flex-wrap: wrap; gap: 4px; }
-.tx .pill { justify-self: start; padding: 1px 8px; border-radius: 99px; font: 600 .68rem var(--body); background: var(--accent); color: var(--surface); }
-.tx .pill.save { font-weight: 800; }
-.tx .pill.cart { background: var(--line); color: var(--fg); }
-.tx .pill.slow { background: var(--warn-bg); color: var(--warn); }
-.tx .pill.eta { background: var(--warn-bg); color: var(--warn); }
-.tx .bd, .tx .dv { font-size: .76rem; line-height: 1.3; color: var(--muted); font-variant-numeric: tabular-nums; }
-.tx .dv { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx .pills { display: flex; flex-wrap: wrap; gap: 0 8px; }
+.tx .pill { font: 600 .72rem/1.3 var(--body); color: var(--muted); }
+.tx .pill.eta, .tx .pill.slow { color: var(--warn); }
+.tx .pill.eta.same, .tx .pill.eta.fast, .tx .pill.info, .tx .pill.cart { color: var(--muted); }
+.tx .bd, .tx .dv { font-size: .76rem; line-height: 1.35; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tx .bd { display: flex; flex-wrap: wrap; gap: 0 12px; }
+.tx .bd .eq { color: var(--fg); font-weight: 600; }
+.tx .dv { overflow-wrap: anywhere; }
 .tx .dv b { font-weight: 600; color: var(--fg); }
-.grp-h .gx { display: block; color: var(--fg); font-weight: 600; }
-.tx .pr > span:first-child { display: grid; }
+.tx .need .var { color: var(--muted); font-weight: 400; }
+.tx .pr > span:first-child { display: block; }
 .tx .pr .lt { white-space: nowrap; }
-.tx .pr .pp { white-space: nowrap; font: 400 .76rem var(--body); color: var(--muted); margin-left: 0; }
-.tx .pill.eta.fast { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
-.tx .pill.eta.same { background: none; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
-.tx .pill.info { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.tx .pr .save { font: 800 .9rem var(--mono); color: var(--accent); margin-left: 8px; white-space: nowrap; }
-.grp { border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; margin: 8px 0; padding: 0 10px; }
+.grp { border: 1px solid var(--line); border-radius: 12px; margin: 8px 0; padding: 0 12px; }
 .grp + .row.dec, .row.dec + .grp { border-top: 0; }
-.grp-h { padding: 8px 0 2px; font: 600 .78rem var(--body); color: var(--accent); }
-.grp-h span { color: var(--muted); font-weight: 400; }
+.grp-h { padding: 8px 0 4px; font: 600 .8rem/1.35 var(--body); color: var(--fg); }
+.grp-h .gs { display: block; font-weight: 400; font-size: .76rem; color: var(--muted); }
+.grp-h .gx { margin-left: 8px; }
 .grp .grp-h + .row.dec { border-top: 0; }
-.tx .pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 600 1rem var(--mono); font-variant-numeric: tabular-nums; }
+.tx .pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 600 1.05rem var(--body); font-variant-numeric: tabular-nums; }
 .stp { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--surface); }
 .stp button { width: 26px; height: 26px; padding: 0; border: 0; background: none; color: var(--fg); font: 600 1rem var(--body); cursor: pointer; }
 .stp .qty { width: 2.2rem; height: 26px; padding: 0; border: 0; border-radius: 0; text-align: center; font: 600 .9rem var(--mono); -moz-appearance: textfield; background: none; }
@@ -563,18 +559,17 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .pr small { font: 400 .75rem var(--body); color: var(--muted); margin-left: 6px; }
 .tx .vd { font-size: .8rem; line-height: 1.3; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
 .tx .vd b { font-weight: 700; }
-.tx .vd .ok { color: var(--accent); } .tx .vd .q { color: var(--warn); }
+.tx .vd .ok { color: var(--fg); } .tx .vd .q { color: var(--warn); }
 .row.open .tx .vd { display: block; }
 .ctl { grid-column: 1; grid-row: 2; }
 .note-in { width: 100%; box-sizing: border-box; margin-top: 3px; padding: 3px 6px; font: .78rem var(--body); border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
-.seg { display: grid; width: 112px; box-sizing: border-box; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; }
+.seg { display: grid; width: 112px; box-sizing: border-box; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; background: var(--bg); }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
-.seg label { height: 26px; line-height: 0; display: grid; place-items: center; cursor: pointer; border-left: 1px solid var(--line); color: var(--muted); background: var(--surface); }
-.seg input:first-child + label { border-left: 0; }
+.seg label { height: 26px; line-height: 0; display: grid; place-items: center; cursor: pointer; border-radius: 6px; color: var(--muted); background: none; }
 .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
 .seg input:checked + label.y { background: var(--accent); color: var(--surface); }
 .seg input:checked + label.m { background: var(--duty); color: #222421; }
-.seg input:checked + label.n { background: var(--ship); color: var(--fg); }
+.seg input:checked + label.n { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line), 0 1px 2px rgba(0, 0, 0, .18); }
 .seg input:checked + label.d { background: var(--warn); color: var(--surface); }
 .more { grid-column: 1 / -1; grid-row: 3; display: none; font-size: .82rem; color: var(--muted); gap: 6px; padding-top: 2px; }
 .row.open .more { display: grid; }
@@ -598,8 +593,8 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .dbar .dsum { flex: 1 1 220px; min-width: 0; display: grid; }
 .dbar .why { margin: 0; font-size: .74rem; line-height: 1.35; color: var(--warn); overflow-wrap: anywhere; }
 @media (max-width: 520px) { .dbar .dsum { flex-basis: 100%; } .dbar #sb-cart { flex: 1; } }
-.dbar .tot { font: 600 1.05rem var(--mono); font-variant-numeric: tabular-nums; line-height: 1.1; }
-.dbar .tot .dl { font: 600 .78rem var(--body); color: var(--accent); margin-left: 8px; white-space: nowrap; }
+.dbar .tot { font: 600 1.05rem var(--body); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.dbar .tot .dl { font: 400 .78rem var(--body); color: var(--fg); margin-left: 12px; white-space: nowrap; }
 .dbar .st { font-size: .72rem; line-height: 1.35; color: var(--muted); }
 .dbar .send { font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px; padding: 0 16px; height: 38px;
   background: var(--accent); color: var(--surface); }
@@ -619,6 +614,7 @@ _DECIDE_JS = r"""<script>
   try { saved = JSON.parse(localStorage.getItem(key) || "{}"); } catch (e) {}
   var rows = [].slice.call(document.querySelectorAll(".row.dec"));
   function f(x) { return x.toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))/g, ".") + " €"; }
+  function fp(x) { return f(x).replace(" €", "\u202f€"); }   // display: no break before the euro sign
   function st(r) { return r.querySelector("input[type=radio]:checked").value; }
   function qty(r) { return Math.max(1, parseInt(r.querySelector(".qty").value, 10) || 1); }
   rows.forEach(function (r) {
@@ -647,12 +643,12 @@ _DECIDE_JS = r"""<script>
     [].forEach.call(document.querySelectorAll("section[data-cat]"), function (s) {
       var g = 0, k = 0;
       [].forEach.call(s.querySelectorAll(".row.dec"), function (r) { if (st(r) === "yes") { k++; g += lineTotal(r); } });
-      s.querySelector(".sub").textContent = k + " · " + f(g);
+      s.querySelector(".sub").textContent = k + " Ja, " + fp(g);
     });
-    document.getElementById("sb-total").textContent = f(total);
+    document.getElementById("sb-total").textContent = fp(total);
     rows.forEach(line);
     eta();
-    stEl.textContent = n + " ja: Ware " + f(goods) + " + Versand " + f(ship) + " + Abgabe " + f(duty) + (save > 0.004 ? " − Rabatt " + f(save) : "");
+    stEl.textContent = n + " ja: Ware " + fp(goods) + " + Versand " + fp(ship) + " + Abgabe " + fp(duty) + (save > 0.004 ? " − Rabatt " + fp(save) : "");
     try { localStorage.setItem(key, JSON.stringify(keep)); } catch (e) {}
   }
   function lineTotal(r) {
@@ -660,13 +656,15 @@ _DECIDE_JS = r"""<script>
   }
   function line(r) {   // what the line costs at checkout, the same way for every row: goods + shipping + import - discount
     var d = r.dataset, q = qty(r), g = parseFloat(d.g) * q, t = g + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
-    var el = r.querySelector(".lt"), pk0 = parseFloat(r.dataset.pk) * q; if (el) el.textContent = f(t);
-    var pp = r.querySelector(".pp"); if (pp) pp.textContent = "gesamt · " + f(t / Math.max(1, pk0)) + "/Stück";
+    var el = r.querySelector(".lt"), pk0 = parseFloat(r.dataset.pk) * q; if (el) el.textContent = fp(t);
     var b = r.querySelector(".bd"); if (!b) return;
-    var pk = parseFloat(d.pk) * q, parts = [q + "× " + f(parseFloat(d.g)) + " Ware"];
-    parts.push(parseFloat(d.s) > 0.004 ? f(parseFloat(d.s)) + " Versand" : "Versand frei");
-    if (parseFloat(d.d) > 0.004) parts.push(f(parseFloat(d.d)) + " Abgabe");
-    b.textContent = parts.join(" + ") + (parseFloat(d.r) > 0.004 ? " − " + f(parseFloat(d.r)) + " Rabatt" : "") + "";
+    var N = " ", gs = parseFloat(d.s), dt = parseFloat(d.d), rb = parseFloat(d.r), parts = [q + N + "×" + N + fp(parseFloat(d.g)).replace(" ", N) + N + "Ware"];
+    parts.push(gs > 0.004 ? "+" + N + fp(gs).replace(" ", N) + N + "Versand" : "Versand" + N + "frei");
+    if (dt > 0.004) parts.push("+" + N + fp(dt).replace(" ", N) + N + "Abgabe");
+    if (rb > 0.004) parts.push("−" + N + fp(rb).replace(" ", N) + N + "Rabatt");
+    b.textContent = "";
+    parts.forEach(function (x) { var e = document.createElement("span"); e.textContent = x; b.appendChild(e); });
+    var e = document.createElement("span"); e.className = "eq"; e.textContent = "=" + N + fp(t / Math.max(1, pk0)).replace(" ", N) + "/Stück"; b.appendChild(e);
   }
   function day(s) { return Date.parse(s + "T00:00:00Z") / 864e5; }
   function dm(s) { return s.slice(8, 10) + "." + s.slice(5, 7) + "."; }
@@ -847,6 +845,30 @@ def line_parts(c: dict) -> tuple[float, float, float, float]:
     return (float(c.get("price") or 0), float(c.get("ship") or 0), float(c.get("duty") or 0), 0.0)
 
 
+def _title_html(t: str) -> str:
+    """'need · variant': the variant after the first ' · ' in muted type instead of a dot."""
+    need, sep, var = str(t).partition(" · ")
+    return _e(need) + (f' <span class="var">{_e(var)}</span>' if sep else "")
+
+
+def _m(x: float) -> str:
+    """eur() for display: no line break before the currency sign."""
+    return eur(x).replace(" ", "\u202f")
+
+
+def _receipt(q: int, g1: float, s1: float, d1: float, r1: float, per_piece: float) -> str:
+    """The breakdown of a line as receipt items; the JS in decide_page rebuilds the same when the quantity changes."""
+    nb = "\u00a0"
+    nbm = lambda x: _m(x).replace("\u202f", nb)
+    items = [f"{q}{nb}×{nb}{nbm(g1)}{nb}Ware",
+             f"+{nb}{nbm(s1)}{nb}Versand" if s1 > 0.004 else f"Versand{nb}frei"]
+    if d1 > 0.004:
+        items.append(f"+{nb}{nbm(d1)}{nb}Abgabe")
+    if r1 > 0.004:
+        items.append(f"−{nb}{nbm(r1)}{nb}Rabatt")
+    return "".join(f"<span>{i}</span>" for i in items) + f'<span class="eq">={nb}{nbm(per_piece)}/Stück</span>'
+
+
 def line_total(c: dict) -> float:
     g, s, d, rb = line_parts(c)
     return g * int(c.get("qty") or 1) + s + d - rb
@@ -884,8 +906,8 @@ def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) 
         if d_new and d_old and d_new != d_old:
             cmp += (", aber" if d_new > d_old else " und") + f" Lieferung {_dm(d_new)} statt {_dm(d_old)}"
         who = "Alternative" if len(olds) == 1 else f"Eine Zeile statt {len(olds)}"
-        head = f"{who}: {cmp}" + " <span>· nur einer auf Ja</span>"
-        out.append(f'<div class="grp"><div class="grp-h">{head}<span class="gx"></span></div>{"".join(rows[j] for j in order)}</div>')
+        head = f"{who}: {cmp}"
+        out.append(f'<div class="grp"><div class="grp-h">{head}<span class="gs">nur einer auf Ja<span class="gx"></span></span></div>{"".join(rows[j] for j in order)}</div>')
     return out
 
 
@@ -966,7 +988,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 dv.append(_e(c["seller"]))
             if c.get("cart_id") and str(c["cart_id"]) in replaced:
                 dv.append("jetzt im Korb")
-            dv_html = f'<div class="bd"></div><div class="dv">{" · ".join(dv)}</div>'
+            dv_html = (f'<div class="bd">{_receipt(qty, g1, s1, d1, r1, line_total(c) / max(1.0, pk * qty))}</div>'
+                       f'<div class="dv">{", ".join(dv)}</div>')
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
                 f'<label class="{v[0]}" for="{rid}{v[0]}" title="{icons[v][1]}" aria-label="{icons[v][1]}">{icons[v][0]}</label>'
@@ -987,8 +1010,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}"{until} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
-                f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
-                f'<div class="pr"><span><span class="lt">{eur(line_total(c))}</span><small class="pp">gesamt · {eur(line_total(c) / max(1.0, pk * qty))}/Stück</small></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
+                f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_title_html(c["title"])}</span>'
+                f'<div class="pr"><span><span class="lt">{_m(line_total(c))}</span></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
                 f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
                 f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
