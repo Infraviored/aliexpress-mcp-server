@@ -69,7 +69,7 @@ def test_combo_cart_pieces_count_towards_the_three(monkeypatch):
 
 def test_apply_selection_passes_combo_to_add_to_cart(monkeypatch):
     seen = []
-    monkeypatch.setattr(m, "add_to_cart", lambda i, s, q, list_name="", need="", combo=False: (seen.append((i, combo)), "Added")[1])
+    monkeypatch.setattr(m, "add_to_cart", lambda i, s, q, list_name="", need="", combo=False, force=False: (seen.append((i, combo)), "Added")[1])
     monkeypatch.setattr(m, "remove_from_cart", lambda ids: "Removed")
     sel = "```json\n" + json.dumps({"action": "select", "items": [
         {"item_id": "9", "sku_id": "8", "qty": 3, "state": "yes", "combo": True, "replaces": ["11"]},

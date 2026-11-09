@@ -61,5 +61,5 @@ def test_add_to_cart_combo_posts_business_and_reports_the_line(monkeypatch):
         sent.update(payload)
         return {"ret": ["SUCCESS::ok"], "data": {"cartId": "1"}}
     monkeypatch.setattr(m, "mtop_call", fake)
-    out = m.add_to_cart("1005007458395843", "12000040839368395", 5, combo=True)
+    out = m.add_to_cart("1005007458395843", "12000040839368395", 5, combo=True, force=True)
     assert sent["business"] == "nn_mix" and "Kombi-Knaller cart" in out and "cart_id 1" in out

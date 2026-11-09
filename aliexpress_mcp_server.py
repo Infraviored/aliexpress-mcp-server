@@ -768,8 +768,8 @@ def _price_hits(products: list[dict], pieces: int, match: str, avoid: str, rank_
         except Exception as e:
             logger.debug("ranking %s failed: %s", h["item_id"], e)
             continue
-        if not cached:
-            time.sleep(0.5)
+        if not cached and not getattr(_CALL, "background", False):
+            time.sleep(0.5)      # a background job already waits for the pacing gap before every call
         notes += n[:1] if not ways else []
         if ways:
             rows.append((ways[0], h))
@@ -899,12 +899,12 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
 
 
 # Product pages repeat within one deal search (variants, pictures, best_offer).
-PDP_TTL = 600
+PDP_TTL = 3600     # a long job (kombi_check of 17 lines runs ~10 min) must not fetch the same page twice
 _PDP_CACHE: dict[str, tuple[float, dict]] = {}
 # Also on disk, so a new server process (or a direct script run) does not fetch the same
 # product pages again: fewer calls, fewer bot checks. Prices change slowly enough for hours.
 PDP_DISK_TTL = float(os.environ.get("ALIEXPRESS_PDP_DISK_TTL", "10800"))
-PDP_DISK_MAX = 40
+PDP_DISK_MAX = 200
 _PDP_FILE = CREDENTIALS_PATH.parent / "aliexpress-pdp-cache.json"
 
 
@@ -1403,18 +1403,31 @@ def _collected_coupons() -> set[str]:
     return set(_coupon_stamps())
 
 
+# A freight quote is two paced calls (qty 1 and 2). Prices of the same item come up again and again within one job
+# (the line itself, the hits of the next line, the recheck): remember the quote for as long as the product page.
+FREIGHT_TTL = PDP_TTL
+_FREIGHT_CACHE: dict[tuple, tuple[float, Optional[dict]]] = {}
+
+
 def _freight(offer: dict, sku_id: Optional[str] = None) -> Optional[dict]:
     """Shipping as A + B·(qty-1) for a non-Choice offer (None for Choice)."""
     if offer.get("choice"):
         return None
+    key = (str(offer["item_id"]), str(sku_id or ""), COUNTRY, CURRENCY)
+    hit = _FREIGHT_CACHE.get(key)
+    if hit and time.time() - hit[0] < FREIGHT_TTL:
+        return dict(hit[1])
     try:
-        return deals.freight_quote(
+        quote = deals.freight_quote(
             mtop_call, offer["item_id"], COUNTRY, CURRENCY, offer.get("delivery_ext"),
             offer["url"], sku_id=sku_id,
         )
     except Exception as e:
         logger.debug("freight quote %s failed: %s", offer["item_id"], e)
         return None
+    if quote:                       # a failed quote may be a bot check: ask again next time
+        _FREIGHT_CACHE[key] = (time.time(), dict(quote))
+    return quote
 
 
 def _words(text: str) -> list[str]:
@@ -3159,7 +3172,7 @@ def real_cost(cart_ids: Optional[list[str]] = None, item_id: str = "", sku_id: s
                 notes.append("This item+sku is already in the cart: not added (that would raise its quantity); "
                              "the existing line is measured with its current quantity.")
             else:
-                res = add_to_cart(str(item_id), str(sku_id), int(quantity), combo=False)
+                res = add_to_cart(str(item_id), str(sku_id), int(quantity), combo=False, force=True)   # temporary measuring line, removed again
                 m = re.search(r"cart_id\s+(\d+)", res or "")
                 if not str(res).startswith("Added") or not m:
                     return f"Could not add the candidate to measure it: {res}"
@@ -3201,7 +3214,8 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
             ("I2S-Mikrofon"); it is the line's name on the overview page.
         query: Search words for an alternative.
         match: Words the alternative's variant or title must contain.
-        avoid: Words that rule an alternative out.
+        avoid: Words that rule an alternative out. view_cart warns when a line has one and add_to_cart
+            refuses such a variant. Words are split at spaces; use commas for phrases ("US plug, UK plug").
         optional: True for parts that are only "to compare" or nice to have;
             the overview offers to drop them.
     """
@@ -3306,7 +3320,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
             # Without match words nothing says the offer is the same article (a 120 W charging station is no 30 W PSU).
             w, h = best
             unsure.append(f"- {name} (cart_id {ln['cart_id']}): cheapest hit {h['title'][:70]} ({h['item_id']}) would be {gain:.2f} "
-                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked")
+                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked\n"
+                          + _swap_photos(ln, h, w["lines"][0][0]["sku_id"]))
         elif best:
             w, h = best
             swaps.append((gain, f"- {name} x{pieces} (cart_id {ln['cart_id']}): now {cur['net']:.2f} net -> {w['net']:.2f} net, "
@@ -3314,7 +3329,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
                                 + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
                                 + f"\n  {_way_text(w)}\n  do: item {h['item_id']} "
                                 + ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])
-                                + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}"))
+                                + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}\n"
+                                + _swap_photos(ln, h, w["lines"][0][0]["sku_id"])))
         elif cur and not rows:
             failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced (bot check or no hit with the match words)"
                           f" - search by hand; the line itself costs {cur['net']:.2f} net")
@@ -3353,6 +3369,32 @@ def _kombi_orders(picks: list[dict], limit: int) -> list[list[dict]]:
     return orders
 
 
+def _swap_photos(ln: dict, cand: dict, sku_id: str = "") -> str:
+    """Text for a swap proposal: the comparison picture (cart line left, candidate right) and the candidate's main photo URL.
+    A proposal never goes out without a way to look at the candidate: picture, else URLs, else the product link."""
+    item_id = str(cand.get("item_id") or "")
+    url = f"{BASE_URL}/item/{item_id}.html"
+    try:
+        offer = _pdp_offer(item_id) or {}       # cached: the candidate was just priced
+    except PermissionError:
+        raise
+    except Exception as e:
+        logger.debug("photos of %s: %s", item_id, e)
+        offer = {}
+    photos = [u for u in [*(offer.get("images") or []), offer.get("image")] if u]
+    var_img = next((v.get("image") for v in offer.get("variants", []) if sku_id and str(v.get("sku_id")) == str(sku_id) and v.get("image")), "")
+    main = photos[0] if photos else var_img
+    mine = ln.get("image") or ""
+    pic = None
+    if main and mine:
+        pic = _compare_image(f"swap-{ln['cart_id']}", _report_image({"image": mine}), _report_image({"image": main}))
+    urls = ((f"candidate photo: {'https:' + main if main.startswith('//') else main}" if main else "")
+            + (f"; cart line photo: {'https:' + mine if mine.startswith('//') else mine}" if mine else ""))
+    if pic:
+        return f"  Comparison picture, READ IT (cart line left, candidate right): {pic}" + (f"\n  ({urls})" if urls else "")
+    return "  No comparison picture; " + (urls + f"; product page {url}" if urls else f"no photo found, open {url} and look before judging")
+
+
 def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
     cookies = load_cookies()
     if not cookies:
@@ -3380,13 +3422,13 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
                 none.append(f"- {name} ({ln['cart_id']}): no Kombi-Knaller offer in the hits of '{query}'")
                 continue
             rows, _, _ = _price_hits(hits, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False)
-            cur = _current_way(ln, pieces)
+            rows = [(w, h) for w, h in rows if w["pieces"] >= pieces]
+            cur = _current_way(ln, pieces) if rows else None      # nothing to compare with: do not price the line itself
         except PermissionError:
             return AUTH_EXPIRED_MSG
         except Exception as e:
             failed.append(f"{name} ({ln['cart_id']}): {e}")
             continue
-        rows = [(w, h) for w, h in rows if w["pieces"] >= pieces]
         if not cur or not rows:
             failed.append(f"{name} ({ln['cart_id']}): Kombi offers or the line could not be priced")
             continue
@@ -3397,13 +3439,16 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
         gain = cur["net"] - kombi_net
         entry = {"name": name, "cart_id": ln["cart_id"], "pieces": w["pieces"], "gain": gain, "kombi_net": kombi_net,
                  "now": cur["net"], "item_id": h["item_id"], "title": h["title"][:70], "way": w,
-                 "do": ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])}
+                 "do": ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"]),
+                 "photos": ""}
         if gain <= 0.004:
             none.append(f"- {name} ({ln['cart_id']}): Kombi is not cheaper ({kombi_net:.2f} vs {cur['net']:.2f} net)")
         elif not t.get("match"):
             unsure.append(f"- {name} ({ln['cart_id']}): Kombi {h['title'][:60]} ({h['item_id']}) would save {gain:.2f} - UNVERIFIED, "
-                          "no match words on this line; check that it is the same article first")
+                          "no match words on this line; check that it is the same article first\n"
+                          + _swap_photos(ln, h, w["lines"][0][0]["sku_id"]))
         else:
+            entry["photos"] = _swap_photos(ln, h, w["lines"][0][0]["sku_id"])
             moves.append(entry)
     out = [f"Kombi-Knaller check of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, discounts; Kombi without "
            "import charge, which needs 3+ Kombi pieces in the order):"]
@@ -3413,7 +3458,7 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
         for m_ in sorted(moves, key=lambda x: -x["gain"]):
             out.append(f"- {m_['name']} x{m_['pieces']} (cart_id {m_['cart_id']}): now {m_['now']:.2f} -> Kombi {m_['kombi_net']:.2f}, "
                        f"SAVES {m_['gain']:.2f}\n  {m_['title']}\n  do: add_to_cart item {m_['item_id']} {m_['do']} combo=True, "
-                       f"then remove_from_cart {m_['cart_id']}")
+                       f"then remove_from_cart {m_['cart_id']}\n{m_['photos']}")
         limit = COMBO_MAX_LINES or 10
         orders = _kombi_orders(moves, limit) if pcs >= COMBO_MIN_PIECES else []
         if not orders:
@@ -3440,7 +3485,7 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
 
 
 @tool(slow=True)
-def kombi_check(list_name: str = "", rank_top: int = 6, max_lines: int = 12, skip: int = 0, job_id: str = "") -> str:
+def kombi_check(list_name: str = "", rank_top: int = 4, max_lines: int = 12, skip: int = 0, job_id: str = "") -> str:
     """
     Where would the Kombi-Knaller (Bundle Deals) be cheaper? For each cart line of
     a shopping list: searches its need, takes only the hits flagged Kombi, prices them
@@ -3455,7 +3500,7 @@ def kombi_check(list_name: str = "", rank_top: int = 6, max_lines: int = 12, ski
 
     Args:
         list_name: only lines of this shopping list (empty: all listed lines).
-        rank_top: Kombi hits priced per line (max 25).
+        rank_top: Kombi hits priced per line (max 25; each one costs 1 to 3 paced AliExpress calls).
         max_lines: lines per call; continue with skip.
         skip: lines to skip first.
         job_id: pick up a running or finished check.
@@ -3578,13 +3623,14 @@ def _combo_channel(cart: dict) -> Optional[dict]:
 
 def _combo_lines(cookies: dict[str, str], cart: dict) -> Optional[list[dict]]:
     """The lines of the Kombi-Knaller cart; None when there is none, [] when it could not be read."""
-    if not _combo_channel(cart):
+    # An empty main cart sends no channel header, so its silence says nothing about the Kombi cart: read it then.
+    if not _combo_channel(cart) and cart["lines"]:
         return None
     try:
-        return _read_cart(cookies, COMBO)["lines"]
+        return _read_cart(cookies, COMBO)["lines"] or (None if not _combo_channel(cart) else [])
     except Exception as e:
         logger.debug("combo cart not readable: %s", e)
-        return []
+        return None if not _combo_channel(cart) else []
 
 
 def _round_state(r: dict, have: dict) -> str:
@@ -3717,7 +3763,12 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                 + (f" — do: {d['do']}" if d.get("do") else "") for i, d in enumerate(real, 1)))
     except Exception as e:
         page = f"(page not written: {e})"
-    return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined),
+    notes = _duplicate_notes([dict(ln, cart="main", tab="") for ln in c["lines"]]
+                             + [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in combo_lines or []], tags)
+    warn = ["## Possible duplicates (check before ordering)\n" + "\n".join("- " + n for n in notes)] if notes else []
+    feat = _feature_notes([dict(ln, cart="main") for ln in c["lines"]] + [dict(ln, cart="Kombi") for ln in combo_lines or []], tags)
+    warn += ["## Required features (match / avoid words of the list tags)\n" + "\n".join("- " + n for n in feat)] if feat else []
+    return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined)] + warn + [
                          page, "## Details (for you)\n" + text, _combo_text(cookies, c, combo_lines)] + previews).replace("\n\n\n\n", "\n\n")
 
 
@@ -3897,15 +3948,114 @@ def _cart_add(cookies: dict[str, str], item_id: str, sku_id: str, quantity: int,
     return cid
 
 
+def _tag_terms(text: str) -> list[str]:
+    """Terms of a match/avoid tag: comma-separated phrases ("US plug, UK plug"), else single words."""
+    t = (text or "").strip()
+    return [x.strip().lower() for x in t.split(",") if x.strip()] if "," in t else _words(t)
+
+
+def _has_term(text: str, term: str) -> bool:
+    """Case-insensitive, on word edges: "us" is not in "USB", "eu" not in "Europe"."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])", (text or "").lower()) is not None
+
+
+def _feature_problems(tag_list: list[dict], text: str) -> tuple[list[str], list[str]]:
+    """(match words missing from `text`, avoid words found in it) over the match/avoid tags of one need."""
+    missing, avoided = [], []
+    for t in tag_list:
+        missing += [w for w in _tag_terms(t.get("match", "")) if not _has_term(text, w) and w not in missing]
+        avoided += [w for w in _tag_terms(t.get("avoid", "")) if _has_term(text, w) and w not in avoided]
+    return missing, avoided
+
+
+def _feature_notes(lines: list[dict], tags: dict) -> list[str]:
+    """view_cart warnings: a line whose title+variant lacks a required (match) word or has an avoided word."""
+    out = []
+    for ln in lines:
+        t = tags.get(str(ln["cart_id"])) or {}
+        missing, avoided = _feature_problems([t], f"{ln['title']} {ln['variant']}")
+        label = f"{t.get('need') or ln['title'][:40]} ({ln['variant'] or 'no variant'}, cart_id {ln['cart_id']})"
+        out += [f"{label}: MISSING REQUIRED: {w}" for w in missing] + [f"{label}: HAS AVOIDED: {w}" for w in avoided]
+    return out
+
+
+def _add_feature_check(item_id: str, sku_id: str, need: str, list_name: str, tags: dict) -> str:
+    """Refusal text when the chosen variant lacks a match word or has an avoid word of the need's tags ("" when fine or unknowable)."""
+    want = (need or "").strip().lower()
+    if not want:
+        return ""
+    group = [t for t in tags.values() if (t.get("need") or "").strip().lower() == want
+             and (not list_name or t.get("list") == list_name.strip())]
+    if not any(t.get("match") or t.get("avoid") for t in group):
+        return ""
+    offer = _pdp_offer(str(item_id))
+    var = next((v for v in (offer or {}).get("variants", []) if str(v["sku_id"]) == str(sku_id)), None)
+    if not offer or not var:
+        return ""
+    missing, avoided = _feature_problems(group, f"{offer['title']} {var['label']}")
+    if not (missing or avoided):
+        return ""
+    return ("WRONG VARIANT, nothing added: '" + var["label"] + "' for need '" + need + "': "
+            + "; ".join([f"MISSING REQUIRED: {w}" for w in missing] + [f"HAS AVOIDED: {w}" for w in avoided])
+            + ". Pick another variant (get_product_variants / get_variant_images), or force=True if it is right anyway.")
+
+
+def _cart_inventory(cookies: dict[str, str]) -> list[dict]:
+    """Every line of the main and the Kombi-Knaller cart (copies), marked with `cart` ("main"/"Kombi") and `tab`. Raises when a cart cannot be read."""
+    c = _read_cart(cookies)
+    inv = [dict(ln, cart="main", tab="") for ln in c["lines"]]
+    # Always read it: an empty main cart sends no channel header, and a missed Kombi line is how duplicates slip in.
+    inv += [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in _read_cart(cookies, COMBO)["lines"]]
+    return inv
+
+
+def _inv_line_text(ln: dict, tags: dict) -> str:
+    where = "Kombi-Knaller cart, tab " + (ln.get("tab") or "?") if ln.get("cart") == "Kombi" else "main cart"
+    need = (tags.get(str(ln["cart_id"])) or {}).get("need")
+    return (f"{where}: {ln['qty']} x {ln['title'][:45]} ({ln['variant'] or 'no variant'}), cart_id {ln['cart_id']}"
+            + (f", need '{need}'" if need else ""))
+
+
+def _duplicate_notes(lines: list[dict], tags: dict) -> list[str]:
+    """Possible duplicates among cart lines: one item in several lines (any variant, either cart), and lines sharing one need."""
+    out = []
+    by_item: dict[str, list[dict]] = {}
+    by_need: dict[str, list[dict]] = {}
+    for ln in lines:
+        by_item.setdefault(str(ln.get("item_id")), []).append(ln)
+        need = ((tags.get(str(ln["cart_id"])) or {}).get("need") or "").strip().lower()
+        if need:
+            by_need.setdefault(need, []).append(ln)
+    for item, lns in by_item.items():
+        if len(lns) > 1:
+            out.append(f"Same item {item} in {len(lns)} lines: " + "; ".join(_inv_line_text(x, tags) for x in lns))
+    for need, lns in by_need.items():
+        if len(lns) > 1 and len({str(x.get("item_id")) for x in lns}) > 1:
+            out.append(f"One need '{need}' on {len(lns)} lines: " + "; ".join(_inv_line_text(x, tags) for x in lns))
+    return out
+
+
+def _already_in_cart(inv: list[dict], tags: dict, item_id: str, need: str) -> list[dict]:
+    """Cart lines that make an add a duplicate: the same item (any variant, either cart) or another line for the same need."""
+    need = (need or "").strip().lower()
+    return [ln for ln in inv if str(ln.get("item_id")) == str(item_id)
+            or (need and ((tags.get(str(ln["cart_id"])) or {}).get("need") or "").strip().lower() == need)]
+
+
 @tool()
 def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "",
-                combo: bool = False) -> str:
+                combo: bool = False, force: bool = False) -> str:
     """
     Add a product variant to the AliExpress cart and check it for checkout (the
     Kombi-Knaller cart ticks new lines itself).
     This changes the real cart (it does not buy anything). Adding a variant
     that is already in the cart raises that line's quantity instead.
     Every cart line pays an import charge: prefer a bigger pack in one line.
+    Both carts are read first: when the item is already in either of them (any
+    variant) or another line has the same `need`, nothing is added and the
+    result starts with "ALREADY IN CART" (force=True adds anyway). A variant
+    that lacks a `match` word or has an `avoid` word of the need's list tags
+    (set_cart_list) is refused too ("WRONG VARIANT").
 
     Args:
         item_id: AliExpress item ID.
@@ -3917,12 +4067,34 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
             in search_products): 3+ pieces there are ordered without import
             charge. Adding a variant that is already there REPLACES that line
             (new cart_id): give the TOTAL quantity you want, not the extra.
+        force: Add even though the item or the need is already in a cart (a
+            deliberate second line, or a replacement whose old line is removed afterwards).
     """
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
     if quantity < 1:
         return "quantity must be at least 1."
+    if not force:
+        try:
+            inv = _cart_inventory(cookies)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            return f"Nothing added: the carts could not be read to check for duplicates ({e}). Try again, or force=True."
+        tags = _line_store()
+        have = _already_in_cart(inv, tags, item_id, need)
+        if have:
+            return ("ALREADY IN CART, nothing added. These lines are in the way:\n"
+                    + "\n".join("- " + _inv_line_text(ln, tags) for ln in have)
+                    + "\nTo proceed: raise the quantity of the existing line (update_cart_quantity), or remove the wrong line "
+                      "(remove_from_cart) and add again, or add anyway with force=True if a second line is really wanted.")
+        try:
+            bad = _add_feature_check(item_id, sku_id, need, list_name, tags)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        if bad:
+            return bad
     try:
         cid = _cart_add(cookies, item_id, sku_id, quantity, business=COMBO if combo else "")
     except Exception as e:
@@ -4274,7 +4446,7 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
         return (f"WOULD DELETE {len(dele)}, CHECK {len(on)}, UNCHECK {len(off)}, CHANGE QUANTITY of {len(qty)} cart line(s)")
     out = []
     for item_id, sku_id, q, cat, combo, title in readd:
-        res = add_to_cart(item_id, sku_id, q, need=cat, combo=combo)
+        res = add_to_cart(item_id, sku_id, q, need=cat, combo=combo, force=True)   # the line vanished: a re-add can only restore it
         ok = res.startswith("Added")
         head.append(f"{title}: war nicht mehr im Korb, " + ("neu hinzugefügt." if ok else "neu hinzufügen ging nicht (nicht lieferbar?)."))
         out.append(f"Re-add {item_id} / {sku_id} x{q}: {res}")
@@ -4375,7 +4547,7 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         if dry_run:
             out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line(s) {', '.join(repl)}" if repl else ""))
             continue
-        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo)
+        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo, force=bool(repl))   # a replacement: the old line goes after
         out.append(f"{item_id} / {sku_id} x{qty}: " + res)
         if repl:   # the offer replaces a line (a cheaper way to buy the same): drop the old line only when the new one is in
             out.append(f"Replaced line(s) {', '.join(repl)}: " + (remove_from_cart(repl) if res.startswith("Added") else "NOT removed, the add failed"))

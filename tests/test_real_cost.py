@@ -34,7 +34,7 @@ class Env:
         duty = 1.5 if len(ids) > 1 else 0.5 * len(ids)
         return parsed(goods, ship, duty, goods + ship + duty)
 
-    def add(self, item_id, sku_id, quantity=1, list_name="", need="", combo=False):
+    def add(self, item_id, sku_id, quantity=1, list_name="", need="", combo=False, force=False):
         self.added.append((item_id, sku_id, quantity, combo))
         self.lines.append(ln("900", item_id, sku_id, quantity, 3.0))
         return "Added and checked: x. cart_id 900."
