@@ -194,6 +194,43 @@ def _line(fields: dict) -> dict:
     }
 
 
+# The Kombi-Knaller page keeps one basket per customs category (its tabs); the cart names a line's category only
+# by its customs code. Names as the page's tabs show them (de), from the page's own hsCodeInfo list, 2026-11-09.
+HS_TABS = {
+    "3924900090": "Haushalt", "9503009990": "Spielzeug", "3924100090": "Küchenbedarf", "4202929890": "Taschen",
+    "6307909899": "Textilien", "3926909790": "Bedarf", "3304990000": "Kosmetik", "7326909890": "Metallwaren",
+    "7117190090": "Schmuck", "8517790000": "Telekom-Teile", "8544429090": "Elektronik", "6505009090": "Kopfbedeckung",
+    "9507900000": "Angeln", "8536699099": "Sockel", "8504409590": "Ladegeräte", "3919908099": "Klebstoffe",
+    "6109909000": "Oberteile", "3304100000": "Lippenstifte", "8308900090": "Metallzubehör", "6704190000": "Wimpern",
+    "7007198095": "Panzerglas", "8714109090": "Motorradteile", "9405423990": "LED-Beleuchtung",
+    "8537109899": "Elektrische Steuerungen", "8539520000": "LED-Lampen", "9004109900": "Sonnenbrille",
+    "8536909500": "Verbinder", "9113900099": "Armbänder", "3926400000": "Deko", "9505900000": "Halloween",
+    "4911910090": "Druckbilder", "8536508000": "Schalter", "7113110000": "Silberschmuck", "3304300000": "Nagellack",
+    "9505109000": "Weihnachten", "4911990000": "Drucke", "7116208000": "Edelsteine", "8310000000": "Schilder",
+    "7117900000": "Modeschmuck",
+}
+
+
+def tab_name(hs: str) -> str:
+    """The Kombi-Knaller tab a customs code belongs to ("Verbinder"), or the code itself when the tab is unknown."""
+    return HS_TABS.get(hs or "", f"Kategorie {hs}" if hs else "Kategorie unbekannt")
+
+
+def _hs_codes(node: Any, out: dict) -> None:
+    """(item_id, sku_id) -> customs code from every cartLinesInfo list anywhere in a snapshot."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "cartLinesInfo" and isinstance(v, list):
+                for x in v:
+                    if isinstance(x, dict) and x.get("hsCode"):
+                        out[(str(x.get("itemId") or ""), str(x.get("skuId") or ""))] = str(x["hsCode"])
+            else:
+                _hs_codes(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _hs_codes(v, out)
+
+
 def parse(states: list[dict]) -> dict:
     """Every page snapshot of one cart walk -> one cart."""
     lines: dict[str, dict] = {}
@@ -234,6 +271,11 @@ def parse(states: list[dict]) -> dict:
             if cid in lines:
                 lines[cid]["group"] = g["id"]
                 lines[cid]["choice"] = g["id"] == "group_choice"
+    hs: dict = {}
+    _hs_codes(states, hs)
+    for ln in lines.values():
+        if (ln["item_id"], ln["sku_id"]) in hs:
+            ln["hs"] = hs[(ln["item_id"], ln["sku_id"])]
     return {"lines": list(lines.values()), "groups": groups, "header": header, "summary": summary}
 
 

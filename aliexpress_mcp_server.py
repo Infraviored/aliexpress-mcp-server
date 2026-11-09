@@ -3515,12 +3515,23 @@ def _combo_text(cookies: dict[str, str], cart: dict, lines: Optional[list[dict]]
     pieces = sum(ln["qty"] for ln in pick)
     total = sum((ln["price"] or 0) * ln["qty"] for ln in pick)
     out = [f"## Kombi-Knaller cart ({COMBO}): {len(ok)} valid line(s) of {len(lines)}, {len(pick)} checked = {pieces} pcs, "
-           f"{total:.2f} {CURRENCY} goods. " + ("3+ pieces checked: import charge covered." if pieces >= 3
-                                                else "Fewer than 3 pieces checked: the import charge is NOT covered.")
-           + f" Order it on its page: {ch.get('url') or ''} (Limit exceeded = remove lines or order in several rounds)."]
-    out += [f"- cart_id {ln['cart_id']}: {ln['qty']}× {ln['variant'][:30]} — {ln['title'][:50]}, {ln['price']} each, "
-            + ("checked" if ln["checked"] else "unchecked") + ("" if ln["valid"] else ", INVALID") for ln in lines]
+           f"{total:.2f} {CURRENCY} goods. Order it on its page: {ch.get('url') or ''}",
+           "The page keeps ONE basket PER TAB (customs category) and opens on some other tab, so it looks empty: "
+           "tell the user which tab to open. Each tab is its own order; 3+ checked pieces in that tab cover its import charge."]
+    for tab, lns in _combo_tabs(lines).items():
+        n = sum(ln["qty"] for ln in lns if ln["valid"] and ln["checked"])
+        out.append(f"### Tab „{tab}“: {n} checked pcs — " + ("import charge covered" if n >= 3 else "fewer than 3: import charge NOT covered"))
+        out += [f"- cart_id {ln['cart_id']}: {ln['qty']}× {ln['variant'][:30]} — {ln['title'][:50]}, {ln['price']} each, "
+                + ("checked" if ln["checked"] else "unchecked") + ("" if ln["valid"] else ", INVALID") for ln in lns]
     return "\n".join(out)
+
+
+def _combo_tabs(lines: list[dict]) -> dict[str, list[dict]]:
+    """Kombi-Knaller lines by the page tab (customs category) whose basket holds them."""
+    tabs: dict[str, list[dict]] = {}
+    for ln in lines:
+        tabs.setdefault(cartlib.tab_name(ln.get("hs", "")), []).append(ln)
+    return tabs
 
 
 @tool()
@@ -4134,7 +4145,12 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
             by_cat.setdefault(x[6] or "Hauptkorb", []).append(x[0])
         for cat, ids in by_cat.items():
             head.append(f"Kassen-Link {cat} ({len(ids)} Zeilen): {cartlib.checkout_url(ids)}")
-    if any(x[7] for x in on_all):
+    combo_on = [live[x[0]] for x in on_all if x[7] and live and x[0] in live]
+    if combo_on:
+        tabs = ", ".join(f"„{t}“ ({sum(ln['qty'] for ln in lns)} Teile)" for t, lns in _combo_tabs(combo_on).items())
+        head.append(f"Kombi-Knaller-Korb: auf seiner Aktionsseite bestellen, je Reiter eine Bestellung: {tabs}. "
+                    "Die Seite öffnet in einem anderen Reiter und wirkt dann leer.")
+    elif any(x[7] for x in on_all):
         head.append("Kombi-Knaller-Korb: wird auf seiner eigenen Aktionsseite bestellt.")
     if dele:
         out.append("Deleted: " + remove_from_cart(dele).split("\n")[0])
