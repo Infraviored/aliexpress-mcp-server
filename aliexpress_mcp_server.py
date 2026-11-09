@@ -1337,6 +1337,7 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         "title": ((res.get("PRODUCT_TITLE") or {}).get("text")) or item_id,
         "url": f"{BASE_URL}/item/{item_id}.html",
         "image": imgs[0] if imgs and isinstance(imgs[0], str) else None,
+        "images": [u for u in imgs if isinstance(u, str)],
         "variants": variants,
         "shipping": shipping,
         "choice": bool(shipping.get("choice_threshold")),
@@ -1507,7 +1508,9 @@ def get_variant_images(item_id: str, match: str = ""):
     """
     Show every variant's picture in ONE image (numbered grid with name and
     price) plus a short table. Use it when variant names are vague or repeat
-    ("N16R8 Pin Soldered" ×3 that differ only by antenna socket).
+    ("N16R8 Pin Soldered" ×3 that differ only by antenna socket). When the
+    variants have no pictures of their own, the grid shows the article's main
+    photos instead: LOOK at them before calling an offer the same article.
 
     Args:
         item_id: AliExpress item ID.
@@ -1524,7 +1527,13 @@ def get_variant_images(item_id: str, match: str = ""):
     ]
     png = deals.contact_sheet(rows, _fetch_image, CURRENCY)
     if not png:
-        return "\n".join(table + ["(no variant pictures)"])
+        # No variant has its own picture: the main photos are what tells a dev board from a bare chip.
+        photos = [{"n": i, "label": f"Foto {i}", "image": u} for i, u in enumerate(offer.get("images") or [], 1)]
+        png = deals.contact_sheet(photos, _fetch_image, CURRENCY)
+        if not png:
+            return "\n".join(table + ["(no pictures at all: open the link before judging the article)"])
+        return ["\n".join(table + ["(the variants have no pictures of their own: the grid shows the article's main photos)"]),
+                Image(data=png, format="jpeg")]
     if len(rows) > 16:
         table.append("(picture shows the first 16; narrow with match)")
     return ["\n".join(table), Image(data=png, format="jpeg")]
