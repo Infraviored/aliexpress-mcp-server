@@ -52,16 +52,18 @@ appended to `applied.log` in the report folder: read it before you talk about th
 (with notes) to you as before.
 
 **The best deal is checked BEFORE the page is built, never after, and every candidate is verified by LOOKING at it.**
-`decide_cart` looks for every line from a global seller whether the same pieces are cheaper from a Choice offer (no own
-shipping, import charges covered). Search hits are often different articles (a 0,44 € ring against a 20 € hotend), so a
-candidate is NOT put on the page by itself: the answer lists each one with a comparison picture (original left, offer right).
+`decide_cart` compares EVERY line (global seller, Choice or Kombi-Knaller) with other sellers, Choice offers and Kombi-Knaller
+offers (same pieces, shipping, import charge and discounts; a Kombi price only counts with 3+ combo pieces in total). Only a
+strictly cheaper offer is ever a candidate; a dearer one never shows. It is slow (a background job: if the answer says
+"Still running", call `decide_cart(job_id=...)`). Search hits are often different articles (a 0,44 € ring against a 20 € hotend),
+so a candidate is NOT put on the page by itself: the answer lists each one with a comparison picture (original left, offer right).
 Read every picture, decide it is the same product in the same variant and pack, then call `decide_cart` again with
-`approved_alternatives=[cart_ids]`. The approved ones appear as a row with a "Choice-Alternative" pill under the line; Ja on it
-adds the offer and removes the old line (`replaces`). A price under 40 % of the goods is rejected without a look. Tell the user
-which you approved and which not, and why. `decide_cart` also merges cart lines of the same need (same list and item, query or
+`approved_alternatives=[cart_ids]`. The approved ones appear pre-selected as a row with a "Günstiger" (or "Kombi-Knaller") pill under
+the line, which itself is set to Nein; Ja on the new row adds the offer (into the combo cart for Kombi) and removes the old line
+(`replaces`). A price under 40 % of the goods is rejected without a look; a line without match words stays pending with a note.
+Tell the user which you approved and which not, and why. `decide_cart` also merges cart lines of the same need (same list and item, query or
 need name) into the cheapest single line when that is cheaper than the split: the answer lists each merge ("MERGED LINES"), tell
-the user. Not yet checked: Kombi-Knaller for single lines, cheaper Choice offers for lines
-that are already Choice: say so when it matters.
+the user.
 
 **Fill your opinion on every row.** He decides on your judgement: `opinions` in `decide_cart`, `verdict` / `rating` /
 `fit` on each card of `decide_report`. One sentence per row: why this one, what to watch, the rating where it matters,

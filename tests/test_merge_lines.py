@@ -18,7 +18,7 @@ def _split_cart(monkeypatch, cands):
     monkeypatch.setattr(m, "_combo_lines", lambda cookies, cart: [])
     monkeypatch.setattr(m, "_line_store", lambda: tags)
     monkeypatch.setattr(m, "_alt_cache", lambda: {})
-    monkeypatch.setattr(m, "_choice_alternative", lambda ln, tag, cache: None)
+    monkeypatch.setattr(m, "_line_deal", lambda ln, tag, cache: None)
     monkeypatch.setattr(m, "_merge_candidate", lambda item_id, pieces, tag, cache: cands.get(item_id))
     monkeypatch.setattr(m, "_report_image", lambda card: "data:image/jpeg;base64,AAAA")
     written = {}

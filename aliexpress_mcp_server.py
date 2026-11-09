@@ -2161,23 +2161,42 @@ def _alt_cache() -> dict:
     return {k: v for k, v in cache.items() if time.time() - v.get("at", 0) < ALT_TTL}
 
 
-def _choice_alternative(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
-    """The best Choice offer for the same pieces as this cart line (via `cache`), or None."""
-    pieces = ln["qty"] * deals.pack_size(ln["variant"])
+def _line_deal(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
+    """
+    Every other way to buy what this cart line is, priced like the line itself (via `cache`):
+    {"now": net of the line, "best": cheapest single-line offer by normal net, "kombi": cheapest Kombi-Knaller offer
+    by its net without import charge (only holds with 3+ pieces in the combo order)}; None when the line cannot be priced.
+    """
+    pieces = max(1, ln["qty"] * deals.pack_size(ln["variant"]))
     query = tag.get("query") or tag.get("need") or ln["title"][:60]
-    key = f"{ln['item_id']}:{ln['sku_id']}:{pieces}:{query}:{tag.get('match', '')}:{tag.get('avoid', '')}"
+    match, avoid = tag.get("match", ""), tag.get("avoid", "")
+    key = f"deal:{ln['item_id']}:{ln['sku_id']}:{pieces}:{query}:{match}:{avoid}"
     hit = cache.get(key)
     if hit:
         return hit["alt"]
-    plan = _plan([{"need": tag.get("need") or query, "query": query, "pieces": pieces, "match": tag.get("match", ""),
-                   "avoid": tag.get("avoid", ""), "seller": "choice", "candidates": 8}])
-    alt = None
-    if plan["picks"]:
-        w = plan["picks"][0]["way"]
-        alt = {**_way_view(w),
-               "lines": [{"sku_id": v["sku_id"], "qty": q} for v, q in w["lines"]],
-               "cost": round(w["goods"] - w["save"], 2), "days": w["days"],
-               "ambiguous": any(v.get("ambiguous") for v, _ in w["lines"])}
+    cur = _current_way(ln, pieces)
+    if cur is None:
+        return None
+    rows, _, _ = _price_hits(_search(query), pieces, match, avoid, 8, False)
+    best = kombi = None
+    for w, h in rows:
+        if w["pieces"] < pieces or len(w["lines"]) != 1 or w["lines"][0][1] <= 0:
+            continue
+        (v, q), = w["lines"]
+        if str(w["offer"]["item_id"]) == str(ln["item_id"]) and str(v["sku_id"]) == str(ln["sku_id"]):
+            continue
+        def cand(price: float, combo: bool) -> dict:
+            return {**_way_view(w), "sku_id": v["sku_id"], "qty": q, "cost": round(price, 2), "days": w.get("days"),
+                    "ambiguous": bool(v.get("ambiguous")), "combo": combo, "pieces": w["pieces"],
+                    "choice": bool(w["offer"].get("choice")), "lines": [{"sku_id": v["sku_id"], "qty": q}]}
+        if best is None or w["net"] < best["cost"]:
+            best = cand(w["net"], False)
+        if h.get("combo"):
+            kn = w["net"] - (0 if w.get("combo_free") else w.get("duty_back", 0.0))
+            if kombi is None or kn < kombi["cost"]:
+                kombi = cand(kn, True)
+                kombi["net"] = round(w["net"], 2)
+    alt = {"now": cur["net"], "best": best, "kombi": kombi}
     cache[key] = {"at": time.time(), "alt": alt}
     return alt
 
@@ -2274,11 +2293,11 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
             continue
         t = tags[ln["cart_id"]]
         try:
-            alt = _choice_alternative(ln, t, cache)
+            alt = (_line_deal(ln, t, cache) or {}).get("best")
         except Exception as e:
             logger.debug("alternative for %s failed: %s", ln["cart_id"], e)
             alt = None
-        if not alt:
+        if not alt or not alt["choice"]:
             continue
         now = cartlib.goods(ln) + (ln["ship"] or 0) + DUTY_PER_LINE
         lo, hi = alt["cost"] - now, alt["cost"] + DUTY_PER_LINE - now
@@ -4102,34 +4121,39 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
             cart.append((cid, it["state"], qty, qty0))
         else:
             (yes if it.get("state") == "yes" else rest).append(
-                (item_id, sku_id, qty, str(it.get("category") or ""), repl))
+                (item_id, sku_id, qty, str(it.get("category") or ""), repl, bool(it.get("combo"))))
     if not yes and not cart:
         return "Nothing chosen with Ja: nothing added."
     out = [_apply_cart_selection(cart, dry_run)] if cart else []
-    for item_id, sku_id, qty, cat, repl in yes:
+    for item_id, sku_id, qty, cat, repl, combo in yes:
         if dry_run:
             out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line(s) {', '.join(repl)}" if repl else ""))
             continue
-        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat)
+        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo)
         out.append(f"{item_id} / {sku_id} x{qty}: " + res)
         if repl:   # the offer replaces a line (a cheaper way to buy the same): drop the old line only when the new one is in
             out.append(f"Replaced line(s) {', '.join(repl)}: " + (remove_from_cart(repl) if res.startswith("Added") else "NOT removed, the add failed"))
-    left = [f"{i}/{s}" for i, s, _, _, _ in rest]
+    left = [f"{i}/{s}" for i, s, _, _, _, _ in rest]
     return "\n".join(out + ([f"Not added (Vielleicht or Nein): {', '.join(left)}"] if left else []))
 
 
-@tool()
+@tool(slow=True)
 def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: str = "",
-                opinions: dict = None, check_deals: bool = True, approved_alternatives: list = None) -> str:
+                opinions: dict = None, check_deals: bool = True, approved_alternatives: list = None,
+                job_id: str = "") -> str:
     """
     The REAL cart as a decision page, compact enough for 50 lines: per shopping list (and the Kombi-Knaller
     basket) one row per line with picture, short title, YOUR opinion, price and Ja / Nein / Löschen
     (Ja = checked for checkout, Nein = unchecked, Löschen = removed from the cart). Use it instead of
     describing a big cart in prose: the user goes through it once, presses the send button, and the
     message he sends goes unchanged to apply_selection, which checks, unchecks, deletes and changes
-    quantities. Then read the cart again and report the real total. Give the user the page path in backticks.
+    quantities. Then read the cart again and report the real total. Give the user the page's server address
+    as plain text (see SKILL.md).
 
     ALWAYS fill `opinions`: the user decides on your judgement. Without it the rows are bare.
+
+    Slow with check_deals: every line is searched and its hits priced. It runs as a background job: the call waits up
+    to a minute; when not finished it answers with progress and a job_id: call decide_cart(job_id=...) again later.
 
     Args:
         name: File name without extension.
@@ -4138,15 +4162,24 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
         opinions: {cart_id: {"verdict": "one sentence: why this one, what to watch", "rating": "4,8★ 208" (when it matters),
             "fit": "✓ Highland genannt" or "Modell nicht genannt" (only for parts that must fit something)}}.
             Lines you know nothing about may be left out.
-        check_deals: before the page is built, look for a cheaper way to buy each line that comes from a global seller
-            (same pieces from a Choice offer: no own shipping, import charges covered). A found alternative is a row of its
-            own right under the line; choosing Ja there swaps it in. Costs searches (cached 6 h); False = skip.
+        check_deals: before the page is built, EVERY line is compared with other sellers, Choice offers and
+            Kombi-Knaller offers (same pieces, shipping, import charge and discounts included). Only an offer that is strictly
+            cheaper and approved goes on the page: a row right under the line, pre-selected, replacing the line.
+            Costs searches (cached 6 h); False = skip.
         approved_alternatives: cart_ids whose alternative YOU have verified. A found alternative is NOT put on the page until
             you approve it: the answer lists every candidate with a comparison picture (original left, offer right) in the
             report folder. Read each picture and the numbers, decide whether it is the SAME product (same shape, same
             variant, same pack size), then call decide_cart again with the cart_ids that are. Search hits are often
             different articles (an accessory for 0,44 € against a 20 € part): never approve unseen.
+        job_id: pick up a running or finished job (see above).
     """
+    args = (name, title, list_name, opinions, check_deals, approved_alternatives)
+    if not check_deals and not job_id:
+        return _decide_run(*args, lambda i, n, what: None)
+    return _job_result(job_id, "decide", lambda progress: _decide_run(*args, progress))
+
+
+def _decide_run(name, title, list_name, opinions, check_deals, approved_alternatives, progress) -> str:
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -4173,19 +4206,51 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
     approved = {str(x) for x in (approved_alternatives or [])}
     pending: list[tuple[dict, dict, dict, str]] = []   # (original card, alt, line, why not shown)
     merge_notes: list[str] = []
+    found: list[str] = []                              # every better deal, shown or pending
+    # Pass 1: merges per group and the deal of every other line; pass 2 decides (a Kombi price needs the piece total).
+    merges_of: dict[str, list[dict]] = {}
+    deal_of: dict[str, dict] = {}
     for heading, lines in groups.items():
-        cards = []
-        merges: list[dict] = []
+        merges_of[heading] = []
         if check_deals and heading != "Kombi-Knaller-Korb":
             try:
-                merges = _merge_split_lines([(ln, tag) for ln, tag in lines], alt_cache)
+                merges_of[heading] = _merge_split_lines([(ln, tag) for ln, tag in lines], alt_cache)
             except Exception as e:
                 logger.debug("merging split lines failed: %s", e)
+    todo = [(ln, tag) for heading, lines in groups.items() if check_deals and heading != "Kombi-Knaller-Korb"
+            for ln, tag in lines if not any(ln in mg["lines"] for mg in merges_of[heading])]
+    for i, (ln, tag) in enumerate(todo):
+        progress(i, len(todo), (tag.get("need") or ln["title"])[:40])
+        try:
+            d = _line_deal(ln, tag, alt_cache)
+        except PermissionError:
+            return AUTH_EXPIRED_MSG
+        except Exception as e:
+            logger.debug("deal for %s failed: %s", ln["cart_id"], e)
+            d = None
+        if d:
+            deal_of[ln["cart_id"]] = {**d, "floor": 0.4 * cartlib.goods(ln)}   # under 40 % of the goods: bait, never a winner
+    pcs_of = lambda ln: max(1, ln["qty"] * deals.pack_size(ln.get("variant")))
+    combo_pcs = sum(pcs_of(ln) for ln, _ in groups.get("Kombi-Knaller-Korb", []))
+
+    def pick(kombi_counts: bool) -> dict[str, dict]:
+        out = {}
+        for cid, d in deal_of.items():
+            w = min([x for x in (d["best"], d["kombi"] if kombi_counts else None) if x and x["cost"] >= d["floor"]],
+                    key=lambda x: x["cost"], default=None)
+            if w and d["now"] - w["cost"] > 0.004:
+                out[cid] = w
+        return out
+    win_of = pick(True)
+    if combo_pcs + sum(w["pieces"] for w in win_of.values() if w["combo"]) < COMBO_MIN_PIECES:
+        win_of = pick(False)          # below 3 combo pieces the import charge stays: a Kombi offer only counts at its normal net
+    for heading, lines in groups.items():
+        cards = []
+        merges = merges_of[heading]
         merged_of = {ln["cart_id"]: mg for mg in merges for ln in mg["lines"]}
         for ln, tag in lines:
             need = tag.get("need") or ln["title"][:40]
             op = (opinions or {}).get(ln["cart_id"]) or (opinions or {}).get(ln["item_id"]) or {}
-            global_line = check_deals and heading != "Kombi-Knaller-Korb" and not ln.get("choice") and ln.get("group") != "group_choice"
             cards.append({"title": f"{need} · {ln['variant']}" if ln.get("variant") else need,
                           "verdict": op.get("verdict") or "", "rating": op.get("rating") or "", "fit": op.get("fit") or "",
                           "item_id": ln["item_id"], "sku_id": ln["sku_id"], "cart_id": ln["cart_id"],
@@ -4207,31 +4272,35 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
                     c0.update(default="delete" if mg["keep"] else "no",
                               verdict=f"Zusammengelegt: ein Bedarf ({mg['total']} Stück) ist in einer Zeile günstiger, spart {report.eur(mg['saving'])}")
                 continue
-            if global_line:
-                try:
-                    alt = _choice_alternative(ln, tag, alt_cache)
-                except Exception as e:
-                    logger.debug("alternative for %s failed: %s", ln["cart_id"], e)
-                    alt = None
-                if alt and len(alt["lines"]) == 1 and alt["lines"][0]["qty"] > 0:
-                    q = alt["lines"][0]["qty"]
-                    now = cartlib.goods(ln) + (ln["ship"] or 0) + DUTY_PER_LINE
-                    diff = alt["cost"] - now
-                    if alt["cost"] < 0.4 * cartlib.goods(ln):
-                        pending.append((cards[-1], alt, ln, "rejected: price under 40 % of the goods, a different article"))
-                        continue
-                    if ln["cart_id"] not in approved:
-                        pending.append((cards[-1], alt, ln, "not verified yet"))
-                        continue
-                    when = f"Lieferung in etwa {alt['days']} Tagen" if alt.get("days") else ""
-                    cards.append({"title": f"{need} · {alt['buy']}", "badge": "Choice-Alternative", "item_id": alt["item_id"], "sku_id": alt["lines"][0]["sku_id"],
-                                  "replaces": ln["cart_id"], "price": round(alt["cost"] / q, 2), "ship": 0, "choice": True, "duty": 0,
-                                  "qty": q, "default": "no",
-                                  "verdict": (f"{alt['buy']} für {report.eur(alt['cost'])} statt {report.eur(now)} (Ware, Versand, Abgabe): "
-                                              f"{'spart' if diff < 0 else 'kostet'} {report.eur(abs(diff))}, kein eigener Versand. {when}").strip(),
-                                  "fit": "Variantenname mehrfach: Bild prüfen" if alt.get("ambiguous") else "",
-                                  "image": alt.get("img") or "", "url": alt["url"], "tags": ["Alternative", "Choice"],
-                                  "text": alt["title"]})
+            w = win_of.get(ln["cart_id"])
+            if w:
+                q, now = w["qty"], deal_of[ln["cart_id"]]["now"]
+                diff = now - w["cost"]
+                line = (f"{need} ({ln['cart_id']}): now {report.eur(now)} -> {w['buy']} for {report.eur(w['cost'])}, "
+                        f"saves {report.eur(diff)}" + (" (Kombi-Knaller)" if w["combo"] else ""))
+                w = {**w, "now": now}
+                nomatch = "; no match words: verify it is the same article" if not tag.get("match") else ""
+                if w["cost"] < 0.4 * cartlib.goods(ln):
+                    pending.append((cards[-1], w, ln, "rejected: price under 40 % of the goods, a different article"))
+                    found.append(f"- {line} - REJECTED, a different article")
+                    continue
+                if ln["cart_id"] not in approved:
+                    pending.append((cards[-1], w, ln, "not verified yet" + nomatch))
+                    found.append(f"- {line} - not verified yet" + (" (no match words on this line)" if nomatch else ""))
+                    continue
+                found.append(f"- {line} - on the page")
+                when = f"Lieferung in etwa {w['days']} Tagen" if w.get("days") else ""
+                kombi = "im Kombi-Knaller-Korb, ab 3 Teilen ohne Abgabe. " if w["combo"] else ""
+                cards[-1]["default"] = "no"
+                cards.append({"title": f"{need} · {w['buy']}", "badge": "Kombi-Knaller" if w["combo"] else "Günstiger", "item_id": w["item_id"],
+                              "sku_id": w["sku_id"], "replaces": ln["cart_id"], "price": round(w["cost"] / q, 2), "ship": 0,
+                              "choice": w["choice"], "duty": 0, "qty": q, "default": "yes", "combo": w["combo"],
+                              "verdict": (f"{w['buy']} für {report.eur(w['cost'])} statt {report.eur(now)} (Ware, Versand, Abgabe): "
+                                          f"spart {report.eur(diff)}. {kombi}{when}").strip(),
+                              "fit": "Variantenname mehrfach: Bild prüfen" if w.get("ambiguous") else "",
+                              "image": w.get("img") or "", "url": w["url"],
+                              "tags": ["Günstiger"] + (["Kombi-Knaller"] if w["combo"] else (["Choice"] if w["choice"] else [])),
+                              "text": w["title"]})
         for mg in merges:
             win, need = mg["win"], mg["need"]
             old = " + ".join(f"{ln['qty']}× {ln.get('variant') or ln['title'][:30]}" for ln in mg["lines"])
@@ -4265,9 +4334,13 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
                         f"against {report.eur(cartlib.goods(ln))} — {why}.")
             continue
         pic = _compare_image(ln["cart_id"], orig.get("img"), _report_image({"image": alt.get("img") or ""}))
-        todo.append(f"- {ln['cart_id']} {orig['title'][:40]}: candidate '{alt['title'][:50]}' ({alt['buy']}) for "
-                    f"{report.eur(alt['cost'])} against {report.eur(cartlib.goods(ln) + (ln['ship'] or 0) + DUTY_PER_LINE)} now. "
+        todo.append(f"- {ln['cart_id']} {orig['title'][:40]}: candidate '{alt['title'][:50]}' ({alt['buy']}"
+                    + (", Kombi-Knaller" if alt["combo"] else "") + f") for {report.eur(alt['cost'])} against {report.eur(alt['now'])} now"
+                    + (" - NO MATCH WORDS on this line: verify it is the same article" if "no match words" in why else "") + ". "
                     + (f"Comparison picture, READ IT: {pic}" if pic else "No comparison picture: look at both offers yourself."))
+    if found:
+        msg += ("\n\nBETTER DEALS FOUND (every line was compared with other sellers, Choice and Kombi-Knaller; "
+                "only strictly cheaper offers are listed):\n" + "\n".join(found))
     if merge_notes:
         msg += "\n\nMERGED LINES (one need split over several cart lines is cheaper as one line; already on the page, tell the user):\n" + "\n".join(merge_notes)
     if todo:
