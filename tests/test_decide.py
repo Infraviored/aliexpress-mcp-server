@@ -219,7 +219,7 @@ def test_select_checks_every_line_and_names_the_ones_that_did_not_stick(monkeypa
 
 
 def test_apply_selection_matches_the_live_cart(monkeypatch):
-    """A Ja line gone from the cart is added again, an unavailable one is named, every Ja line is checked (no cap)."""
+    """A Ja line gone from the cart is added again, an unavailable one is named; a list of 12 does not fit the 10 stored checks."""
     calls = []
     monkeypatch.setattr(m, "select_cart_items", lambda ids, only=False, selected=True: (calls.append(("sel", ids, selected)), "ok")[1])
     monkeypatch.setattr(m, "add_to_cart", lambda *a, **k: (calls.append(("add", a, k)), "Added 2 x item")[1])
@@ -235,9 +235,17 @@ def test_apply_selection_matches_the_live_cart(monkeypatch):
     assert ("add", ("5", "6", 2), {"need": "Kombi-Knaller-Korb", "combo": True}) in calls
     assert "Ladegerät: war nicht mehr im Korb, neu hinzugefügt." in out
     assert "Teil 31: nicht lieferbar" in out
-    sel = [c for c in calls if c[0] == "sel"][0]
-    assert len(sel[1]) == 12                     # all twelve Ja lines, no 10-line cap
+    assert not [c for c in calls if c[0] == "sel" and c[2]]   # Extras (12) does not fit the 10 stored checks
     assert "Kassen-Link Extras (12 Zeilen)" in out
+    assert "Im Korb, ohne Haken: Extras (12)" in out
+
+
+def test_whole_lists_get_the_ten_checks():
+    rows = [(str(i), "yes", 1, 1, "1", "2", cat, False, "t") for i, cat in
+            enumerate(["Sprach-Satellit"] * 9 + ["Extras"] * 8 + ["Klein"] * 1)]
+    on, rest = m._lists_that_fit(rows)
+    assert on == [str(i) for i in range(9)] + ["17"]
+    assert list(rest) == ["Extras"]
 
 
 def test_page_sends_every_cart_line():

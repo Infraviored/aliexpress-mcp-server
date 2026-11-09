@@ -3652,7 +3652,8 @@ def _select(cookies: dict[str, str], want: list[str], only: bool = False,
         done, failed = _cart_line_action(cookies, {c: _edit_check(False) for c in want if state_of[c]}, merged, business)
         out.append(f"Unchecked {len(done)} line(s).")
     else:
-        # Uncheck first, then check every wanted line (no cap: a guessed 10-line limit used to drop the rest).
+        # Uncheck first, then check every wanted line. The main cart STORES at most MAIN_CART_CHECKS checks (an 11th
+        # unchecks the oldest); the caller picks which lines get them, the "NOT checked" report names the evicted ones.
         off = [c for c, on in state_of.items() if on and c not in want] if only else []
         on = [c for c in want if not state_of[c]]
         done, failed = _cart_line_action(
@@ -4094,10 +4095,31 @@ def _live_lines() -> Optional[dict[str, dict]]:
     return out
 
 
+# Measured 2026-11-09: the main cart stores at most 10 checked lines; checking an 11th unchecks the oldest. The web
+# page's "Alle Artikel auswählen" shows "Bestellen (17)", but only in the open page: after a reload it is 10 again,
+# and the app shows the stored 10. Checkout links hold any number of lines.
+MAIN_CART_CHECKS = 10
+
+
+def _lists_that_fit(main_on: list[tuple], cap: int = MAIN_CART_CHECKS) -> tuple[list[str], dict[str, list[str]]]:
+    """Whole lists (page order) whose Ja lines fit the stored checks together; the rest stay unchecked, by list."""
+    by_cat: dict[str, list[str]] = {}
+    for x in main_on:
+        by_cat.setdefault(x[6] or "Hauptkorb", []).append(x[0])
+    on, rest = [], {}
+    for cat, ids in by_cat.items():
+        if len(on) + len(ids) <= cap:
+            on += ids
+        else:
+            rest[cat] = ids
+    return on, rest
+
+
 def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
     """Lines the page showed as in the cart, matched against the cart as it is NOW: delete = remove, yes = check,
     no/maybe = uncheck, quantity changes. A Ja line that is gone from the cart is added again; one AliExpress marks
-    unavailable is named. Every Ja line is checked; the checkout links per list hold every Ja line of the main cart.
+    unavailable is named. The main cart stores only 10 checks: whole lists get them in page order while they fit, the
+    other lists stay unchecked and are ordered by their checkout link (each link holds every Ja line of its list).
     Starts with a German summary line ("Ergebnis: ...")."""
     head: list[str] = []
     try:
@@ -4124,8 +4146,10 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
     keep = [x for x in cart if x[1] != "delete"]
     on_all = [x for x in keep if x[1] == "yes"]
     main_on = [x for x in on_all if not x[7]]
-    on = [x[0] for x in on_all]
-    off = [x[0] for x in keep if x[1] != "yes"]
+    main_ids, rest = _lists_that_fit(main_on)
+    rest_ids = {c for ids in rest.values() for c in ids}
+    on = [x[0] for x in on_all if x[7]] + main_ids
+    off = [x[0] for x in keep if x[1] != "yes" or x[0] in rest_ids]
     qty = [(x[0], x[2]) for x in keep if x[2] != x[3]]
     if dry_run:
         return (f"WOULD DELETE {len(dele)}, CHECK {len(on)}, UNCHECK {len(off)}, CHANGE QUANTITY of {len(qty)} cart line(s)")
@@ -4145,6 +4169,13 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
             by_cat.setdefault(x[6] or "Hauptkorb", []).append(x[0])
         for cat, ids in by_cat.items():
             head.append(f"Kassen-Link {cat} ({len(ids)} Zeilen): {cartlib.checkout_url(ids)}")
+    if rest:
+        head.append(f"AliExpress speichert im Hauptkorb höchstens {MAIN_CART_CHECKS} Haken (ein elfter nimmt den ältesten weg; "
+                    "„Alle auswählen“ am Desktop zeigt mehr, aber nur bis zum Neuladen). Angehakt: "
+                    + (", ".join(f"{c} ({len([x for x in main_on if (x[6] or 'Hauptkorb') == c])})" for c in
+                                 dict.fromkeys(x[6] or "Hauptkorb" for x in main_on) if c not in rest) or "keine Liste")
+                    + ". Im Korb, ohne Haken: " + ", ".join(f"{c} ({len(ids)})" for c, ids in rest.items())
+                    + ". Diese Listen über ihren Kassen-Link bestellen.")
     combo_on = [live[x[0]] for x in on_all if x[7] and live and x[0] in live]
     if combo_on:
         tabs = ", ".join(f"„{t}“ ({sum(ln['qty'] for ln in lns)} Teile)" for t, lns in _combo_tabs(combo_on).items())
