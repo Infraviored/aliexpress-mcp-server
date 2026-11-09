@@ -539,6 +539,13 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .pill.cart { background: var(--line); color: var(--fg); }
 .tx .pill.slow { background: var(--warn-bg); color: var(--warn); }
 .tx .pill.eta { background: var(--warn-bg); color: var(--warn); }
+.tx .bd, .tx .dv { font-size: .76rem; line-height: 1.3; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tx .dv { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx .dv b { font-weight: 600; color: var(--fg); }
+.grp-h .gx { display: block; color: var(--fg); font-weight: 600; }
+.tx .pr > span:first-child { display: grid; }
+.tx .pr .lt { white-space: nowrap; }
+.tx .pr .pp { white-space: nowrap; font: 400 .76rem var(--body); color: var(--muted); margin-left: 0; }
 .tx .pill.eta.fast { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
 .tx .pill.eta.same { background: none; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
 .tx .pill.info { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
@@ -641,9 +648,20 @@ _DECIDE_JS = r"""<script>
       s.querySelector(".sub").textContent = k + " · " + f(g);
     });
     document.getElementById("sb-total").textContent = f(total);
+    rows.forEach(line);
     eta();
     stEl.textContent = n + " ja · Ware " + f(goods) + " · Versand " + f(ship) + " · Abgabe " + f(duty) + " (gesch.)";
     try { localStorage.setItem(key, JSON.stringify(keep)); } catch (e) {}
+  }
+  function line(r) {   // what the line costs at checkout, the same way for every row: goods + shipping + import - discount
+    var d = r.dataset, q = qty(r), g = parseFloat(d.g) * q, t = g + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
+    var el = r.querySelector(".lt"), pk0 = parseFloat(r.dataset.pk) * q; if (el) el.textContent = f(t);
+    var pp = r.querySelector(".pp"); if (pp) pp.textContent = "gesamt · " + f(t / Math.max(1, pk0)) + "/Stück";
+    var b = r.querySelector(".bd"); if (!b) return;
+    var pk = parseFloat(d.pk) * q, parts = [q + "× " + f(parseFloat(d.g)) + " Ware"];
+    parts.push(parseFloat(d.s) > 0.004 ? f(parseFloat(d.s)) + " Versand" : "Versand frei");
+    if (parseFloat(d.d) > 0.004) parts.push(f(parseFloat(d.d)) + " Abgabe");
+    b.textContent = parts.join(" + ") + (parseFloat(d.r) > 0.004 ? " − " + f(parseFloat(d.r)) + " Rabatt" : "") + "";
   }
   function day(s) { return Date.parse(s + "T00:00:00Z") / 864e5; }
   function dm(s) { return s.slice(8, 10) + "." + s.slice(5, 7) + "."; }
@@ -657,6 +675,7 @@ _DECIDE_JS = r"""<script>
       var p = r.querySelector(".pill.eta"); if (p) p.remove();
       if (!r.dataset.until) return;
       var g = r.closest(".grp");   // the other ways of the same part do not count against this one
+      if (g && st(r) !== "yes") return;
       var others = yes.filter(function (o) { return o !== r && !(g && o.closest(".grp") === g); })
         .reduce(function (m, o) { return o.dataset.until > m ? o.dataset.until : m; }, "");
       var on = st(r) === "yes", t = "", k = "eta", n = function (x) { return x + (x === 1 ? " Tag" : " Tage"); };
@@ -664,13 +683,21 @@ _DECIDE_JS = r"""<script>
       else {   // picking this row instead: the last date then, against the last date now
         var then = others && others > r.dataset.until ? others : r.dataset.until, c = last ? Math.round(day(then) - day(last)) : 0;
         if (c > 0) t = "würde Lieferung um " + n(c) + " verschieben";
-        else if (c < 0 && g) { t = "Lieferung " + n(-c) + " früher"; k = "eta fast"; }
-        else if (g) { t = "Gesamtlieferung unverändert"; k = "eta same"; }
       }
       if (!t) return;
       var box = r.querySelector(".tx .pills");
       if (!box) { box = document.createElement("span"); box.className = "pills"; r.querySelector(".tx").insertBefore(box, r.querySelector(".tx .need")); }
       var s = document.createElement("span"); s.className = "pill " + k; s.textContent = t; box.appendChild(s);
+    });
+    [].forEach.call(document.querySelectorAll(".grp"), function (g) {   // would the other way move the whole delivery?
+      var x = g.querySelector(".gx"); x.textContent = "";
+      var ws = [].slice.call(g.querySelectorAll(".row.dec")), on = ws.filter(function (r) { return st(r) === "yes"; });
+      if (on.length !== 1 || !last) return;
+      var rest = yes.filter(function (o) { return o.closest(".grp") !== g; }).reduce(function (m, o) { return o.dataset.until > m ? o.dataset.until : m; }, "");
+      var alt = ws.filter(function (r) { return r !== on[0] && r.dataset.until; }).map(function (r) { return r.dataset.until; }).sort().pop();
+      if (!alt) return;
+      var then = rest > alt ? rest : alt, c = Math.round(day(then) - day(last));
+      if (c) x.textContent = "Die andere Wahl " + (c > 0 ? "verschiebt" : "zieht") + " die ganze Lieferung " + (c > 0 ? "um " : "um ") + Math.abs(c) + (Math.abs(c) === 1 ? " Tag" : " Tage") + (c > 0 ? " nach hinten" : " vor") + ".";
     });
   }
   function msg() {
@@ -790,6 +817,24 @@ _DECIDE_JS = r"""<script>
 </script>"""
 
 
+def _dm(iso: str) -> str:
+    return f"{iso[8:10]}.{iso[5:7]}." if len(iso) >= 10 else iso
+
+
+def line_parts(c: dict) -> tuple[float, float, float, float]:
+    """(goods per quantity unit, shipping, import, discount) of a card's line, the way checkout adds them up."""
+    q = int(c.get("qty") or 1)
+    p = c.get("parts")
+    if p:
+        return (float(p.get("goods") or 0) / q, float(p.get("ship") or 0), float(p.get("duty") or 0), float(p.get("save") or 0))
+    return (float(c.get("price") or 0), float(c.get("ship") or 0), float(c.get("duty") or 0), 0.0)
+
+
+def line_total(c: dict) -> float:
+    g, s, d, rb = line_parts(c)
+    return g * int(c.get("qty") or 1) + s + d - rb
+
+
 def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) -> list[str]:
     """The rows in page order, each offer that replaces cart lines framed together with those lines (originals first)."""
     idx_of = {str(c.get("cart_id")): i for i, c in enumerate(cards) if c.get("cart_id")}
@@ -815,9 +860,15 @@ def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) 
         olds = [j for j in g if j != lead]
         order = olds + [lead]
         done.update(order)
-        head = (f"Dasselbe Teil, {len(order)} Wege <span>· nur einer auf Ja</span>" if len(olds) == 1 else
-                f"Ein Bedarf: {len(olds)} Zeilen oder eine <span>· Ja auf der einen setzt die anderen auf Nein</span>")
-        out.append(f'<div class="grp"><div class="grp-h">{head}</div>{"".join(rows[j] for j in order)}</div>')
+        new, old = line_total(cards[lead]), sum(line_total(cards[j]) for j in olds)
+        d_new = str(cards[lead].get("until") or "")[:10]
+        d_old = max((str(cards[j].get("until") or "")[:10] for j in olds), default="")
+        cmp = (f"{eur(old - new)} billiger" if old - new > 0.004 else f"{eur(new - old)} teurer" if new - old > 0.004 else "gleich teuer")
+        if d_new and d_old and d_new != d_old:
+            cmp += (", aber" if d_new > d_old else " und") + f" Lieferung {_dm(d_new)} statt {_dm(d_old)}"
+        who = "Alternative" if len(olds) == 1 else f"Eine Zeile statt {len(olds)}"
+        head = f"{who}: {cmp}" + " <span>· nur einer auf Ja</span>"
+        out.append(f'<div class="grp"><div class="grp-h">{head}<span class="gx"></span></div>{"".join(rows[j] for j in order)}</div>')
     return out
 
 
@@ -834,8 +885,10 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                   choice (bool), duty (EUR per line), qty, default (yes|maybe|no), verdict (the agent's opinion, one sentence),
                   rating ("4,8★ 208"), fit ("✓ Highland genannt" / "Modell nicht genannt"), tags, text, url,
                   item_id, sku_id, cart_id, replaces (cart id(s) this offer replaces), pills ([{t, k}] reasons next to
-                  the picture; k: save (bold), fast, slow, cart, info), saving (EUR, shown bold next to the price),
-                  until (latest delivery date, YYYY-MM-DD)}]}]
+                  until (latest delivery date, YYYY-MM-DD), parts ({goods, ship, duty, save} of the line at checkout;
+                  without it price × qty + ship + duty), pieces (pieces in the line, for the price per piece), seller}]}]
+    Every row shows the same thing big: what the line costs at checkout; below it the breakdown, the delivery date
+    and the seller. A group's head compares the ways in one sentence.
     The bar shows when the last Ja part arrives; each dated row says live whether it is that last part or would move it.
     An offer that replaces cart lines is shown together with them in one framed group: the same part, several ways;
     Ja on one way sets the others to Nein.
@@ -887,14 +940,16 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             more = (f'<div class="more">{meta_html}{text_html}'
                     f'{link}</div>')
             rid = f"r{si}_{ci}"
-            pl = [{"t": c["badge"], "k": ""}] if c.get("badge") and not c.get("pills") else []
-            pl += [x if isinstance(x, dict) else {"t": x, "k": ""} for x in c.get("pills") or []]
-            if c.get("cart_id") and str(c["cart_id"]) in replaced and not any(x["k"] == "cart" for x in pl):
-                pl.insert(0, {"t": "jetzt im Korb", "k": "cart"})
-            pill = ('<span class="pills">' + "".join(f'<span class="pill {_e(x.get("k") or "")}">{_e(x["t"])}</span>' for x in pl)
-                    + "</span>") if pl else ""
-            saving = float(c.get("saving") or 0)
-            save_html = f'<b class="save">\u2212{eur(saving)}</b>' if saving > 0.004 else ""
+            in_grp = ci in repl_of or (c.get("cart_id") and str(c["cart_id"]) in replaced)
+            pill = f'<span class="pills"><span class="pill">{_e(c["badge"])}</span></span>' if c.get("badge") and not in_grp else ""
+            g1, s1, d1, r1 = line_parts(c)
+            pk = float(c.get("pieces") or 0) / qty if c.get("pieces") else 1.0
+            dv = [f'Lieferung bis <b>{_dm(str(c["until"])[:10])}</b>' if c.get("until") else "Lieferdatum unbekannt"]
+            if c.get("seller"):
+                dv.append(_e(c["seller"]))
+            if c.get("cart_id") and str(c["cart_id"]) in replaced:
+                dv.append("jetzt im Korb")
+            dv_html = f'<div class="bd"></div><div class="dv">{" · ".join(dv)}</div>'
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
                 f'<label class="{v[0]}" for="{rid}{v[0]}" title="{icons[v][1]}" aria-label="{icons[v][1]}">{icons[v][0]}</label>'
@@ -913,12 +968,12 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             rows.append(
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
-                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}"{until} data-qty0="{int(c.get("qty0") or qty)}">'
+                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}"{until} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
                 f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_e(c["title"])}</span>'
-                f'<div class="pr"><span>{eur(price)}{save_html}</span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
+                f'<div class="pr"><span><span class="lt">{eur(line_total(c))}</span><small class="pp">gesamt · {eur(line_total(c) / max(1.0, pk * qty))}/Stück</small></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
                 f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
-                f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{vd_html}'
+                f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
                 f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
         out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'

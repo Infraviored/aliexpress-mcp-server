@@ -2170,6 +2170,13 @@ def _until(days) -> Optional[str]:
         return None
 
 
+def _way_parts(w: dict) -> dict:
+    """A way's line at checkout: goods, shipping, import, discount (adds up to its net)."""
+    goods, duty = float(w.get("goods") or 0), float(w.get("duty") or 0)
+    return {"goods": round(goods, 2), "ship": round(max(0.0, float(w.get("total") or 0) - goods - duty), 2),
+            "duty": round(duty, 2), "save": round(float(w.get("save") or 0), 2)}
+
+
 def _line_deal(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
     """
     Every other way to buy what this cart line is, priced like the line itself (via `cache`):
@@ -2195,7 +2202,11 @@ def _line_deal(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
         if str(w["offer"]["item_id"]) == str(ln["item_id"]) and str(v["sku_id"]) == str(ln["sku_id"]):
             continue
         def cand(price: float, combo: bool) -> dict:
+            pt = _way_parts(w)
+            if combo:
+                pt["duty"] = round(max(0.0, pt["duty"] - (w["net"] - price)), 2)
             return {**_way_view(w), "sku_id": v["sku_id"], "qty": q, "cost": round(price, 2), "days": w.get("days"),
+                    "parts": pt, "store": w["offer"].get("store") or "",
                     "ambiguous": bool(v.get("ambiguous")), "combo": combo, "pieces": w["pieces"],
                     "choice": bool(w["offer"].get("choice")), "lines": [{"sku_id": v["sku_id"], "qty": q}]}
         if best is None or w["net"] < best["cost"]:
@@ -2205,7 +2216,7 @@ def _line_deal(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
             if kombi is None or kn < kombi["cost"]:
                 kombi = cand(kn, True)
                 kombi["net"] = round(w["net"], 2)
-    alt = {"now": cur["net"], "best": best, "kombi": kombi}
+    alt = {"now": cur["net"], "now_parts": _way_parts(cur), "best": best, "kombi": kombi}
     cache[key] = {"at": time.time(), "alt": alt}
     return alt
 
@@ -4266,7 +4277,8 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
                           "price": ln["price"] or 0, "ship": ln.get("ship") or 0, "choice": ln.get("group") == "group_choice",
                           "duty": DUTY_PER_LINE if (heading != "Kombi-Knaller-Korb" and ln.get("group") != "group_choice") else 0,
                           "qty": ln["qty"], "default": "yes" if ln["checked"] else "no",
-                          "until": (ln.get("delivery") or (None, None))[1],
+                          "until": (ln.get("delivery") or (None, None))[1], "pieces": pcs_of(ln),
+                          "seller": "Choice" if ln.get("group") == "group_choice" else (ln.get("store") or "Händler"),
                           "image": ln.get("image") or "", "url": f"{BASE_URL}/item/{ln['item_id']}.html",
                           "tags": [x for x in (cartlib.GROUP_NAMES.get(ln.get("group"), ln.get("group")),
                                                f"{ln['delivery'][0]}…{ln['delivery'][1]}" if ln.get("delivery") else "") if x],
@@ -4299,24 +4311,16 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
                     found.append(f"- {line} - not verified yet" + (" (no match words on this line)" if nomatch else ""))
                     continue
                 found.append(f"- {line} - on the page")
-                when = f"Lieferung in etwa {w['days']} Tagen" if w.get("days") else ""
                 kombi = "im Kombi-Knaller-Korb, ab 3 Teilen ohne Abgabe. " if w["combo"] else ""
                 cards[-1]["default"] = "no"
-                faster = None
-                if w.get("days") and ln.get("delivery") and ln["delivery"][1]:
-                    try:
-                        faster = (datetime.date.fromisoformat(ln["delivery"][1][:10]) - datetime.date.today()).days - int(w["days"])
-                    except (ValueError, TypeError):
-                        faster = None
-                pills = [{"t": f"spart {report.eur(diff)}", "k": "save"}]
-                if faster and abs(faster) >= 2:
-                    pills.append({"t": f"{faster} Tage schneller", "k": "fast"} if faster > 0 else {"t": f"{-faster} Tage langsamer", "k": "slow"})
-                pills.append({"t": "Kombi-Knaller", "k": "info"} if w["combo"] else {"t": "Choice", "k": "info"} if w["choice"] else {"t": "anderer Händler", "k": "info"})
-                cards.append({"title": f"{need} · {w['buy']}", "pills": pills, "saving": round(diff, 2), "until": _until(w.get("days")), "item_id": w["item_id"],
+                if deal_of[ln["cart_id"]].get("now_parts"):
+                    cards[-1]["parts"] = deal_of[ln["cart_id"]]["now_parts"]
+                cards.append({"title": f"{need} · {w['buy']}", "until": _until(w.get("days")), "item_id": w["item_id"],
+                              "parts": w.get("parts"), "pieces": w["pieces"],
+                              "seller": "Kombi-Knaller" if w["combo"] else "Choice" if w["choice"] else (w.get("store") or "anderer Händler"),
                               "sku_id": w["sku_id"], "replaces": ln["cart_id"], "price": round(w["cost"] / q, 2), "ship": 0,
                               "choice": w["choice"], "duty": 0, "qty": q, "default": "yes", "combo": w["combo"],
-                              "verdict": (f"{w['buy']} für {report.eur(w['cost'])} statt {report.eur(now)} (Ware, Versand, Abgabe): "
-                                          f"spart {report.eur(diff)}. {kombi}{when}").strip(),
+                              "verdict": kombi.strip(),
                               "fit": "Variantenname mehrfach: Bild prüfen" if w.get("ambiguous") else "",
                               "image": w.get("img") or "", "url": w["url"],
                               "tags": ["Günstiger"] + (["Kombi-Knaller"] if w["combo"] else (["Choice"] if w["choice"] else [])),
@@ -4325,7 +4329,7 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
             win, need = mg["win"], mg["need"]
             old = " + ".join(f"{ln['qty']}× {ln.get('variant') or ln['title'][:30]}" for ln in mg["lines"])
             if mg["keep"] is None:
-                cards.append({"title": f"{need} · {win['buy']}", "pills": [{"t": f"spart {report.eur(mg['saving'])}", "k": "save"}, {"t": "eine Zeile", "k": "info"}],
+                cards.append({"title": f"{need} · {win['buy']}", "seller": "eine Zeile",
                               "saving": round(mg["saving"], 2), "until": _until(win.get("days")), "item_id": win["item_id"], "sku_id": win["sku_id"],
                               "replaces": [ln["cart_id"] for ln in mg["lines"]], "price": round(win["cost"] / win["qty"], 2), "ship": 0,
                               "choice": False, "duty": 0, "qty": win["qty"], "default": "yes",
