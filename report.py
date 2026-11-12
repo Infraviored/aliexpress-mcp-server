@@ -541,6 +541,10 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .bd { display: flex; flex-wrap: wrap; gap: 0 12px; }
 .tx .bd .eq { color: var(--fg); font-weight: 600; }
 .tx .dv { overflow-wrap: anywhere; }
+.tx .pcs { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tx .pcs b { font-weight: 600; color: var(--fg); }
+.tx .pcs.short, .tx .pcs.short b { color: var(--warn, #b4540a); }
+.cat-h .need-h { font: .78rem var(--body); color: var(--muted); white-space: nowrap; }
 .tx .dv b { font-weight: 600; color: var(--fg); }
 .tx .need .var { color: var(--muted); font-weight: 400; }
 .tx .pr > span:first-child { display: block; }
@@ -657,6 +661,10 @@ _DECIDE_JS = r"""<script>
   function line(r) {   // what the line costs at checkout, the same way for every row: goods + shipping + import - discount
     var d = r.dataset, q = qty(r), g = parseFloat(d.g) * q, t = g + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
     var el = r.querySelector(".lt"), pk0 = parseFloat(r.dataset.pk) * q; if (el) el.textContent = fp(t);
+    var pc = r.querySelector(".pcs"), sec = r.closest("section[data-cat]"), nd = sec ? parseInt(sec.dataset.need, 10) || 0 : 0;
+    if (pc) { var got = Math.round(pk0); pc.className = "pcs" + (nd && got < nd ? " short" : ""); pc.textContent = "";
+      var bb = document.createElement("b"); bb.textContent = got + "\u00a0Stück"; pc.appendChild(bb);
+      if (nd) pc.appendChild(document.createTextNode(" für Bedarf " + nd)); }
     var b = r.querySelector(".bd"); if (!b) return;
     var N = " ", gs = parseFloat(d.s), dt = parseFloat(d.d), rb = parseFloat(d.r), parts = [q + N + "×" + N + fp(parseFloat(d.g)).replace(" ", N) + N + "Ware"];
     parts.push(gs > 0.004 ? "+" + N + fp(gs).replace(" ", N) + N + "Versand" : "Versand" + N + "frei");
@@ -925,7 +933,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                   rating ("4,8★ 208"), fit ("✓ Highland genannt" / "Modell nicht genannt"), tags, text, url,
                   item_id, sku_id, cart_id, replaces (cart id(s) this offer replaces), pills ([{t, k}] reasons next to
                   until (latest delivery date, YYYY-MM-DD), parts ({goods, ship, duty, save} of the line at checkout;
-                  without it price × qty + ship + duty), pieces (pieces in the line, for the price per piece), seller}]}]
+                  without it price × qty + ship + duty), pieces (pieces in the line, for the price per piece), seller}],
+                  need (pieces needed for this category; each row then shows live how many pieces it brings)}]
     Every row shows the same thing big: what the line costs at checkout; below it the breakdown, the delivery date
     and the seller. A group's head compares the ways in one sentence.
     The bar shows when the last Ja part arrives; each dated row says live whether it is that last part or would move it.
@@ -988,7 +997,11 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 dv.append(_e(c["seller"]))
             if c.get("cart_id") and str(c["cart_id"]) in replaced:
                 dv.append("jetzt im Korb")
-            dv_html = (f'<div class="bd">{_receipt(qty, g1, s1, d1, r1, line_total(c) / max(1.0, pk * qty))}</div>'
+            need = int(sec.get("need") or 0)
+            got = round(pk * qty)
+            pcs_html = (f'<div class="pcs{" short" if need and got < need else ""}"><b>{got}\u00a0Stück</b>'
+                        + (f' für Bedarf {need}' if need else "") + '</div>')
+            dv_html = (pcs_html + f'<div class="bd">{_receipt(qty, g1, s1, d1, r1, line_total(c) / max(1.0, pk * qty))}</div>'
                        f'<div class="dv">{", ".join(dv)}</div>')
             seg = "".join(
                 f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
@@ -1016,7 +1029,8 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
                 f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
-        out.append(f'<section data-cat="{_e(sec["heading"])}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
+        need_h = f'<span class="need-h">Bedarf {int(sec["need"])}\u00a0Stück</span>' if sec.get("need") else ""
+        out.append(f'<section data-cat="{_e(sec["heading"])}" data-need="{int(sec.get("need") or 0)}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>{need_h}'
                    f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'
                    f'<div class="rows">{"".join(_grouped(sec["cards"], rows, repl_of))}</div></section>')
     out.append('<div class="dbar"><div class="in"><div class="bulk" id="sb-bulk" hidden><span id="sb-marked"></span>'
