@@ -14,6 +14,6 @@ def test_pack_and_need(monkeypatch):
     a, b = cats[0]["cards"]
     assert a["qty"] == 1 and a["pieces"] == 10                  # one 10-pack covers 6
     assert b["qty"] == 2 and b["pieces"] == 8                   # two 4-packs needed
-    assert "Bedarf 6 Stück" in page and "10 Stück</b> für Bedarf 6" in page
+    assert 'data-need="6"' in page and 'class="ch global"' in page and "10 Stück</b> für Bedarf 6" in page
     assert "0,16 €/Stück" in page                         # 1,59 € / 10 pieces
     assert not hasattr(m, "make_report")
