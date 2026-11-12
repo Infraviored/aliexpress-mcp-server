@@ -142,7 +142,11 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
   pages for 3 h on disk and, after a bot check, pauses every call for 10 min (calls fail
   fast with "bot check active"). Search first, then look closely at 2–4 candidates only,
   not every hit; never run many `best_offer` calls in a row for the same question.
-- "Bot check not passed": do not keep calling (every call extends it). Fastest way out:
+- Image bot check ("select all images with …", the pause message names `captcha.py`): solve it
+  yourself, do not ask the user. `.venv/bin/python captcha.py start` in the background, Read the
+  numbered picture, `captcha.py answer <tile numbers>`, Read the next picture, repeat until
+  `passed` (`v` when new tiles keep coming and none match). Then tell the user it passed.
+- "Bot check not passed" (slider): do not keep calling (every call extends it). Fastest way out:
   `.venv/bin/python import_profile.py --ask` — the user passes the check once in a real Chrome
   (remote-browser card in the dashboard, run it in the background and tell him), the cookies
   are imported. Otherwise wait 15–30 min.
