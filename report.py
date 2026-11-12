@@ -544,7 +544,11 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .pcs { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tx .pcs b { font-weight: 600; color: var(--fg); }
 .tx .pcs.short, .tx .pcs.short b { color: var(--warn, #b4540a); }
-.cat-h .need-h { font: .78rem var(--body); color: var(--muted); white-space: nowrap; }
+.cat-h .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thumb .ch { position: absolute; left: 4px; bottom: 4px; pointer-events: none; font: 600 .68rem/1.2 var(--body);
+  padding: 2px 6px; border-radius: 5px; white-space: nowrap; background: #3b3f3a; color: #fff; }
+.thumb .ch.combo { background: #2f7d5b; }
+.thumb .ch.choice { background: #b4540a; }
 .tx .dv b { font-weight: 600; color: var(--fg); }
 .tx .need .var { color: var(--muted); font-weight: 400; }
 .tx .pr > span:first-child { display: block; }
@@ -647,7 +651,8 @@ _DECIDE_JS = r"""<script>
     [].forEach.call(document.querySelectorAll("section[data-cat]"), function (s) {
       var g = 0, k = 0;
       [].forEach.call(s.querySelectorAll(".row.dec"), function (r) { if (st(r) === "yes") { k++; g += lineTotal(r); } });
-      s.querySelector(".sub").textContent = k + " Ja, " + fp(g);
+      var nd = parseInt(s.dataset.need, 10) || 0;
+      s.querySelector(".sub").textContent = (nd ? "Bedarf " + nd + " · " : "") + k + " Ja, " + fp(g);
     });
     document.getElementById("sb-total").textContent = fp(total);
     rows.forEach(line);
@@ -877,6 +882,13 @@ def _receipt(q: int, g1: float, s1: float, d1: float, r1: float, per_piece: floa
     return "".join(f"<span>{i}</span>" for i in items) + f'<span class="eq">={nb}{nbm(per_piece)}/Stück</span>'
 
 
+def _channel(c: dict) -> str:
+    """Where the line is bought: Kombi-Knaller (no import charge from 3 pieces), Choice, or a global seller."""
+    k, t = (("combo", "Kombi-Knaller") if c.get("combo") else ("choice", "Choice") if c.get("choice")
+            else ("global", "Händler"))
+    return f'<span class="ch {k}">{t}</span>'
+
+
 def line_total(c: dict) -> float:
     g, s, d, rb = line_parts(c)
     return g * int(c.get("qty") or 1) + s + d - rb
@@ -1022,15 +1034,14 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                 f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
                 f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
                 f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}"{until} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
-                f'<div class="thumb">{_img(c["img"])}<button type="button" class="mk" aria-label="markieren"></button></div>'
+                f'<div class="thumb">{_img(c["img"])}{_channel(c)}<button type="button" class="mk" aria-label="markieren"></button></div>'
                 f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_title_html(c["title"])}</span>'
                 f'<div class="pr"><span><span class="lt">{_m(line_total(c))}</span></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
                 f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
                 f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
                 f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
                 f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
-        need_h = f'<span class="need-h">Bedarf {int(sec["need"])}\u00a0Stück</span>' if sec.get("need") else ""
-        out.append(f'<section data-cat="{_e(sec["heading"])}" data-need="{int(sec.get("need") or 0)}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>{need_h}'
+        out.append(f'<section data-cat="{_e(sec["heading"])}" data-need="{int(sec.get("need") or 0)}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
                    f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'
                    f'<div class="rows">{"".join(_grouped(sec["cards"], rows, repl_of))}</div></section>')
     out.append('<div class="dbar"><div class="in"><div class="bulk" id="sb-bulk" hidden><span id="sb-marked"></span>'
