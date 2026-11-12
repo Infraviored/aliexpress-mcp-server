@@ -21,6 +21,8 @@ import uuid
 import functools
 import threading
 import time
+import subprocess
+import sys
 import uuid
 import hashlib
 import logging
@@ -266,7 +268,9 @@ def mtop_call(
         # on a virtual display, retry once.
         punish_url = (data.get("data") or {}).get("url") if isinstance(data.get("data"), dict) else None
         if "FAIL_SYS_USER_VALIDATE" in ret_str:
-            _bot_note(True)
+            _bot_note(True, "slider" if punish_url and "action=captcha" in punish_url
+                      else "deny (no slider, only waiting helps)" if punish_url and "action=deny" in punish_url
+                      else "no punish page")
         # `action=deny` (after hammering past a solved slider) has no slider: wait it out.
         if captcha and punish_url and "action=captcha" in punish_url:
             import slider
@@ -276,7 +280,11 @@ def mtop_call(
             except Exception as e:
                 logger.warning("slider solver failed: %s", e)
                 solved = False
+            if not solved:
+                _bot_note(True, "slider not passed automatically: card sent to Florian")
+                _ask_user_card()
             if solved:
+                _log_call("BOT-CHECK slider passed automatically")
                 _bot_note(False)
                 # Passing the check sets a new token: allow one token refresh, no second captcha.
                 return mtop_call(api, version, payload, cookies=load_cookies(), retries=1, referer=referer, method=method, captcha=False)
@@ -365,16 +373,34 @@ def _mtop_pace_locked(fcntl, random) -> None:
         f.write(json.dumps(times[-max(1, MTOP_PER_MINUTE):]))
 
 
-def _bot_note(blocked: bool) -> None:
-    """Remember across processes that AliExpress asked for a bot check (or that it passed)."""
+def _bot_note(blocked: bool, reason: str = "") -> None:
+    """Remember across processes that AliExpress asked for a bot check (or that it passed), and why."""
     if blocked:
-        _log_call("BOT-CHECK")
+        _log_call("BOT-CHECK" + (f" {reason}" if reason else ""))
         BOT_CHECK["since"] = BOT_CHECK.get("since") or time.time()
         BOT_CHECK["last"] = time.time()
-        private.write_json(_BOT_FILE, {"since": BOT_CHECK["since"], "last": BOT_CHECK["last"]})
+        BOT_CHECK["reason"] = reason or BOT_CHECK.get("reason", "")
+        private.write_json(_BOT_FILE, {"since": BOT_CHECK["since"], "last": BOT_CHECK["last"], "reason": BOT_CHECK["reason"]})
     else:
         BOT_CHECK.clear()
         _BOT_FILE.unlink(missing_ok=True)
+
+
+def _ask_user_card() -> bool:
+    """Send Florian the remote-browser card to pass the check himself (import_profile.py --ask),
+    detached, unless one is already open. The card's import ends the pause."""
+    try:
+        if subprocess.run(["pgrep", "-f", "import_profile.py --ask"], capture_output=True).returncode == 0:
+            return False
+        here = Path(__file__).resolve().parent
+        subprocess.Popen([sys.executable, str(here / "import_profile.py"), "--ask"], cwd=here,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        _log_call("BOT-CHECK card sent to Florian")
+        return True
+    except Exception as e:
+        logger.warning("could not send the bot-check card: %s", e)
+        return False
 
 
 def _bot_cooldown_left() -> float:
@@ -397,7 +423,9 @@ def blocked_msg() -> str:
     if _bot_cooldown_left() <= 0:
         return ""
     left = max(1, round(_bot_cooldown_left() / 60))
-    return (f" AliExpress bot check (captcha) active: this is NOT an expired session and the product is not gone."
+    why = BOT_CHECK.get("reason")
+    return (f" AliExpress bot check (captcha) active" + (f" ({why})" if why else "")
+            + ": this is NOT an expired session and the product is not gone."
             f" Calls are paused for about {left} more min. Fastest way out: .venv/bin/python import_profile.py --ask"
             " (the user passes the check in the remote browser card, the cookies are imported).")
 
