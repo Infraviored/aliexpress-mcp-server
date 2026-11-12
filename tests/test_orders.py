@@ -112,7 +112,7 @@ def test_list_orders_hides_cancelled_and_survives_a_broken_detail(monkeypatch, t
     def boom(payload, post=False, api=""):
         raise RuntimeError("gone")
     monkeypatch.setattr(srv, "_orders_call", boom)
-    monkeypatch.setattr(srv, "make_report", lambda *a, **k: "REPORT")
+    monkeypatch.setattr(srv, "_info_page", lambda *a, **k: "REPORT")
     text = srv.list_orders(out=str(tmp_path / "o.json"))
     data = json.loads((tmp_path / "o.json").read_text())
     assert [o["order_id"] for o in data["orders"]] == ["1", "3"]              # cancelled hidden

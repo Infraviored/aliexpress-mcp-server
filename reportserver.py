@@ -1,4 +1,4 @@
-"""Serves the report pages (cart, plan, make_report) from a small local web server inside the MCP.
+"""Serves the report pages (cart, plan, decide pages, orders) from a small local web server inside the MCP.
 
 Nothing is published anywhere: the pages hold the user's cart and prices. The server listens on the
 local network, every URL carries a long random token (stored mode 600), and only the report folder is

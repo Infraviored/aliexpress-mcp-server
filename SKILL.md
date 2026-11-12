@@ -32,14 +32,22 @@ Real total for any lines: `checkout_preview`. What one article (or Choice vs Kom
 
 ## Reports
 
-**The answer to every product search is the report, nothing else.** When the user asks
-you to look for something, find a better price or compare, you finish with one
-`make_report` page: the recommendation on top (`chosen`, with a short reason), the
-alternatives below it (1–2 sentences on what differs), `"pick": True` on the section so
-he can click his choice. Give the page address (served locally by the MCP, never published). Do not ask the question in
-chat, do not put it on a `decide` card (that rule is for other work, not for shopping
-choices), do not write a table in chat. In chat give two or three sentences and the
-recommendation; the page does the rest. Adding to the cart happens after he picked.
+**The answer to every product search is ONE `decide_report` page, nothing else.** There is no other
+generator for research pages (the old `make_report` is gone): searching, comparing, a better price, a parts list.
+Never hand-written HTML. In chat give two or three sentences and the recommendation; the page does the rest. Do not
+ask the question in chat, do not put it on a `decide` card, do not write a table in chat. Give the page address (served
+locally by the MCP, never published).
+
+How the page is built:
+- **One category per need**, never per offer: "Mikrocontroller", "IC-Sockel", "IR-LED". Every offer for that need is a
+  card in it (the alternatives); he picks one per category. Two ways to buy the same part are two cards in ONE category.
+- **`need` on the category** (pieces he needs) and **`pack` on every card** (pieces per listing unit: 1 for a single chip,
+  10 for a 10-pack). `price` is per listing unit. The page then shows on every row, computed, the line total, the price
+  per piece and "N Stück für Bedarf M" (orange when short); `qty` defaults to enough packs for the need.
+- **Nothing on top:** no summary boxes, no totals in front of the parts (the bar at the bottom shows the live total).
+  Risks belong in the card's `verdict`; `notes` (shown collapsed) only for what concerns the whole page, rarely.
+- `default: "yes"` on your recommendation, one per category. Current findings only: rebuild the page when a fact
+  changes (a cheaper chip that suffices goes in as the "yes", not as a footnote).
 
 **One page type for everything the user decides: the decision page.** For a big or finished cart call
 `decide_cart` (the real cart, one compact row per line; Ja = checked, Nein = unchecked, Löschen = removed, quantity,
@@ -69,23 +77,15 @@ the user.
 `fit` on each card of `decide_report`. One sentence per row: why this one, what to watch, the rating where it matters,
 for car parts whether the seller names his model. Short titles (a few words): the row shows one line, two for the opinion.
 
-**When there are alternatives to decide between, use `decide_report` instead:** one category per need
-(Frunk, Kofferraum ...), each offer a card with `item_id` AND `sku_id`, `price` (number), `ship`, `choice`,
-`default` (your recommendation: "yes"), and `fit` where the part must fit something (a car model: say
-whether the seller names it, "✓ Highland genannt" or "Modell nicht genannt"). The page has Ja / Vielleicht / Nein,
-a quantity and a live ESTIMATE of the total; its button hands the choice to the chat as text plus a json block
-(through the ClaudeVoice dashboard). Pass that message unchanged to `apply_selection`: it puts every "Ja"
-in the cart. Then `view_cart`, and tell him the real prices against the estimate. Show him the page by writing
-its file path as plain text in chat (the dashboard turns it into a card), and give the local address too.
-Search more than the first page and more than one wording when the product allows it.
-
-Every page for the user (research, comparison, "what did you find") comes from
-`make_report`, never from hand-written HTML: one layout, always with pictures.
-Each card needs `item_id` (picture from the product page) or `image` (URL,
-local file). Put the verdict into `notes`, the totals into `facts`, mark what
-is in the cart with a "✓ im Korb" tag. The cart and the plan pages
-(`view_cart`, `shop_list`) have their own builders. Give the user the address
-the tool names. Never publish these pages (Artifact tool or any web service): they hold the user's cart.
+**Cards of `decide_report`:** each offer needs `item_id` AND `sku_id`, `price` (number, per listing unit), `pack`,
+`ship`, `choice`, and `fit` where the part must fit something (a car model: say whether the seller names it,
+"✓ Highland genannt" or "Modell nicht genannt"). The page has Ja / Vielleicht / Nein, a quantity and a live ESTIMATE of
+the total; its button hands the choice to the chat as text plus a json block (through the ClaudeVoice dashboard). Pass
+that message unchanged to `apply_selection`: it puts every "Ja" in the cart. Then `view_cart`, and tell him the real
+prices against the estimate. Show him the page by writing its file path as plain text in chat (the dashboard turns it
+into a card), and give the local address too. Search more than the first page and more than one wording when the
+product allows it. The cart and the plan pages (`view_cart`, `shop_list`) have their own builders. Never publish these
+pages (Artifact tool or any web service): they hold the user's cart.
 
 ## Orders
 

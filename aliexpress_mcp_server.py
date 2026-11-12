@@ -414,8 +414,8 @@ def _bot_cooldown_left() -> float:
     return max(0.0, BOT_CHECK.get("last", 0) + BOT_COOLDOWN - time.time())
 
 
-REPORT_HINT = ("\n[Not finished: Florian sees no pictures in chat. Pass the finalists to make_report "
-               "(page with pictures, links, prices, variants) and send that page, not this list.]")
+REPORT_HINT = ("\n[Not finished: Florian sees no pictures in chat. Pass the finalists to decide_report "
+               "(one category per need, alternatives as cards, pack size and need) and send that page, not this list.]")
 
 
 def blocked_msg() -> str:
@@ -4313,12 +4313,11 @@ def _report_image(card: dict) -> Optional[str]:
         return None
 
 
-@tool()
-def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
-                facts: list[dict] = None, notes: list[dict] = None) -> str:
+def _info_page(name: str, title: str, sections: list[dict], subtitle: str = "",
+               facts: list[dict] = None, notes: list[dict] = None) -> str:
     """
-    Build THE report page for the user: always use this, never write report
-    HTML by hand, so every report looks the same. Pictures are mandatory.
+    A page that only shows (the orders overview). Not a tool: every page with offers to choose from is
+    decide_report. Pictures are mandatory.
 
     Args:
         name: File name without extension (e.g. "tesla-camera-covers").
@@ -4352,29 +4351,36 @@ def make_report(name: str, title: str, sections: list[dict], subtitle: str = "",
                                    time.strftime("%d.%m.%Y %H:%M"))
     except ValueError as e:
         return (f"Report not written: {e}. Give each of those cards an item_id or an image "
-                "(URL, local file, data: URI), then call make_report again." + blocked_msg())
+                "(URL, local file, data: URI)." + blocked_msg())
     return _write_report(f"{re.sub(r'[^A-Za-z0-9_-]+', '-', name).strip('-') or 'report'}.html", page)
 
 
 @tool()
 def decide_report(name: str, title: str, categories: list[dict], subtitle: str = "",
-                  facts: list[dict] = None, notes: list[dict] = None,
+                  notes: list[dict] = None,
                   choice_threshold: float = 10.0, choice_ship: float = 1.99) -> str:
     """
-    Build a page the user DECIDES on (instead of make_report, which only shows): per category (one need
-    each) the offers with Ja / Vielleicht / Nein, a quantity, a live estimate (goods + shipping + import charge) and a
-    button that sends the choice to the chat. When the user's choice arrives (text plus a json block),
-    pass it to apply_selection: it puts every "Ja" into the cart. Use it for any research with alternatives.
-    Pictures are mandatory. Give the user the address; never publish the page.
+    THE page for every product search, comparison or parts list: per category (one need each, e.g.
+    "Mikrocontroller") its offers as alternatives with Ja / Vielleicht / Nein, a quantity, a live total
+    (goods + shipping + import charge), the price per piece and how many pieces each line brings for the need.
+    The button sends the choice to the chat; pass it to apply_selection, which puts every "Ja" into the cart.
+    Pictures are mandatory. Give the user the address; never publish the page. Never write report HTML by hand.
+
+    Keep the top short: no summary boxes; the bar at the bottom carries the total. Put risks into the card's
+    verdict, not into notes; notes (collapsed) only for what concerns the whole page.
 
     Args:
         name: File name without extension.
-        title, subtitle, facts, notes: as in make_report.
-        categories: [{"heading": "Frunk", "intro": "...", "cards": [card, ...]}], card =
+        title: Short page name. subtitle: unused on the page, kept for the file.
+        notes: [{"text": "...", "warn": true}], shown collapsed. Use rarely.
+        categories: [{"heading": "Mikrocontroller", "need": 6 (pieces needed), "cards": [card, ...]}], card =
             {"title": "...", "item_id": "...", "sku_id": "..." (both needed: the choice is put in the cart by them),
              "price": 20.39 (EUR per piece, number), "ship": 0 (EUR shipping for this line, 0 = free),
              "choice": true (Choice offer: shipping is shared, free from the threshold), "duty": 0 (estimated import charge per line),
-             "qty": 1, "default": "yes"|"maybe"|"no" (pre-selected, default no), "tags": [...], "text": "...",
+             "pack": 10 (pieces per listing unit: a 10-pack is 10, a single chip 1; ALWAYS give it, the page
+                     shows pieces and price per piece from it; "price" is per listing unit, i.e. per pack),
+             "qty": listing units to buy (default: enough packs for the category's need),
+             "default": "yes"|"maybe"|"no" (pre-selected, default no; one "yes" per category), "tags": [...], "text": "...",
              "verdict": "your opinion in one sentence: why this one, what to watch" (ALWAYS fill it: he decides on it),
              "rating": "4,8★ 208" (when it matters),
              "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link,
@@ -4383,8 +4389,14 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
         choice_threshold, choice_ship: free Choice shipping from this order value, else this fee once.
     """
     for sec in categories:
+        need = int(sec.get("need") or 0)
         for c in sec.get("cards") or []:
             c.setdefault("title", c.get("item_id") or "?")
+            pack = int(c.get("pack") or 0)
+            if pack > 0:
+                if not c.get("qty"):
+                    c["qty"] = max(1, -(-need // pack)) if need else 1
+                c["pieces"] = pack * int(c["qty"])
         sec.setdefault("cards", [])
         sec.setdefault("heading", "")
     cards = [c for sec in categories for c in sec["cards"]]
@@ -4396,7 +4408,7 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
             c["img"] = img
     safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "decide"
     try:
-        page = report.decide_page(safe, title, subtitle, facts or [], notes or [], categories,
+        page = report.decide_page(safe, title, subtitle, [], notes or [], categories,
                                   time.strftime("%d.%m.%Y %H:%M"), choice_threshold, choice_ship)
     except ValueError as e:
         return f"Page not written: {e}. Fix those cards, then call decide_report again." + blocked_msg()
@@ -4962,7 +4974,7 @@ def _orders_report(rows: list[dict], limit: int) -> str:
     facts = [{"label": "Orders", "value": str(len(rows))},
              {"label": "Sum", "value": " + ".join(f"{v:.2f} {c}" for c, v in sums.items())}]
     notes = [{"text": f"Page shows the first {limit} items; orders.json has all."}] if shown >= limit else []
-    return make_report("orders", "My orders", secs, subtitle=time.strftime("%d.%m.%Y"), facts=facts, notes=notes)
+    return _info_page("orders", "My orders", secs, subtitle=time.strftime("%d.%m.%Y"), facts=facts, notes=notes)
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
