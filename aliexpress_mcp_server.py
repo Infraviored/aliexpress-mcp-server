@@ -4302,6 +4302,32 @@ def _attach_images(cards: list[dict]) -> None:
             c["img"] = img
 
 
+def _attach_offer_facts(cards: list[dict]) -> int:
+    """Fill what the product page knows and the card left out: the latest delivery date ("until"), Choice, and the
+    shipping fee of a non-Choice line. Given values win. Returns how many cards with an item_id stay without a date."""
+    undated = 0
+    for c in cards:
+        if not c.get("item_id"):
+            continue
+        if not c.get("until"):
+            with _REPORT_PDP_LOCK:   # same lock as the pictures: the page is usually cached by now
+                offer = _pdp_offer(str(c["item_id"]))
+            sh = (offer or {}).get("shipping") or {}
+            days = (sh.get("days") or (None, None))[1]
+            if days:
+                c["until"] = _until(days)
+            if offer and "choice" not in c:
+                c["choice"] = bool(offer.get("choice"))
+            if offer and "ship" not in c and not c.get("choice"):
+                try:
+                    c["ship"] = 0.0 if sh.get("free") else float(sh.get("fee") or 0)
+                except (TypeError, ValueError):
+                    pass
+        if not c.get("until"):
+            undated += 1
+    return undated
+
+
 def _report_file_stem(name: str, default: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or default
 
@@ -4375,6 +4401,8 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
              "rating": "4,8★ 208" (when it matters),
              "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link,
              "cart_id": only for lines already in the cart (see decide_cart)}.
+            The latest delivery date of every card is read from its product page (item_id); so are "choice" and,
+            for a non-Choice line, "ship" when you leave them out. Give "until" (YYYY-MM-DD) only to override.
             Keep "title" SHORT (what it is, a few words): the page shows one line per offer, the rest under "tags"/"text" on tap.
         choice_threshold, choice_ship: free Choice shipping from this order value, else this fee once.
     """
@@ -4393,13 +4421,18 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
     if not cards:
         return "No cards: give at least one category with cards."
     _attach_images(cards)
+    undated = _attach_offer_facts(cards)
     safe = _report_file_stem(name, "decide")
     try:
         page = report.decide_page(safe, title, subtitle, [], notes or [], categories,
                                   time.strftime("%d.%m.%Y %H:%M"), choice_threshold, choice_ship)
     except ValueError as e:
         return f"Page not written: {e}. Fix those cards, then call decide_report again." + blocked_msg()
-    return _write_report(f"{safe}.html", page)
+    out = _write_report(f"{safe}.html", page)
+    if undated:
+        out += (f"\n{undated} offer(s) show no delivery date: the product page gave none or could not be read."
+                " Call decide_report again later to fill them." + blocked_msg())
+    return out
 
 
 def _live_lines() -> Optional[dict[str, dict]]:
