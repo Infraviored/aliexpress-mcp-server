@@ -11,6 +11,7 @@ The functions take plain row dicts (built in the server) and return HTML.
 
 import base64
 import html
+import json
 from typing import Callable, Optional
 
 _CSS = """
@@ -76,8 +77,6 @@ footer { color: var(--muted); font-size: .82rem; }
 }
 .lead { margin: 0; font-size: 1.05rem; }
 .sum { text-align: right; }
-.rec { background: var(--surface); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 16px; }
-.rec p { margin: 4px 0 0; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 12px; }
 .card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; background: var(--surface);
   border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
@@ -125,15 +124,12 @@ details.nt summary { cursor: pointer; color: var(--muted); font-size: .85rem; pa
   background: rgba(10, 11, 18, .86); padding: 16px; cursor: zoom-out; }
 #lb.on { display: flex; }
 #lb img { max-width: min(96vw, 900px); max-height: 92vh; width: auto; height: auto; object-fit: contain; border-radius: 8px; background: #fff; }
-.chip.changed { color: var(--warn); border-color: var(--warn); }
 @media (max-width: 520px) { .row.pick { grid-template-columns: 22px 52px minmax(0, 1fr); }
   .row.pick .money { grid-column: 3; text-align: left; } }
 .chip.ok { color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .lh { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .lh.g { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
-.total.sm { font-size: 1.15rem; }
 section.list { gap: 10px; }
-.row.tail { background: var(--bg); }
 .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
 .intro { margin: 0; color: var(--muted); max-width: 65ch; }
 </style>
@@ -181,6 +177,16 @@ def inline_images(urls: list[str], fetch: Callable[[str], Optional[bytes]]) -> d
     todo = list(dict.fromkeys(u for u in urls if u))
     with ThreadPoolExecutor(max_workers=6) as ex:
         return {u: d for u, d in ex.map(one, todo) if d}
+
+
+def _chips(tags) -> str:
+    return "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>' for t in tags or [])
+
+
+def _need_link(url, text: str, title: str = "") -> str:
+    """The row's name as an outbound link (new tab); `title` = hover text."""
+    t = f' title="{_e(title)}"' if title else ""
+    return f'<a class="need" href="{_e(_url(url))}" target="_blank" rel="noopener"{t}>{_e(text)}</a>'
 
 
 def _img(src: Optional[str]) -> str:
@@ -263,8 +269,7 @@ def _cart_row(it: dict) -> str:
     if (it.get("pieces") or 1) > 1:
         extra = f'<small>{it["pieces"]} Stk · {eur(it["unit"])}/Stk</small>' + extra
     return (f'<div class="row">{_img(it.get("img"))}<div class="t">'
-            f'<a class="need" href="{_e(_url(it["url"]))}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
-            f'{_e(it["need"])}</a><div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>'
+            f'{_need_link(it["url"], it["need"], it["title"])}<div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>'
             f'<span>bis {_e(it["until"])}</span>{"".join(chips)}</div></div>'
             f'<div class="money"><b>{eur(it["cost"])}</b>{extra}</div></div>')
 
@@ -274,8 +279,7 @@ def _combo_section(c: dict) -> str:
     def row(it: dict) -> str:
         chips = '<span class="chip choice">angehakt</span>' if it["checked"] else '<span class="chip off">wartet</span>'
         return (f'<div class="row{"" if it["checked"] else " alt"}">{_img(it.get("img"))}<div class="t">'
-                f'<a class="need" href="{_e(_url(it["url"]))}" target="_blank" rel="noopener" title="{_e(it["title"])}">'
-                f'{_e(it["need"])}</a><div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>{chips}</div></div>'
+                f'{_need_link(it["url"], it["need"], it["title"])}<div class="meta"><span>{it["qty"]}× {_e(it["variant"])}</span>{chips}</div></div>'
                 f'<div class="money"><b>{eur(it["cost"])}</b></div></div>')
     rows = c["rows"]
     covered = c["pieces"] >= 3
@@ -353,7 +357,7 @@ def cart_page(page: dict, stamp: str) -> str:
     if others:
         rows = "".join(
             f'<div class="row">{_img(o.get("img"))}<div class="t">'
-            f'<a class="need" href="{_e(_url(o["url"]))}" target="_blank" rel="noopener">{_e(str(o.get("title") or "")[:70])}</a>'
+            f'{_need_link(o["url"], str(o.get("title") or "")[:70])}'
             f'<div class="meta"><span>{o["qty"]}×</span></div></div>'
             f'<div class="money"><b>{eur(o["cost"])}</b></div></div>' for o in others)
         out.append(f'<div class="lh g"><span><b>Ohne Liste</b> <span class="eyebrow">{_teile(len(others))} · '
@@ -467,11 +471,10 @@ def generic_page(title: str, subtitle: str, facts: list[dict], notes: list[dict]
         pickable = pickable or pick
         rows = []
         for ci, c in enumerate(cards):
-            chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>'
-                            for t in c.get("tags") or [])
+            chips = _chips(c.get("tags"))
             if pick:
                 chips = f'<span class="code">{chr(65 + si)}{ci + 1}</span>' + chips
-            name = (f'<a class="need" href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">{_e(c["title"])}</a>'
+            name = (_need_link(c["url"], c["title"])
                     if c.get("url") else f'<span class="need">{_e(c["title"])}</span>')
             kind = "why" if ci == 0 else "diff"
             text = f'<span class="{kind}">{_e(c["text"])}</span>' if c.get("text") else ""
@@ -502,6 +505,7 @@ _ICON_YES = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
 _ICON_NO = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
 _ICON_DEL = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.8 4.5l.6 8.2h5.2l.6-8.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 _ICON_MAYBE = '<span aria-hidden="true" style="font-weight:700">?</span>'
+_ICONS = {"yes": (_ICON_YES, "Ja"), "maybe": (_ICON_MAYBE, "Vielleicht"), "no": (_ICON_NO, "Nein"), "delete": (_ICON_DEL, "Löschen")}
 
 _DECIDE_CSS = """<style>
 /* decision page, concept B: one column, a big picture on the left, on the right title, price, the agent's opinion and three
@@ -513,7 +517,7 @@ _DECIDE_CSS = """<style>
 .cat-h { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 9px 2px 7px;
   background: var(--bg); border-bottom: 1px solid var(--line); }
 .cat-h h2 { flex: 1; min-width: 0; margin: 0; font: 600 .95rem var(--body); letter-spacing: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cat-h .sub { font: .78rem var(--body); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.cat-h .sub { font: .78rem var(--body); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cat-h button { font: inherit; font-size: .78rem; background: none; border: 0; padding: 4px 4px; color: var(--fg); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; cursor: pointer; }
 section[data-cat] .rows { display: block; background: none; border: 0; border-radius: 0; }
 .row.dec { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 4px 8px; align-items: start; padding: 8px 0;
@@ -532,11 +536,10 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .row.marked .thumb::after { pointer-events: none; content: "\\2713"; position: absolute; inset: 0; display: grid; place-items: center;
   background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; font-weight: 700; font-size: 2.2rem; }
 .tx { grid-column: 2; grid-row: 1 / 3; min-width: 0; cursor: pointer; display: grid; gap: 2px; align-content: start; }
-.tx .need { display: block; font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.tx .need { font: 600 .95rem/1.25 var(--body); color: var(--fg); text-decoration: none; overflow: hidden; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .tx .pills { display: flex; flex-wrap: wrap; gap: 0 8px; }
 .tx .pill { font: 600 .72rem/1.3 var(--body); color: var(--muted); }
-.tx .pill.eta, .tx .pill.slow { color: var(--warn); }
-.tx .pill.eta.same, .tx .pill.eta.fast, .tx .pill.info, .tx .pill.cart { color: var(--muted); }
+.tx .pill.eta { color: var(--warn); }
 .tx .bd, .tx .dv { font-size: .76rem; line-height: 1.35; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tx .bd { display: flex; flex-wrap: wrap; gap: 0 12px; }
 .tx .bd .eq { color: var(--fg); font-weight: 600; }
@@ -544,7 +547,6 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .pcs { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tx .pcs b { font-weight: 600; color: var(--fg); }
 .tx .pcs.short, .tx .pcs.short b { color: var(--warn, #b4540a); }
-.cat-h .sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thumb .ch { position: absolute; left: 4px; bottom: 4px; pointer-events: none; font: 600 .68rem/1.2 var(--body);
   padding: 2px 6px; border-radius: 5px; white-space: nowrap; background: #3b3f3a; color: #fff; }
 .thumb .ch.combo { background: #2f7d5b; }
@@ -582,7 +584,6 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .more { grid-column: 1 / -1; grid-row: 3; display: none; font-size: .82rem; color: var(--muted); gap: 6px; padding-top: 2px; }
 .row.open .more { display: grid; }
 .more .meta { display: flex; flex-wrap: wrap; gap: 4px; }
-.more .qrow { display: flex; align-items: center; gap: 8px; }
 .qty { width: 3.4rem; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
 .row.dec.is-no .thumb, .row.dec.is-no .tx { opacity: .55; }
 .row.dec.is-del .thumb, .row.dec.is-del .tx { opacity: .35; }
@@ -628,7 +629,7 @@ _DECIDE_JS = r"""<script>
   rows.forEach(function (r) {
     var s = saved[r.dataset.id];
     // a choice counts only for the page it was made on: a row whose default changed since then starts from the new default
-    if (s && s.d === r.dataset.def) { var el = r.querySelector('input[value="' + s.st + '"]'); if (el) el.checked = true; r.querySelector(".qty").value = s.q; if (s.n) r.querySelector(".note-in").value = s.n; }
+    if (s && s.d === r.dataset.def) { setSt(r, s.st); r.querySelector(".qty").value = s.q; if (s.n) r.querySelector(".note-in").value = s.n; }
   });
   function setSt(row, v) { var el = row.querySelector('input[value="' + v + '"]'); if (el) el.checked = true; }
   function exclusive(r) {   // the same part bought two ways: Ja on one way sets the other ways to Nein
@@ -664,23 +665,25 @@ _DECIDE_JS = r"""<script>
     var d = r.dataset; return parseFloat(d.g) * qty(r) + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
   }
   function line(r) {   // what the line costs at checkout, the same way for every row: goods + shipping + import - discount
-    var d = r.dataset, q = qty(r), g = parseFloat(d.g) * q, t = g + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
-    var el = r.querySelector(".lt"), pk0 = parseFloat(r.dataset.pk) * q; if (el) el.textContent = fp(t);
+    var d = r.dataset, q = qty(r), t = lineTotal(r);
+    var el = r.querySelector(".lt"), pk0 = parseFloat(d.pk) * q; if (el) el.textContent = fp(t);
     var pc = r.querySelector(".pcs"), sec = r.closest("section[data-cat]"), nd = sec ? parseInt(sec.dataset.need, 10) || 0 : 0;
     if (pc) { var got = Math.round(pk0); pc.className = "pcs" + (nd && got < nd ? " short" : ""); pc.textContent = "";
       var bb = document.createElement("b"); bb.textContent = got + "\u00a0Stück"; pc.appendChild(bb);
       if (nd) pc.appendChild(document.createTextNode(" für Bedarf " + nd)); }
     var b = r.querySelector(".bd"); if (!b) return;
-    var N = " ", gs = parseFloat(d.s), dt = parseFloat(d.d), rb = parseFloat(d.r), parts = [q + N + "×" + N + fp(parseFloat(d.g)).replace(" ", N) + N + "Ware"];
-    parts.push(gs > 0.004 ? "+" + N + fp(gs).replace(" ", N) + N + "Versand" : "Versand" + N + "frei");
-    if (dt > 0.004) parts.push("+" + N + fp(dt).replace(" ", N) + N + "Abgabe");
-    if (rb > 0.004) parts.push("−" + N + fp(rb).replace(" ", N) + N + "Rabatt");
+    var N = "\u00a0", fn = function (x) { return fp(x).replace("\u202f", N); };   // the receipt never breaks inside an amount
+    var gs = parseFloat(d.s), dt = parseFloat(d.d), rb = parseFloat(d.r), parts = [q + N + "×" + N + fn(parseFloat(d.g)) + N + "Ware"];
+    parts.push(gs > 0.004 ? "+" + N + fn(gs) + N + "Versand" : "Versand" + N + "frei");
+    if (dt > 0.004) parts.push("+" + N + fn(dt) + N + "Abgabe");
+    if (rb > 0.004) parts.push("−" + N + fn(rb) + N + "Rabatt");
     b.textContent = "";
     parts.forEach(function (x) { var e = document.createElement("span"); e.textContent = x; b.appendChild(e); });
-    var e = document.createElement("span"); e.className = "eq"; e.textContent = "=" + N + fp(t / Math.max(1, pk0)).replace(" ", N) + "/Stück"; b.appendChild(e);
+    var e = document.createElement("span"); e.className = "eq"; e.textContent = "=" + N + fn(t / Math.max(1, pk0)) + "/Stück"; b.appendChild(e);
   }
   function day(s) { return Date.parse(s + "T00:00:00Z") / 864e5; }
   function dm(s) { return s.slice(8, 10) + "." + s.slice(5, 7) + "."; }
+  function nd(x) { return x + (x === 1 ? " Tag" : " Tage"); }
   function eta() {   // when the last Ja part arrives, and what each dated row does to that date
     var yes = rows.filter(function (r) { return st(r) === "yes" && r.dataset.until; });
     var last = yes.reduce(function (m, r) { return !m || r.dataset.until > m ? r.dataset.until : m; }, "");
@@ -694,16 +697,16 @@ _DECIDE_JS = r"""<script>
       if (g && st(r) !== "yes") return;
       var others = yes.filter(function (o) { return o !== r && !(g && o.closest(".grp") === g); })
         .reduce(function (m, o) { return o.dataset.until > m ? o.dataset.until : m; }, "");
-      var on = st(r) === "yes", t = "", k = "eta", n = function (x) { return x + (x === 1 ? " Tag" : " Tage"); };
-      if (on) { var d = others ? Math.round(day(r.dataset.until) - day(others)) : 0; if (d > 0) t = "letztes Teil, +" + n(d); }
+      var on = st(r) === "yes", t = "";
+      if (on) { var d = others ? Math.round(day(r.dataset.until) - day(others)) : 0; if (d > 0) t = "letztes Teil, +" + nd(d); }
       else {   // picking this row instead: the last date then, against the last date now
         var then = others && others > r.dataset.until ? others : r.dataset.until, c = last ? Math.round(day(then) - day(last)) : 0;
-        if (c > 0) t = "würde Lieferung um " + n(c) + " verschieben";
+        if (c > 0) t = "würde Lieferung um " + nd(c) + " verschieben";
       }
       if (!t) return;
       var box = r.querySelector(".tx .pills");
       if (!box) { box = document.createElement("span"); box.className = "pills"; r.querySelector(".tx").insertBefore(box, r.querySelector(".tx .need")); }
-      var s = document.createElement("span"); s.className = "pill " + k; s.textContent = t; box.appendChild(s);
+      var s = document.createElement("span"); s.className = "pill eta"; s.textContent = t; box.appendChild(s);
     });
     [].forEach.call(document.querySelectorAll(".grp"), function (g) {   // would the other way move the whole delivery?
       var x = g.querySelector(".gx"); x.textContent = "";
@@ -713,7 +716,7 @@ _DECIDE_JS = r"""<script>
       var alt = ws.filter(function (r) { return r !== on[0] && r.dataset.until; }).map(function (r) { return r.dataset.until; }).sort().pop();
       if (!alt) return;
       var then = rest > alt ? rest : alt, c = Math.round(day(then) - day(last));
-      if (c) x.textContent = "Die andere Wahl " + (c > 0 ? "verschiebt" : "zieht") + " die ganze Lieferung " + (c > 0 ? "um " : "um ") + Math.abs(c) + (Math.abs(c) === 1 ? " Tag" : " Tage") + (c > 0 ? " nach hinten" : " vor") + ".";
+      if (c) x.textContent = "Die andere Wahl " + (c > 0 ? "verschiebt" : "zieht") + " die ganze Lieferung um " + nd(Math.abs(c)) + (c > 0 ? " nach hinten" : " vor") + ".";
     });
   }
   function msg() {
@@ -826,7 +829,7 @@ _DECIDE_JS = r"""<script>
     var k = t.closest && t.closest("button[data-bulk]");
     if (k) {
       marked().forEach(function (r) {
-        if (k.dataset.bulk !== "none") { var el = r.querySelector('input[value="' + k.dataset.bulk + '"]'); if (el) el.checked = true; }
+        if (k.dataset.bulk !== "none") setSt(r, k.dataset.bulk);
         r.classList.remove("marked");
       });
       showBulk(); calc(); return;
@@ -920,8 +923,8 @@ def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) 
         order = olds + [lead]
         done.update(order)
         new, old = line_total(cards[lead]), sum(line_total(cards[j]) for j in olds)
-        d_new = str(cards[lead].get("until") or "")[:10]
-        d_old = max((str(cards[j].get("until") or "")[:10] for j in olds), default="")
+        d_new = _until(cards[lead])
+        d_old = max((_until(cards[j]) for j in olds), default="")
         cmp = (f"{eur(old - new)} billiger" if old - new > 0.004 else f"{eur(new - old)} teurer" if new - old > 0.004 else "gleich teuer")
         if d_new and d_old and d_new != d_old:
             cmp += (", aber" if d_new > d_old else " und") + f" Lieferung {_dm(d_new)} statt {_dm(d_old)}"
@@ -929,6 +932,72 @@ def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) 
         head = f"{who}: {cmp}"
         out.append(f'<div class="grp"><div class="grp-h">{head}<span class="gs">nur einer auf Ja<span class="gx"></span></span></div>{"".join(rows[j] for j in order)}</div>')
     return out
+
+
+def _repl_ids(c: dict) -> list[str]:
+    """The cart ids an offer replaces (card field `replaces`: one id or a list)."""
+    rp = c.get("replaces")
+    return [str(x) for x in (rp if isinstance(rp, (list, tuple)) else [rp] if rp else [])]
+
+
+def _until(c: dict) -> str:
+    return str(c["until"])[:10] if c.get("until") else ""
+
+
+def _decide_row(c: dict, rid: str, need: int, state: str, repl: list[str], replaced: set[str]) -> str:
+    """One offer/cart line of a decide page: picture, title, live price, breakdown, opinion, Ja/Nein buttons."""
+    vd = []
+    if c.get("fit"):
+        vd.append(f'<b class="{"ok" if str(c["fit"]).startswith("✓") else "q"}">{_e(c["fit"])}</b>')
+    if c.get("rating"):
+        vd.append(_e(c["rating"]))
+    if c.get("verdict"):
+        vd.append(_e(c["verdict"]))
+    vd_html = f'<div class="vd">{" · ".join(vd)}</div>' if vd else ""
+    chips = _chips(c.get("tags"))
+    link = f'<a href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">Angebot öffnen</a>' if c.get("url") else ""
+    qty = int(c.get("qty") or 1)
+    meta_html = '<div class="meta">' + chips + "</div>" if chips else ""
+    text_html = "<div>" + _e(c["text"]) + "</div>" if c.get("text") else ""
+    more = f'<div class="more">{meta_html}{text_html}{link}</div>'
+    old_way = bool(c.get("cart_id")) and str(c["cart_id"]) in replaced   # a cart line an offer replaces
+    pill = f'<span class="pills"><span class="pill">{_e(c["badge"])}</span></span>' if c.get("badge") and not (repl or old_way) else ""
+    g1, s1, d1, r1 = line_parts(c)
+    pk = float(c.get("pieces") or 0) / qty if c.get("pieces") else 1.0
+    until = _until(c)
+    dv = [f'Lieferung bis <b>{_dm(until)}</b>' if until else "Lieferdatum unbekannt"]
+    if c.get("seller"):
+        dv.append(_e(c["seller"]))
+    if old_way:
+        dv.append("jetzt im Korb")
+    got = round(pk * qty)
+    pcs_html = (f'<div class="pcs{" short" if need and got < need else ""}"><b>{got}\u00a0Stück</b>'
+                + (f' für Bedarf {need}' if need else "") + '</div>')
+    dv_html = (pcs_html + f'<div class="bd">{_receipt(qty, g1, s1, d1, r1, line_total(c) / max(1.0, pk * qty))}</div>'
+               f'<div class="dv">{", ".join(dv)}</div>')
+    seg = "".join(
+        f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
+        f'<label class="{v[0]}" for="{rid}{v[0]}" title="{_ICONS[v][1]}" aria-label="{_ICONS[v][1]}">{_ICONS[v][0]}</label>'
+        for v in _ICONS)
+    cart = f' data-cart="{_e(c["cart_id"])}"' if c.get("cart_id") else ""
+    cart += f' data-replaces="{_e(",".join(repl))}"' if repl else ""
+    cart += ' data-combo="1"' if c.get("combo") else ""
+    until_attr = f' data-until="{_e(until)}"' if until else ""
+    # a page default that is itself a change (merged lines) starts from the cart's state
+    state0 = c.get("state0") if c.get("state0") in _ICONS else state
+    return (
+        f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
+        f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{float(c.get("price") or 0):.2f}" data-ship="{float(c.get("ship") or 0):.2f}" '
+        f'data-duty="{float(c.get("duty") or 0):.2f}" data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" '
+        f'data-state0="{state0}" data-def="{state}"{until_attr} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" '
+        f'data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
+        f'<div class="thumb">{_img(c["img"])}{_channel(c)}<button type="button" class="mk" aria-label="markieren"></button></div>'
+        f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_title_html(c["title"])}</span>'
+        f'<div class="pr"><span><span class="lt">{_m(line_total(c))}</span></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
+        f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
+        f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
+        f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
+        f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
 
 
 def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: list[dict],
@@ -954,7 +1023,6 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
     Ja on one way sets the others to Nein.
     Raises ValueError when a card has no picture or no item_id/sku_id.
     """
-    import json as _json
     missing = [c["title"] for sec in categories for c in sec["cards"] if not c.get("img")]
     if missing:
         raise ValueError("no picture for: " + "; ".join(missing))
@@ -967,83 +1035,20 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
         out.append(f'<details class="hints"><summary>{sym}Hinweise ({len(notes)})</summary>'
                    + "".join(f'<div class="note{" warn" if n.get("warn") else ""}"><p>{_e(n["text"])}</p></div>' for n in notes)
                    + "</details>")
-    icons = {"yes": (_ICON_YES, "Ja"), "maybe": (_ICON_MAYBE, "Vielleicht"), "no": (_ICON_NO, "Nein"), "delete": (_ICON_DEL, "Löschen")}
     for si, sec in enumerate(categories):
-        cart_mode = any(c.get("cart_id") for c in sec["cards"])
-        order = ("yes", "maybe", "no", "delete")
-        rows = []
-        repl_of = {}   # card index -> cart ids it replaces
-        for ci, c in enumerate(sec["cards"]):
-            rp = c.get("replaces")
-            rp = [str(x) for x in (rp if isinstance(rp, (list, tuple)) else [rp] if rp else [])]
-            if rp:
-                repl_of[ci] = rp
+        cards, need = sec["cards"], int(sec.get("need") or 0)
+        cart_mode = any(c.get("cart_id") for c in cards)
+        repl_of = {ci: r for ci, c in enumerate(cards) if (r := _repl_ids(c))}   # card index -> cart ids it replaces
         replaced = {x for v in repl_of.values() for x in v}
-        for ci, c in enumerate(sec["cards"]):
+        rows = []
+        for ci, c in enumerate(cards):
             state = c.get("default") if c.get("default") in ("yes", "maybe", "no") or (cart_mode and c.get("default") == "delete") else "no"
             if cart_mode and state == "maybe":
                 state = "no"
-            fit = c.get("fit")
-            vd = []
-            if fit:
-                vd.append(f'<b class="{"ok" if str(fit).startswith("✓") else "q"}">{_e(fit)}</b>')
-            if c.get("rating"):
-                vd.append(_e(c["rating"]))
-            if c.get("verdict"):
-                vd.append(_e(c["verdict"]))
-            vd_html = f'<div class="vd">{" · ".join(vd)}</div>' if vd else ""
-            chips = "".join(f'<span class="chip{" ok" if t.startswith("✓") else ""}">{_e(t)}</span>' for t in c.get("tags") or [])
-            link = (f'<a href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">Angebot öffnen</a>' if c.get("url") else "")
-            qty = int(c.get("qty") or 1)
-            meta_html = '<div class="meta">' + chips + "</div>" if chips else ""
-            text_html = "<div>" + _e(c["text"]) + "</div>" if c.get("text") else ""
-            more = (f'<div class="more">{meta_html}{text_html}'
-                    f'{link}</div>')
-            rid = f"r{si}_{ci}"
-            in_grp = ci in repl_of or (c.get("cart_id") and str(c["cart_id"]) in replaced)
-            pill = f'<span class="pills"><span class="pill">{_e(c["badge"])}</span></span>' if c.get("badge") and not in_grp else ""
-            g1, s1, d1, r1 = line_parts(c)
-            pk = float(c.get("pieces") or 0) / qty if c.get("pieces") else 1.0
-            dv = [f'Lieferung bis <b>{_dm(str(c["until"])[:10])}</b>' if c.get("until") else "Lieferdatum unbekannt"]
-            if c.get("seller"):
-                dv.append(_e(c["seller"]))
-            if c.get("cart_id") and str(c["cart_id"]) in replaced:
-                dv.append("jetzt im Korb")
-            need = int(sec.get("need") or 0)
-            got = round(pk * qty)
-            pcs_html = (f'<div class="pcs{" short" if need and got < need else ""}"><b>{got}\u00a0Stück</b>'
-                        + (f' für Bedarf {need}' if need else "") + '</div>')
-            dv_html = (pcs_html + f'<div class="bd">{_receipt(qty, g1, s1, d1, r1, line_total(c) / max(1.0, pk * qty))}</div>'
-                       f'<div class="dv">{", ".join(dv)}</div>')
-            seg = "".join(
-                f'<input type="radio" id="{rid}{v[0]}" name="{rid}" value="{v}"{" checked" if v == state else ""}>'
-                f'<label class="{v[0]}" for="{rid}{v[0]}" title="{icons[v][1]}" aria-label="{icons[v][1]}">{icons[v][0]}</label>'
-                for v in order)
-            price = float(c.get("price") or 0)
-            ship = float(c.get("ship") or 0)
-            duty = float(c.get("duty") or 0)
-            cart = f' data-cart="{_e(c["cart_id"])}"' if c.get("cart_id") else ""
-            repl = c.get("replaces")
-            repl = ",".join(str(x) for x in repl) if isinstance(repl, (list, tuple)) else str(repl or "")
-            cart += f' data-replaces="{_e(repl)}"' if repl else ""
-            cart += ' data-combo="1"' if c.get("combo") else ""
-            until = f' data-until="{_e(str(c["until"])[:10])}"' if c.get("until") else ""
-            # a page default that is itself a change (merged lines) starts from the cart's state
-            state0 = c.get("state0") if c.get("state0") in ("yes", "maybe", "no", "delete") else state
-            rows.append(
-                f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
-                f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{price:.2f}" data-ship="{ship:.2f}" data-duty="{duty:.2f}" '
-                f'data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" data-state0="{state0}" data-def="{state}"{until} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
-                f'<div class="thumb">{_img(c["img"])}{_channel(c)}<button type="button" class="mk" aria-label="markieren"></button></div>'
-                f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_title_html(c["title"])}</span>'
-                f'<div class="pr"><span><span class="lt">{_m(line_total(c))}</span></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
-                f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
-                f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
-                f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
-                f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
-        out.append(f'<section data-cat="{_e(sec["heading"])}" data-need="{int(sec.get("need") or 0)}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
+            rows.append(_decide_row(c, f"r{si}_{ci}", need, state, repl_of.get(ci, []), replaced))
+        out.append(f'<section data-cat="{_e(sec["heading"])}" data-need="{need}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
                    f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'
-                   f'<div class="rows">{"".join(_grouped(sec["cards"], rows, repl_of))}</div></section>')
+                   f'<div class="rows">{"".join(_grouped(cards, rows, repl_of))}</div></section>')
     out.append('<div class="dbar"><div class="in"><div class="bulk" id="sb-bulk" hidden><span id="sb-marked"></span>'
                f'<button type="button" class="y" data-bulk="yes" aria-label="Ja">{_ICON_YES}</button>'
                f'<button type="button" data-bulk="no" aria-label="Nein">{_ICON_NO}</button>'
@@ -1055,7 +1060,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                '<button type="button" id="sb-send" class="send">Senden</button>'
                '<button type="button" id="sb-cart" class="send cart" disabled>In den Korb</button></div>'
                '<p class="why" id="sb-note" hidden></p></div></div>')
-    js = (_DECIDE_JS.replace("__NAME__", _json.dumps(name).replace("</", "<\\/"))
+    js = (_DECIDE_JS.replace("__NAME__", json.dumps(name).replace("</", "<\\/"))
           .replace("__TH__", repr(float(choice_threshold))).replace("__CS__", repr(float(choice_ship))))
     out.append(js)
     return _page(title, _DECIDE_CSS + "\n" + "\n".join(out))

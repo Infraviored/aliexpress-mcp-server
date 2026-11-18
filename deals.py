@@ -153,7 +153,7 @@ def best_ways(
     `duty`: import charges per cart line (EU: flat per line, not per piece).
     """
     ways = []
-    groups = ladders(variants) or {}
+    groups = ladders(variants)
     # variants without a ladder are their own one-rung ladders
     for v in variants:
         if v.get("salable", True) and v.get("price") is not None:
@@ -400,9 +400,8 @@ def coupon_to_collect(d: Optional[dict], subtotal: float) -> Optional[dict]:
         return None
     have = max((c["off"] for c in d["coupons"]
                 if c["min"] <= subtotal and c["how"] in ("automatic", "collected")), default=0.0)
-    best = max((c for c in d["coupons"] if c["how"] == "collect" and c["min"] <= subtotal and c["off"] > have),
+    return max((c for c in d["coupons"] if c["how"] == "collect" and c["min"] <= subtotal and c["off"] > have),
                default=None, key=lambda c: c["off"])
-    return best
 
 
 def next_discount(d: Optional[dict], subtotal: float, currency: str, reach: float = 0.5) -> Optional[str]:
