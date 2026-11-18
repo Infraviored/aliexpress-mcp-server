@@ -570,7 +570,6 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .vd { font-size: .8rem; line-height: 1.3; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
 .tx .vd b { font-weight: 700; }
 .tx .vd .ok { color: var(--fg); } .tx .vd .q { color: var(--warn); }
-.row.open .tx .vd { display: block; }
 .ctl { grid-column: 1; grid-row: 2; }
 .note-in { width: 100%; box-sizing: border-box; margin-top: 3px; padding: 3px 6px; font: .78rem var(--body); border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
 .seg { display: grid; width: 112px; box-sizing: border-box; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; position: relative; background: var(--bg); }
@@ -581,9 +580,12 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .seg input:checked + label.m { background: var(--duty); color: #222421; }
 .seg input:checked + label.n { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line), 0 1px 2px rgba(0, 0, 0, .18); }
 .seg input:checked + label.d { background: var(--warn); color: var(--surface); }
-.more { grid-column: 1 / -1; grid-row: 3; display: none; font-size: .82rem; color: var(--muted); gap: 6px; padding-top: 2px; }
-.row.open .more { display: grid; }
-.more .meta { display: flex; flex-wrap: wrap; gap: 4px; }
+.tx .meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.tx .xt { font-size: .78rem; line-height: 1.3; color: var(--muted); }
+.ctl .go { display: grid; place-items: center; width: 112px; box-sizing: border-box; height: 28px; margin-top: 4px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg);
+  font: 600 .78rem var(--body); text-decoration: none; }
+.ctl .go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .qty { width: 3.4rem; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit; }
 .row.dec.is-no .thumb, .row.dec.is-no .tx { opacity: .55; }
 .row.dec.is-del .thumb, .row.dec.is-del .tx { opacity: .35; }
@@ -834,8 +836,6 @@ _DECIDE_JS = r"""<script>
       });
       showBulk(); calc(); return;
     }
-    var tx = t.closest && t.closest(".tx");
-    if (tx && !(t.closest && t.closest("a, input, button"))) tx.closest(".row").classList.toggle("open");
   });
   document.addEventListener("input", function () { send.textContent = cartB.hidden ? "Senden" : "Chat"; calc(); });
   document.addEventListener("change", function (e) {
@@ -955,11 +955,12 @@ def _decide_row(c: dict, rid: str, need: int, state: str, repl: list[str], repla
         vd.append(_e(c["verdict"]))
     vd_html = f'<div class="vd">{" · ".join(vd)}</div>' if vd else ""
     chips = _chips(c.get("tags"))
-    link = f'<a href="{_e(_url(c["url"]))}" target="_blank" rel="noopener">Angebot öffnen</a>' if c.get("url") else ""
+    href = _url(c.get("url")) or (f"https://www.aliexpress.com/item/{_e(c['item_id'])}.html" if c.get("item_id") else "")
+    link = f'<a class="go" href="{_e(href)}" target="_blank" rel="noopener">AliExpress</a>' if href else ""
     qty = int(c.get("qty") or 1)
     meta_html = '<div class="meta">' + chips + "</div>" if chips else ""
-    text_html = "<div>" + _e(c["text"]) + "</div>" if c.get("text") else ""
-    more = f'<div class="more">{meta_html}{text_html}{link}</div>'
+    text_html = '<div class="xt">' + _e(c["text"]) + "</div>" if c.get("text") else ""
+    extra = meta_html + text_html
     old_way = bool(c.get("cart_id")) and str(c["cart_id"]) in replaced   # a cart line an offer replaces
     pill = f'<span class="pills"><span class="pill">{_e(c["badge"])}</span></span>' if c.get("badge") and not (repl or old_way) else ""
     g1, s1, d1, r1 = line_parts(c)
@@ -995,9 +996,9 @@ def _decide_row(c: dict, rid: str, need: int, state: str, repl: list[str], repla
         f'<div class="tx">{pill}<span class="need" title="{_e(c["title"])}">{_title_html(c["title"])}</span>'
         f'<div class="pr"><span><span class="lt">{_m(line_total(c))}</span></span><span class="stp"><button type="button" class="dn" aria-label="weniger">\u2212</button>'
         f'<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="{qty}" aria-label="Menge">'
-        f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}'
+        f'<button type="button" class="up" aria-label="mehr">+</button></span></div>{dv_html}{vd_html}{extra}'
         f'<input class="note-in" type="text" placeholder="Anmerkung" maxlength="300"></div>'
-        f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div></div>{more}</div>')
+        f'<div class="ctl"><div class="seg" role="radiogroup" aria-label="{_e(c["title"])}">{seg}</div>{link}</div></div>')
 
 
 def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: list[dict],
