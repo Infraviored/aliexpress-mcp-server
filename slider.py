@@ -12,6 +12,7 @@ Needs: playwright (pip), google-chrome, Xvfb.
 
 import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -65,6 +66,50 @@ def _drag(page, distance: float, start_x: float, y: float) -> None:
     page.mouse.up()
 
 
+_POS: dict[int, tuple[float, float]] = {}   # last mouse position per page (Playwright does not report it)
+
+
+def human_path(x0: float, y0: float, x: float, y: float) -> list[tuple[float, float]]:
+    """Points of a hand-like mouse path: a slight curve, slow-fast-slow, a little tremor, and now and
+    then an overshoot past the target that is corrected back."""
+    dist = math.hypot(x - x0, y - y0) or 1.0
+    over = random.random() < 0.35 and dist > 60
+    tx, ty = ((x + (x - x0) / dist * random.uniform(4, 12) + random.uniform(-3, 3),
+               y + (y - y0) / dist * random.uniform(4, 12) + random.uniform(-3, 3)) if over else (x, y))
+    bend = random.uniform(-0.25, 0.25) * dist           # control point off the straight line
+    cx = (x0 + tx) / 2 - (ty - y0) / dist * bend
+    cy = (y0 + ty) / 2 + (tx - x0) / dist * bend
+    n = int(min(45, max(12, dist / 12)))
+    pts = []
+    for i in range(1, n + 1):
+        t = i / n
+        t = t * t * (3 - 2 * t)                          # ease in and out
+        px = (1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t * t * tx
+        py = (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t * t * ty
+        tremor = 0.8 if i < n else 0.0
+        pts.append((px + random.gauss(0, tremor), py + random.gauss(0, tremor)))
+    if over:                                             # back onto the target in a few small steps
+        k = random.randint(4, 8)
+        pts += [(tx + (x - tx) * j / k + random.gauss(0, 0.4), ty + (y - ty) * j / k + random.gauss(0, 0.4))
+                for j in range(1, k)] + [(x, y)]
+    return pts
+
+
+def human_move(page, x: float, y: float) -> None:
+    """Move the mouse to (x, y) the way a hand does, from where it last was."""
+    x0, y0 = _POS.get(id(page)) or (x - random.uniform(150, 300), y + random.uniform(-120, 120))
+    for px, py in human_path(x0, y0, x, y):
+        page.mouse.move(px, py)
+        time.sleep(random.uniform(0.006, 0.018))
+    _POS[id(page)] = (x, y)
+    time.sleep(random.uniform(0.08, 0.25))              # settle before the click
+
+
+def human_click(page, x: float, y: float) -> None:
+    human_move(page, x, y)
+    page.mouse.click(x, y, delay=random.uniform(40, 110))
+
+
 def _click_recaptcha(page, ctx) -> bool:
     """
     `action=captcharecaptcha`: a Google reCAPTCHA box instead of the slider.
@@ -85,11 +130,7 @@ def _click_recaptcha(page, ctx) -> bool:
     if not bb:
         return False
     x, y = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
-    page.mouse.move(x - random.uniform(80, 160), y + random.uniform(-40, 40))
-    time.sleep(random.uniform(0.3, 0.6))
-    page.mouse.move(x + random.uniform(-3, 3), y + random.uniform(-3, 3), steps=random.randint(12, 20))
-    time.sleep(random.uniform(0.1, 0.3))
-    page.mouse.click(x, y)
+    human_click(page, x + random.uniform(-3, 3), y + random.uniform(-3, 3))
     deadline = time.time() + 20
     while time.time() < deadline:
         if _has_pass(ctx):
