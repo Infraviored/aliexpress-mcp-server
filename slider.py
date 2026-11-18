@@ -24,6 +24,14 @@ import private
 
 logger = logging.getLogger("aliexpress-mcp")
 
+# The pass (x5sec) holds only for the browser identity that earned it: the Chrome that solves a check must show
+# the same User-Agent our plain requests send, or the very next call gets the check again (measured 2026-11-18:
+# "passed" four times in a row, each time followed at once by a new slider).
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
 KNOB = "#nc_1_n1z"
 TRACK = "#nc_1__scale_text"
 
@@ -43,8 +51,10 @@ def _start_xvfb() -> tuple[subprocess.Popen | None, str | None]:
     raise RuntimeError("No free X display for Xvfb")
 
 
-def _has_pass(ctx) -> bool:
-    return any(c["name"] == "x5sec" for c in ctx.cookies())
+def _has_pass(ctx, old: str | None = None) -> bool:
+    """A pass sets a NEW x5sec. The browser starts with our cookies, so an x5sec from an earlier pass is there from
+    the first moment and proves nothing: only a changed value counts."""
+    return any(c["name"] == "x5sec" and c["value"] != old for c in ctx.cookies())
 
 
 def _drag(page, distance: float, start_x: float, y: float) -> None:
@@ -110,7 +120,7 @@ def human_click(page, x: float, y: float) -> None:
     page.mouse.click(x, y, delay=random.uniform(40, 110))
 
 
-def _click_recaptcha(page, ctx) -> bool:
+def _click_recaptcha(page, ctx, old: str | None = None) -> bool:
     """
     `action=captcharecaptcha`: a Google reCAPTCHA box instead of the slider.
     Click the box like a hand would; that passes when Google trusts the
@@ -133,7 +143,7 @@ def _click_recaptcha(page, ctx) -> bool:
     human_click(page, x + random.uniform(-3, 3), y + random.uniform(-3, 3))
     deadline = time.time() + 20
     while time.time() < deadline:
-        if _has_pass(ctx):
+        if _has_pass(ctx, old):
             return True
         if anchor.locator("#recaptcha-anchor[aria-checked='true']").count():
             time.sleep(2.0)  # the page posts the token, then sets x5sec
@@ -143,7 +153,7 @@ def _click_recaptcha(page, ctx) -> bool:
             logger.info("reCAPTCHA asks for an image challenge; not attempted")
             return False
         time.sleep(0.4)
-    return _has_pass(ctx)
+    return _has_pass(ctx, old)
 
 
 def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> bool:
@@ -164,17 +174,18 @@ def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> boo
                 args=["--disable-blink-features=AutomationControlled", "--no-first-run"],
             )
             try:
-                ctx = browser.new_context(viewport={"width": 1280, "height": 860}, locale="en-US")
+                ctx = browser.new_context(viewport={"width": 1280, "height": 860}, locale="en-US", user_agent=USER_AGENT)
                 ctx.add_cookies([
                     {"name": k, "value": v, "domain": ".aliexpress.com", "path": "/"}
                     for k, v in cookies.items()
                 ])
+                old = cookies.get("x5sec")
                 page = ctx.new_page()
                 page.goto(punish_url, wait_until="networkidle", timeout=int(timeout_s * 1000))
 
                 passed = False
                 if "recaptcha" in punish_url:
-                    passed = _click_recaptcha(page, ctx)
+                    passed = _click_recaptcha(page, ctx, old)
                 for attempt in range(0 if "recaptcha" in punish_url else 3):
                     knob = page.locator(KNOB)
                     knob.wait_for(state="visible", timeout=15000)
@@ -187,7 +198,7 @@ def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> boo
 
                     deadline = time.time() + 8
                     while time.time() < deadline:
-                        if _has_pass(ctx):
+                        if _has_pass(ctx, old):
                             passed = True
                             break
                         # Failed attempt: nocaptcha shows a "click to refresh" link.
