@@ -127,7 +127,8 @@ def start(punish_url: str) -> int:
             browser = p.chromium.launch(channel="chrome", headless=False, env=env,
                                         args=["--disable-blink-features=AutomationControlled", "--no-first-run"])
             try:
-                ctx = browser.new_context(viewport={"width": 1280, "height": 860}, locale="en-US")
+                ctx = browser.new_context(viewport={"width": 1280, "height": 860}, locale="en-US",
+                                          user_agent=slider.USER_AGENT)
                 ctx.add_cookies([{"name": k, "value": v, "domain": ".aliexpress.com", "path": "/"}
                                  for k, v in cookies.items()])
                 page = ctx.new_page()
