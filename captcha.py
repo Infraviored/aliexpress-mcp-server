@@ -69,10 +69,15 @@ def _numbered(png: bytes, tiles: list[dict], clip: dict) -> bytes:
 
 def _challenge(page):
     """The image-challenge frame when it is showing, else None."""
-    el = page.locator("iframe[src*='recaptcha'][src*='bframe']")
-    if not el.count() or (el.first.bounding_box() or {}).get("height", 0) < 100:
-        return None
-    return next((f for f in page.frames if "recaptcha" in f.url and "bframe" in f.url), None)
+    # page.frames holds nested frames too: AliExpress sometimes wraps the reCAPTCHA in a frame of its own
+    for f in page.frames:
+        if "recaptcha" in f.url and "bframe" in f.url:
+            try:
+                if (f.frame_element().bounding_box() or {}).get("height", 0) >= 100:
+                    return f
+            except Exception:
+                continue
+    return None
 
 
 def _snapshot(page, frame) -> list[dict]:
@@ -136,7 +141,7 @@ def start(punish_url: str) -> int:
                 # A pass sets a NEW x5sec; the one from an earlier pass is in the cookies already.
                 old = cookies.get("x5sec")
                 passed = lambda: any(c["name"] == "x5sec" and c["value"] != old for c in ctx.cookies())
-                slider._click_recaptcha(page, ctx)
+                slider._click_recaptcha(page, ctx, old)
                 if passed():
                     return _finish(ctx, data, cookies)
                 while True:
@@ -145,7 +150,8 @@ def start(punish_url: str) -> int:
                         time.sleep(3)
                         if passed() or _demo_passed(page, punish_url):
                             return _finish(ctx, data, cookies)
-                        _state("failed", why="no image challenge on the page")
+                        page.screenshot(path=str(SHOT))    # what IS there: the agent reads it
+                        _state("failed", why=f"no image challenge on the page; screenshot in {SHOT}")
                         return 1
                     try:
                         tiles = _snapshot(page, frame)
