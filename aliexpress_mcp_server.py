@@ -3110,6 +3110,7 @@ def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") 
     except Exception as e:
         return f"Checkout preview failed: {e}"
 
+
 def _real_cost_parts(p: dict) -> dict[str, float]:
     return {"goods": p.get("subtotal") or 0.0, "discounts": -(p.get("discounts") or 0.0),
             "shipping": p.get("shipping") or 0.0, "import charges": p.get("duty") or 0.0,
@@ -3312,20 +3313,32 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
     return _job_result(job_id, "recheck", lambda progress: _recheck_run(list_name, rank_top, max_lines, skip, progress))
 
 
-def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
+def _listed_lines(list_name: str, purpose: str) -> tuple[list[dict], dict, str]:
+    """(cart lines on a shopping list [of `list_name`], line tags, message): the message is the answer when there is nothing to work on."""
     cookies = load_cookies()
     if not cookies:
-        return AUTH_EXPIRED_MSG
+        return [], {}, AUTH_EXPIRED_MSG
     try:
         c = _read_cart(cookies)
     except Exception as e:
-        return f"Cart MTOP call failed: {e}"
+        return [], {}, f"Cart MTOP call failed: {e}"
     tags = _line_store()
-    skip = max(0, skip)
     todo = [ln for ln in c["lines"] if (tags.get(ln["cart_id"]) or {}).get("list")      # only lines that belong to a list
             and (not list_name or tags[ln["cart_id"]]["list"] == list_name)]
     if not todo:
-        return "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + "; nothing to recheck."
+        return [], tags, "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + f"; nothing to {purpose}."
+    return todo, tags, ""
+
+
+def _sku_do(way: dict) -> str:
+    return ", ".join(f"sku {v['sku_id']}x{q}" for v, q in way["lines"])
+
+
+def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
+    todo, tags, msg = _listed_lines(list_name, "recheck")
+    if msg:
+        return msg
+    skip = max(0, skip)
     chunk = todo[skip: skip + max(1, max_lines)]
     swaps, same, failed, unsure = [], [], [], []
     for n_done, ln in enumerate(chunk):
@@ -3355,8 +3368,7 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
             swaps.append((gain, f"- {name} x{pieces} (cart_id {ln['cart_id']}): now {cur['net']:.2f} net -> {w['net']:.2f} net, "
                                 f"SAVES {gain:.2f} {CURRENCY}"
                                 + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
-                                + f"\n  {_way_text(w)}\n  do: item {h['item_id']} "
-                                + ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"])
+                                + f"\n  {_way_text(w)}\n  do: item {h['item_id']} " + _sku_do(w)
                                 + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}\n"
                                 + _swap_photos(ln, h, w["lines"][0][0]["sku_id"])))
         elif cur and not rows:
@@ -3416,26 +3428,18 @@ def _swap_photos(ln: dict, cand: dict, sku_id: str = "") -> str:
     pic = None
     if main and mine:
         pic = _compare_image(f"swap-{ln['cart_id']}", _report_image({"image": mine}), _report_image({"image": main}))
-    urls = ((f"candidate photo: {'https:' + main if main.startswith('//') else main}" if main else "")
-            + (f"; cart line photo: {'https:' + mine if mine.startswith('//') else mine}" if mine else ""))
+    def https(u: str) -> str:
+        return "https:" + u if u.startswith("//") else u
+    urls = (f"candidate photo: {https(main)}" if main else "") + (f"; cart line photo: {https(mine)}" if mine else "")
     if pic:
         return f"  Comparison picture, READ IT (cart line left, candidate right): {pic}" + (f"\n  ({urls})" if urls else "")
     return "  No comparison picture; " + (urls + f"; product page {url}" if urls else f"no photo found, open {url} and look before judging")
 
 
 def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progress) -> str:
-    cookies = load_cookies()
-    if not cookies:
-        return AUTH_EXPIRED_MSG
-    try:
-        c = _read_cart(cookies)
-    except Exception as e:
-        return f"Cart MTOP call failed: {e}"
-    tags = _line_store()
-    todo = [ln for ln in c["lines"] if (tags.get(ln["cart_id"]) or {}).get("list")
-            and (not list_name or tags[ln["cart_id"]]["list"] == list_name)]
-    if not todo:
-        return "No cart line belongs to a shopping list" + (f" '{list_name}'" if list_name else "") + "; nothing to compare."
+    todo, tags, msg = _listed_lines(list_name, "compare")
+    if msg:
+        return msg
     chunk = todo[max(0, skip): max(0, skip) + max(1, max_lines)]
     moves, none, unsure, failed = [], [], [], []
     for n_done, ln in enumerate(chunk):
@@ -3467,8 +3471,7 @@ def _kombi_run(list_name: str, rank_top: int, max_lines: int, skip: int, progres
         gain = cur["net"] - kombi_net
         entry = {"name": name, "cart_id": ln["cart_id"], "pieces": w["pieces"], "gain": gain, "kombi_net": kombi_net,
                  "now": cur["net"], "item_id": h["item_id"], "title": h["title"][:70], "way": w,
-                 "do": ", ".join(f"sku {v['sku_id']}x{q}" for v, q in w["lines"]),
-                 "photos": ""}
+                 "do": _sku_do(w), "photos": ""}
         if gain <= 0.004:
             none.append(f"- {name} ({ln['cart_id']}): Kombi is not cheaper ({kombi_net:.2f} vs {cur['net']:.2f} net)")
         elif not t.get("match"):
@@ -3569,13 +3572,10 @@ def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
     except Exception as e:
         return f"Kombi-Knaller cart not readable: {e}"
     have = {(ln["item_id"], ln["sku_id"]): ln for ln in cart if ln["valid"]}
-
-    def state(r: dict) -> str:
-        return _round_state(r, have)
     rounds = plan["rounds"]
     out = [f"Plan {plan_id} ({plan['list'] or 'no list'}): {len(rounds)} Kombi round(s)"]
     for i, r in enumerate(rounds, 1):
-        out.append(f"  Round {i}: " + ", ".join(f"{p['need']} x{p['pieces']}" for p in r["picks"]) + f" - {state(r)}")
+        out.append(f"  Round {i}: " + ", ".join(f"{p['need']} x{p['pieces']}" for p in r["picks"]) + f" - {_round_state(r, have)}")
     if not add:
         return "\n".join(out)
     with _STATE_LOCK:                       # decide and claim in one step: no second call starts the same round
@@ -3762,7 +3762,8 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
     text = cartlib.format_cart(c, show_unchecked=not checked_only, tags=tags)
     priced: dict[str, dict] = {}
     previews = []
-    for name, lines in cartlib.by_list(c, tags)[0].items() if checkout else []:
+    listed = cartlib.by_list(c, tags)[0]
+    for name, lines in listed.items() if checkout else []:
         ids = [ln["cart_id"] for ln in lines]
         try:
             priced[name] = _render_order(cookies, ids)
@@ -3770,10 +3771,9 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                             + checkoutlib.format_preview(priced[name], len(ids), cartlib.checkout_url(ids), DUTY_PER_LINE))
         except Exception as e:
             previews.append(f"## Checkout for list '{name}': preview failed ({e})")
-    n_lists = len(cartlib.by_list(c, tags)[0])
-    combined = next(iter(priced.values())) if n_lists == 1 and priced else None
-    all_ids = [ln["cart_id"] for lns in cartlib.by_list(c, tags)[0].values() for ln in lns]
-    if checkout and n_lists > 1 and all_ids:
+    combined = next(iter(priced.values())) if len(listed) == 1 and priced else None
+    all_ids = [ln["cart_id"] for lns in listed.values() for ln in lns]
+    if checkout and len(listed) > 1 and all_ids:
         try:
             combined = _render_order(cookies, all_ids)
         except Exception as e:
@@ -3791,10 +3791,10 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
                 + (f" — do: {d['do']}" if d.get("do") else "") for i, d in enumerate(real, 1)))
     except Exception as e:
         page = f"(page not written: {e})"
-    notes = _duplicate_notes([dict(ln, cart="main", tab="") for ln in c["lines"]]
-                             + [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in combo_lines or []], tags)
+    marked = _mark_carts(c["lines"], combo_lines or [])
+    notes = _duplicate_notes(marked, tags)
     warn = ["## Possible duplicates (check before ordering)\n" + "\n".join("- " + n for n in notes)] if notes else []
-    feat = _feature_notes([dict(ln, cart="main") for ln in c["lines"]] + [dict(ln, cart="Kombi") for ln in combo_lines or []], tags)
+    feat = _feature_notes(marked, tags)
     warn += ["## Required features (match / avoid words of the list tags)\n" + "\n".join("- " + n for n in feat)] if feat else []
     return "\n\n".join(["## For the user — say this in a few sentences\n" + _chat_cart(c, tags, priced, combined)] + warn + [
                          page, "## Details (for you)\n" + text, _combo_text(cookies, c, combo_lines)] + previews).replace("\n\n\n\n", "\n\n")
@@ -4028,13 +4028,16 @@ def _add_feature_check(item_id: str, sku_id: str, need: str, list_name: str, tag
             + ". Pick another variant (get_product_variants / get_variant_images), or force=True if it is right anyway.")
 
 
+def _mark_carts(main: list[dict], combo: list[dict]) -> list[dict]:
+    """Copies of the lines of both carts, marked with `cart` ("main"/"Kombi") and `tab`."""
+    return ([dict(ln, cart="main", tab="") for ln in main]
+            + [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in combo])
+
+
 def _cart_inventory(cookies: dict[str, str]) -> list[dict]:
     """Every line of the main and the Kombi-Knaller cart (copies), marked with `cart` ("main"/"Kombi") and `tab`. Raises when a cart cannot be read."""
-    c = _read_cart(cookies)
-    inv = [dict(ln, cart="main", tab="") for ln in c["lines"]]
-    # Always read it: an empty main cart sends no channel header, and a missed Kombi line is how duplicates slip in.
-    inv += [dict(ln, cart="Kombi", tab=cartlib.tab_name(ln.get("hs", ""))) for ln in _read_cart(cookies, COMBO)["lines"]]
-    return inv
+    # Always read the Kombi cart: an empty main cart sends no channel header, and a missed Kombi line is how duplicates slip in.
+    return _mark_carts(_read_cart(cookies)["lines"], _read_cart(cookies, COMBO)["lines"])
 
 
 def _inv_line_text(ln: dict, tags: dict) -> str:
@@ -4194,7 +4197,7 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
         return "quantity must be at least 1 (use remove_from_cart to delete a line)."
 
     try:
-        done, failed = _cart_action_any(cookies, {str(cart_id).strip(): _edit_qty(quantity)})
+        _, failed = _cart_action_any(cookies, {str(cart_id).strip(): _edit_qty(quantity)})
     except Exception as e:
         return f"Cart call failed: {e}"
     if failed:
