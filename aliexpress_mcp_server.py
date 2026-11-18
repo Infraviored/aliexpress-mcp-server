@@ -11,9 +11,11 @@ Auth: Session cookies from MCP Auth Bridge extension at
 
 import base64
 import datetime
+import fcntl
 import gzip
 import json
 import os
+import random
 import re
 import asyncio
 import reportserver
@@ -23,12 +25,11 @@ import threading
 import time
 import subprocess
 import sys
-import uuid
 import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -89,6 +90,10 @@ def _save_cookies(update: dict[str, str]) -> None:
         logger.warning("could not save refreshed cookies: %s", e)
 
 
+def _cookie_header(cookies: dict[str, str]) -> str:
+    return "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+
 def get_client(require_auth: bool = False, referer: str = BASE_URL) -> httpx.Client:
     """Create an HTTP client with session cookies and realistic browser headers."""
     cookies = load_cookies()
@@ -98,8 +103,6 @@ def get_client(require_auth: bool = False, referer: str = BASE_URL) -> httpx.Cli
             "No AliExpress session found. Open aliexpress.com in Chrome, "
             "log in, and click 'Save AliExpress' in the MCP Auth Bridge extension."
         )
-
-    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items()) if cookies else ""
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -113,8 +116,8 @@ def get_client(require_auth: bool = False, referer: str = BASE_URL) -> httpx.Cli
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
     }
-    if cookie_str:
-        headers["Cookie"] = cookie_str
+    if cookies:
+        headers["Cookie"] = _cookie_header(cookies)
 
     return httpx.Client(
         base_url=BASE_URL,
@@ -188,8 +191,8 @@ def mtop_call(
     """
     if cookies is None:
         cookies = load_cookies()
-    if captcha and (left := _bot_cooldown_left()) > 0:
-        raise RuntimeError(f"bot check active, paused for another {int(left)} s")
+    if captcha:
+        _raise_if_paused()
     _mtop_pace()
 
     token = _h5_token_prefix(cookies)
@@ -218,14 +221,13 @@ def mtop_call(
         "data": data_str,
     }
 
-    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": ACCEPT_LANGUAGE,
         "Referer": referer or f"{BASE_URL}/",
         "Origin": BASE_URL,
-        "Cookie": cookie_str,
+        "Cookie": _cookie_header(cookies),
     }
     url = f"{MTOP_BASE}/h5/{api}/{version}/"
 
@@ -240,8 +242,7 @@ def mtop_call(
         # we request originaljson. Strip the wrapper if present.
         text = resp.text.strip()
         if text.startswith("mtopjsonp") and text.endswith(")"):
-            inner = text.split("(", 1)[1][:-1]
-            text = inner
+            text = text.split("(", 1)[1][:-1]
 
         try:
             data = json.loads(text)
@@ -266,7 +267,8 @@ def mtop_call(
 
         # Bot check: solve the slider (or click the reCAPTCHA box) in real Chrome
         # on a virtual display, retry once.
-        punish_url = (data.get("data") or {}).get("url") if isinstance(data.get("data"), dict) else None
+        body_data = data.get("data")
+        punish_url = body_data.get("url") if isinstance(body_data, dict) else None
         if "FAIL_SYS_USER_VALIDATE" in ret_str:
             _bot_note(True, "slider" if punish_url and "action=captcha" in punish_url
                       else "deny (no slider, only waiting helps)" if punish_url and "action=deny" in punish_url
@@ -283,7 +285,7 @@ def mtop_call(
             if not solved:
                 _bot_note(True, "slider not passed automatically: card sent to Florian")
                 _ask_user_card()
-            if solved:
+            else:
                 _log_call("BOT-CHECK slider passed automatically")
                 _bot_note(False)
                 # Passing the check sets a new token: allow one token refresh, no second captcha.
@@ -317,7 +319,6 @@ CALL_LOG = CREDENTIALS_PATH.parent / "aliexpress-calls.log"
 
 def _log_call(kind: str) -> None:
     """One line per AliExpress request (time, process, thread, kind): what came before a bot check."""
-    import fcntl
     try:
         CALL_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with open(CALL_LOG, "a") as f:
@@ -337,8 +338,6 @@ def _log_call(kind: str) -> None:
 def _mtop_pace(kind: str = "mtop") -> None:
     """Keep a gap (plus jitter) between MTOP calls, across all server processes:
     bursts are what trigger the bot check. Background jobs let quick tool calls go first."""
-    import fcntl
-    import random
     t0 = time.time()
     _log_call(kind)
     _CALL.calls = getattr(_CALL, "calls", 0) + 1
@@ -403,6 +402,12 @@ def _ask_user_card() -> bool:
         return False
 
 
+def _raise_if_paused() -> None:
+    """Asking again during a bot-check block only deepens it."""
+    if (left := _bot_cooldown_left()) > 0:
+        raise RuntimeError(f"bot check active, paused for another {int(left)} s")
+
+
 def _bot_cooldown_left() -> float:
     """Seconds still to wait after the last bot check: asking again only deepens the block.
     The file is the truth (other processes write and clear it), so it is read every time."""
@@ -463,8 +468,6 @@ def _parse_search_cards(html: str) -> list[dict]:
       pdp_ext_f = {"order": "<orders>", ...}
     and the card text the rest: "+10 Tsd. verkauft | 4.9 | ... | Kostenloser Versand ab 10,00€".
     """
-    from urllib.parse import urlparse, parse_qs
-
     soup = BeautifulSoup(html, "html.parser")
     products: list[dict] = []
     seen: set[str] = set()
@@ -540,8 +543,6 @@ def _parse_search_json(html: str) -> list[dict]:
     Choice shows as the selling point `platformFreeShipping_atm` ("free
     shipping over 10,00€"); orders and ship-from sit in trace.pdpParams.pdp_cdi.
     """
-    from urllib.parse import unquote
-
     i = html.find('"itemList":{"content":[')
     if i < 0:
         return []
@@ -872,6 +873,7 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
     return "\n".join(out)
 
 
+_SORT_TYPES = {"orders": "total_tranpro_desc", "price_asc": "price_asc", "price_desc": "price_desc"}
 SEARCH_TTL = float(os.environ.get("ALIEXPRESS_SEARCH_TTL", "1800"))
 _SEARCH_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
 
@@ -884,15 +886,9 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
     """
     slug = quote_plus(query.strip()).replace("+", "-")
     url_path = f"/w/wholesale-{slug}.html"
-    sort_map = {
-        "best_match": None,
-        "orders": "total_tranpro_desc",
-        "price_asc": "price_asc",
-        "price_desc": "price_desc",
-    }
     params = {}
-    if sort_map.get(sort_by):
-        params["SortType"] = sort_map[sort_by]
+    if sort_type := _SORT_TYPES.get(sort_by):
+        params["SortType"] = sort_type
     if page > 1:
         params["page"] = page
     if choice_only:
@@ -902,8 +898,7 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
     hit = _SEARCH_CACHE.get(key)
     if hit and time.time() - hit[0] < SEARCH_TTL:
         return [dict(h) for h in hit[1]]
-    if (left := _bot_cooldown_left()) > 0:        # asking again during a block only deepens it
-        raise RuntimeError(f"bot check active, paused for another {int(left)} s")
+    _raise_if_paused()
     _mtop_pace("search")                                 # a search page is as much a request as an mtop call
     client = get_client()
     try:
