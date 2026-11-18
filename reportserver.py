@@ -113,27 +113,24 @@ def _handler(directory: Path, tok: str, applier: Applier | None = None):
         def __init__(self, *a, **k):
             super().__init__(*a, directory=str(directory), **k)
 
-        def _target(self) -> Path | None:
-            path = urlsplit(self.path).path             # also the absolute form "http://host/..."
-            first, _, rest = path.lstrip("/").partition("/")
-            if first != tok:
-                return None
-            if rest == ".ping":
-                return Path("/.ping")
-            return safe_file(directory, rest)
+        def _route(self) -> str | None:
+            """The path below /<token>/ (also from the absolute form "http://host/..."), None for a wrong token."""
+            first, _, rest = urlsplit(self.path).path.lstrip("/").partition("/")
+            return rest if first == tok else None
 
         def _serve(self, head: bool) -> None:
-            t = self._target()
-            if t is None:
-                self.send_error(404)
-                return
-            if t == Path("/.ping"):
+            rest = self._route()
+            if rest == ".ping":
                 body = b"ok"
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if not head:
                     self.wfile.write(body)
+                return
+            t = None if rest is None else safe_file(directory, rest)
+            if t is None:
+                self.send_error(404)
                 return
             self.path = "/" + t.relative_to(directory.resolve()).as_posix()
             (super().do_HEAD if head else super().do_GET)()
@@ -149,8 +146,8 @@ def _handler(directory: Path, tok: str, applier: Applier | None = None):
 
         def _apply_path(self) -> str | None:
             """'' for /<token>/apply, the job id for /<token>/apply/<job>, None for anything else."""
-            first, _, rest = urlsplit(self.path).path.lstrip("/").partition("/")
-            if first != tok or applier is None or not (rest == "apply" or rest.startswith("apply/")):
+            rest = self._route()
+            if rest is None or applier is None or not (rest == "apply" or rest.startswith("apply/")):
                 return None
             return rest[6:]
 

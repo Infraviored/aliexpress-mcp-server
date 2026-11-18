@@ -42,6 +42,10 @@ def _start_xvfb() -> tuple[subprocess.Popen | None, str | None]:
     raise RuntimeError("No free X display for Xvfb")
 
 
+def _has_pass(ctx) -> bool:
+    return any(c["name"] == "x5sec" for c in ctx.cookies())
+
+
 def _drag(page, distance: float, start_x: float, y: float) -> None:
     """Accelerate, then ease out, with small vertical jitter and pauses."""
     page.mouse.move(start_x - random.uniform(30, 60), y + random.uniform(-15, 15))
@@ -88,7 +92,7 @@ def _click_recaptcha(page, ctx) -> bool:
     page.mouse.click(x, y)
     deadline = time.time() + 20
     while time.time() < deadline:
-        if any(c["name"] == "x5sec" for c in ctx.cookies()):
+        if _has_pass(ctx):
             return True
         if anchor.locator("#recaptcha-anchor[aria-checked='true']").count():
             time.sleep(2.0)  # the page posts the token, then sets x5sec
@@ -98,7 +102,7 @@ def _click_recaptcha(page, ctx) -> bool:
             logger.info("reCAPTCHA asks for an image challenge; not attempted")
             return False
         time.sleep(0.4)
-    return any(c["name"] == "x5sec" for c in ctx.cookies())
+    return _has_pass(ctx)
 
 
 def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> bool:
@@ -142,7 +146,7 @@ def solve(punish_url: str, credentials_path: Path, timeout_s: float = 60) -> boo
 
                     deadline = time.time() + 8
                     while time.time() < deadline:
-                        if any(c["name"] == "x5sec" for c in ctx.cookies()):
+                        if _has_pass(ctx):
                             passed = True
                             break
                         # Failed attempt: nocaptcha shows a "click to refresh" link.
