@@ -4313,6 +4313,18 @@ def _report_image(card: dict) -> Optional[str]:
         return None
 
 
+def _attach_images(cards: list[dict]) -> None:
+    """Set every card's "img" (data: URI or None), fetching four at a time."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for c, img in zip(cards, ex.map(_report_image, cards)):
+            c["img"] = img
+
+
+def _report_file_stem(name: str, default: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or default
+
+
 def _info_page(name: str, title: str, sections: list[dict], subtitle: str = "",
                facts: list[dict] = None, notes: list[dict] = None) -> str:
     """
@@ -4339,10 +4351,7 @@ def _info_page(name: str, title: str, sections: list[dict], subtitle: str = "",
     cards = [c for sec in sections for c in sec.get("cards") or []]
     if not cards:
         return "No cards: give at least one section with cards."
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for c, img in zip(cards, ex.map(_report_image, cards)):
-            c["img"] = img
+    _attach_images(cards)
     for sec in sections:
         sec.setdefault("cards", [])
         sec.setdefault("heading", "")
@@ -4352,7 +4361,7 @@ def _info_page(name: str, title: str, sections: list[dict], subtitle: str = "",
     except ValueError as e:
         return (f"Report not written: {e}. Give each of those cards an item_id or an image "
                 "(URL, local file, data: URI)." + blocked_msg())
-    return _write_report(f"{re.sub(r'[^A-Za-z0-9_-]+', '-', name).strip('-') or 'report'}.html", page)
+    return _write_report(f"{_report_file_stem(name, 'report')}.html", page)
 
 
 @tool()
@@ -4402,11 +4411,8 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
     cards = [c for sec in categories for c in sec["cards"]]
     if not cards:
         return "No cards: give at least one category with cards."
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for c, img in zip(cards, ex.map(_report_image, cards)):
-            c["img"] = img
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "decide"
+    _attach_images(cards)
+    safe = _report_file_stem(name, "decide")
     try:
         page = report.decide_page(safe, title, subtitle, [], notes or [], categories,
                                   time.strftime("%d.%m.%Y %H:%M"), choice_threshold, choice_ship)
@@ -4432,13 +4438,18 @@ def _live_lines() -> Optional[dict[str, dict]]:
 MAIN_CART_CHECKS = 10
 
 
+def _ids_by_list(lines: list[tuple]) -> dict[str, list[str]]:
+    """cart_ids of cart-selection tuples by shopping list (page order; no list = "Hauptkorb")."""
+    by_list: dict[str, list[str]] = {}
+    for x in lines:
+        by_list.setdefault(x[6] or "Hauptkorb", []).append(x[0])
+    return by_list
+
+
 def _lists_that_fit(main_on: list[tuple], cap: int = MAIN_CART_CHECKS) -> tuple[list[str], dict[str, list[str]]]:
     """Whole lists (page order) whose Ja lines fit the stored checks together; the rest stay unchecked, by list."""
-    by_cat: dict[str, list[str]] = {}
-    for x in main_on:
-        by_cat.setdefault(x[6] or "Hauptkorb", []).append(x[0])
     on, rest = [], {}
-    for cat, ids in by_cat.items():
+    for cat, ids in _ids_by_list(main_on).items():
         if len(on) + len(ids) <= cap:
             on += ids
         else:
@@ -4494,17 +4505,13 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
         head.append(f"{t}: nicht lieferbar (AliExpress hat die Zeile gesperrt).")
     for t in gone:
         head.append(f"{t}: ist schon nicht mehr im Korb.")
-    if main_on:
-        by_cat: dict[str, list[str]] = {}
-        for x in main_on:
-            by_cat.setdefault(x[6] or "Hauptkorb", []).append(x[0])
-        for cat, ids in by_cat.items():
-            head.append(f"Kassen-Link {cat} ({len(ids)} Zeilen): {cartlib.checkout_url(ids)}")
+    by_list = _ids_by_list(main_on)
+    for cat, ids in by_list.items():
+        head.append(f"Kassen-Link {cat} ({len(ids)} Zeilen): {cartlib.checkout_url(ids)}")
     if rest:
         head.append(f"AliExpress speichert im Hauptkorb höchstens {MAIN_CART_CHECKS} Haken (ein elfter nimmt den ältesten weg; "
                     "„Alle auswählen“ am Desktop zeigt mehr, aber nur bis zum Neuladen). Angehakt: "
-                    + (", ".join(f"{c} ({len([x for x in main_on if (x[6] or 'Hauptkorb') == c])})" for c in
-                                 dict.fromkeys(x[6] or "Hauptkorb" for x in main_on) if c not in rest) or "keine Liste")
+                    + (", ".join(f"{c} ({len(ids)})" for c, ids in by_list.items() if c not in rest) or "keine Liste")
                     + ". Im Korb, ohne Haken: " + ", ".join(f"{c} ({len(ids)})" for c, ids in rest.items())
                     + ". Diese Listen über ihren Kassen-Link bestellen.")
     combo_on = [live[x[0]] for x in on_all if x[7] and live and x[0] in live]
@@ -4518,14 +4525,14 @@ def _apply_cart_selection(cart: list[tuple], dry_run: bool) -> str:
         out.append("Deleted: " + remove_from_cart(dele).split("\n")[0])
     for c, q in qty:
         out.append(f"Quantity {c} -> {q}: " + update_cart_quantity(c, q).split("\n")[0])
-    def report(text: str) -> str:   # every line that says what happened or failed, not only the first
+    def detail(text: str) -> str:   # every line that says what happened or failed, not only the first
         return "\n  ".join(l for l in text.split("\n")
                             if not l.startswith(("Checkout link", "Kombi-Knaller cart now", "Cart page now")))
     if off:
-        out.append("Unchecked: " + report(select_cart_items(off, only=False, selected=False)))
+        out.append("Unchecked: " + detail(select_cart_items(off, only=False, selected=False)))
     if on:
         res = select_cart_items(on, only=False, selected=True)
-        out.append("Checked: " + report(res))
+        out.append("Checked: " + detail(res))
         if "NOT checked" in res or "Failed" in res:
             head.append("Nicht alles ließ sich anhaken (siehe Einzelheiten unten); die Kassen-Links enthalten trotzdem alle Ja-Zeilen.")
     bad = any(h for h in head if "nicht lieferbar" in h or "ging nicht" in h or "Nicht alles" in h or "nicht lesbar" in h)
@@ -4672,7 +4679,7 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
         merges_of[heading] = []
         if check_deals and heading != "Kombi-Knaller-Korb":
             try:
-                merges_of[heading] = _merge_split_lines([(ln, tag) for ln, tag in lines], alt_cache)
+                merges_of[heading] = _merge_split_lines(lines, alt_cache)
             except Exception as e:
                 logger.debug("merging split lines failed: %s", e)
     todo = [(ln, tag) for heading, lines in groups.items() if check_deals and heading != "Kombi-Knaller-Korb"
@@ -4780,15 +4787,13 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
     if alt_cache:
         private.write_json(ALT_CACHE_FILE, alt_cache)
     cards = [x for cat in cats for x in cat["cards"]]
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for x, img in zip(cards, ex.map(_report_image, cards)):
-            x["img"] = img
+    _attach_images(cards)
     for x in cards:
         if not x["img"]:
             x["img"] = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="   # a blank pixel
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "warenkorb"
-    page = report.decide_page(safe, title, time.strftime("%d.%m.%Y %H:%M"), [], [], cats, time.strftime("%d.%m.%Y %H:%M"))
+    safe = _report_file_stem(name, "warenkorb")
+    stamp = time.strftime("%d.%m.%Y %H:%M")
+    page = report.decide_page(safe, title, stamp, [], [], cats, stamp)
     msg = _write_report(f"{safe}.html", page)
     todo = []
     for orig, alt, ln, why in pending:
