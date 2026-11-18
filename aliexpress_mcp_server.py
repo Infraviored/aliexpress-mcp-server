@@ -1348,14 +1348,12 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
             "choice_threshold": parse_price(b.get("logisticsComposeThreshold") or ""),
         }
 
-    promos = []
-    for v in (res.get("PRICE_EXTEND") or {}).get("priceExtendViews") or []:
-        if v.get("content"):
-            promos.append(v["content"])
+    promos = [v["content"] for v in (res.get("PRICE_EXTEND") or {}).get("priceExtendViews") or [] if v.get("content")]
     banner = (res.get("PRICE_BANNER") or {}).get("targetSkuBanner") or {}
     if banner.get("supplementaryText"):
         promos.append(re.sub(r"<[^>]+>", "", banner["supplementaryText"]))
-    if (res.get("COUPON_BLOCK_PC") or {}) and not (res.get("COUPON_BLOCK_PC") or {}).get("hideCouponBlock"):
+    coupon_block = res.get("COUPON_BLOCK_PC") or {}
+    if coupon_block and not coupon_block.get("hideCouponBlock"):
         promos.append("coupons available on the product page")
 
     shop = res.get("SHOP_CARD_PC") or {}
@@ -1397,7 +1395,7 @@ def _discounts(item_id: str, sku_id: str = "") -> Optional[dict]:
         return None
     d = deals.parse_discounts(resp)
     # The panel never marks public code coupons as collected; remember ours.
-    mine = _collected_coupons()
+    mine = _coupon_stamps()
     for c in d["coupons"]:
         if c["how"] == "collect" and c.get("campaign_id") in mine:
             c["how"] = "collected"
@@ -1425,10 +1423,6 @@ def _coupon_stamps() -> dict[str, float]:
         return {}
     cutoff = time.time() - COUPON_MEMORY_DAYS * 86400
     return {cid: ts for cid, ts in raw.items() if ts >= cutoff}
-
-
-def _collected_coupons() -> set[str]:
-    return set(_coupon_stamps())
 
 
 # A freight quote is two paced calls (qty 1 and 2). Prices of the same item come up again and again within one job
@@ -1473,10 +1467,9 @@ def _fmt_shipping(sh: dict) -> str:
         return "shipping: unknown"
     days = sh.get("days") or (None, None)
     when = f", {days[0]}–{days[1]} days" if days[0] else ""
-    if sh.get("choice_threshold"):
-        fee = "free" if sh.get("free") else f"{sh.get('fee')} {CURRENCY}"
-        return f"shipping to {sh.get('ship_to')}: Choice — {fee}, free once Choice items reach {sh['choice_threshold']:.2f} {CURRENCY}{when}"
     fee = "free" if sh.get("free") else f"{sh.get('fee')} {CURRENCY}"
+    if sh.get("choice_threshold"):
+        return f"shipping to {sh.get('ship_to')}: Choice — {fee}, free once Choice items reach {sh['choice_threshold']:.2f} {CURRENCY}{when}"
     return f"shipping to {sh.get('ship_to')}: {fee} ({sh.get('company')}){when}"
 
 
@@ -1850,10 +1843,11 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
             return False
         return len(kinds) <= 1 or not match or any(w in label for w in match)
 
-    vs = [v for v in ok if fits(v)]
     if spec.get("sku_id"):
         vs = [v for v in offer["variants"] if v["sku_id"] == str(spec["sku_id"])
               and v["salable"] and v["price"] is not None]
+    else:
+        vs = [v for v in ok if fits(v)]
     if not vs:
         return [], [f"{item_id}: no available variant matches '{spec.get('match', '')}'"]
     quote = _freight(offer, vs[0]["sku_id"])
@@ -1897,9 +1891,14 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
     return ways, notes
 
 
+def _pays_choice(p: dict) -> bool:
+    """A pick whose way is a Choice offer outside the Kombi order (counts towards the Choice threshold)."""
+    return bool(p["way"]["offer"]["choice"]) and not p["way"].get("combo_free")
+
+
 def _choice_basket(picks: list[dict], extra_choice: float = 0.0) -> tuple[float, float, float]:
     """(Choice goods of the picks, threshold, fee to pay) — `extra_choice` = other Choice goods in the same order."""
-    choice = [p for p in picks if p["way"]["offer"]["choice"] and not p["way"].get("combo_free")]
+    choice = [p for p in picks if _pays_choice(p)]
     goods = sum(p["way"]["goods"] for p in choice)
     threshold = max((p["way"]["offer"]["shipping"].get("choice_threshold") or 0 for p in choice), default=0)
     fee = 0.0
@@ -1983,9 +1982,9 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
     if choice_fee:
         # Below the threshold, Choice is not free: charge each Choice pick its
         # share of the fee and let a global offer win where it now is cheaper.
-        share = choice_fee / max(1, sum(1 for p in picks if p["way"]["offer"]["choice"] and not p["way"].get("combo_free")))
+        share = choice_fee / max(1, sum(1 for p in picks if _pays_choice(p)))
         for p in picks:
-            if not p["way"]["offer"]["choice"] or p["way"].get("combo_free"):
+            if not _pays_choice(p):
                 continue
             alt = next((w for w in p["options"] if not w["offer"]["choice"]), None)
             if alt and alt["score"] < p["way"]["score"] + share:
@@ -2089,12 +2088,11 @@ def _combo_order_text(plan: dict) -> str:
     text = (f"Kombi-Knaller order (combo cart, add_to_cart combo=True): {lines} line(s), {n} pcs, "
             f"{plan['combo_goods']:.2f} {CURRENCY} goods, no import charge (3+ pieces). It is ordered on its own checkout page, "
             "apart from the main cart (shipping and Choice threshold count there separately).")
+    rounds = plan.get("rounds") or []
     if COMBO_MAX_LINES and lines > COMBO_MAX_LINES:
-        rounds = len(plan.get("rounds") or []) or -(-lines // COMBO_MAX_LINES)
-        text += f" More than {COMBO_MAX_LINES} lines: order it in {rounds} rounds."
+        text += f" More than {COMBO_MAX_LINES} lines: order it in {len(rounds) or -(-lines // COMBO_MAX_LINES)} rounds."
     else:
         text += " If its checkout says 'Limit exceeded, remove N items', order it in several rounds (each with 3+ pieces)."
-    rounds = plan.get("rounds") or []
     if rounds:
         text += f"\nPlan {plan.get('id')}: {len(rounds)} round(s) of Kombi orders (each needs 3+ pieces; apply puts round 1 into the combo cart):"
         for i, r in enumerate(rounds, 1):
@@ -2345,10 +2343,6 @@ def _merge_split_lines(pairs: list[tuple[dict, dict]], cache: dict) -> list[dict
     return out
 
 
-def _date_in(days: Optional[int]) -> Optional[str]:
-    return time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400 * days)) if days else None
-
-
 def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternatives: bool) -> list[dict]:
     """
     What the user can decide about a list, each with its effect on price and
@@ -2372,7 +2366,7 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
         now = cartlib.goods(ln) + (ln["ship"] or 0) + DUTY_PER_LINE
         lo, hi = alt["cost"] - now, alt["cost"] + DUTY_PER_LINE - now
         rest = latest_of([x for x in lines if x is not ln])
-        new_latest = max(d for d in (rest, _date_in(alt["days"])) if d) if (rest or alt["days"]) else None
+        new_latest = max(d for d in (rest, _until(alt["days"])) if d) if (rest or alt["days"]) else None
         out.append({
             "kind": "choice", "cart_id": ln["cart_id"],
             "title": f"{t.get('need') or ln['title'][:40]} über Choice kaufen",
@@ -2395,7 +2389,7 @@ def _decisions(cart: dict, tags: dict[str, dict], lines: list[dict], alternative
         moved = {d["cart_id"] for d in switch}
         days = [d["alt_days"] for d in switch if d.get("alt_days")]
         rest = latest_of([x for x in lines if x["cart_id"] not in moved])
-        new_latest = max([x for x in [rest] + [_date_in(n) for n in days] if x], default=None)
+        new_latest = max([x for x in [rest] + [_until(n) for n in days] if x], default=None)
         out.insert(0, {
             "kind": "choice", "cart_id": None,
             "title": "Alle Teile von globalen Händlern über Choice kaufen",
