@@ -112,16 +112,18 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
   Never show an option that is dearer and no better than another one in the same
   list (same promise, higher price): leave it out. Show 2–4 alternatives that differ in
   something the user can care about (price per piece, delivery, brand, pack), and say what.
-- Pack sizes: `best_offer` reads "5PCS"/"Stück" from the variant name only. A name like
-  "5 Black" (5-spool bundle) counts as ONE piece unless you pass `packs="5 black=5; 1 black=1"`;
-  without it a request for 5 spools is priced as 5 bundles (25 spools). Check the product
+- Pack sizes: Pack size is resolved automatically from listing LOT / numberPerLot,
+  unitContentSkuMap, variant names ("5PCS", "10 Stück", "5 Paar"), and listing title.
+  Pass `packs="5 black=5; 1 black=1"` to override ambiguous variant names. Check the product
   page when `best_offer` warns that no pack size was found.
 - Need several pieces (8 sensors, 5 buttons)? `search_products(..., pieces=N, match="…")` prices the top hits
   for exactly N pieces (pack ladders, shipping, import, discounts) and ranks by net total. The plain
   search price is the cheapest single variant: a dearer-looking item with a "10PCS" variant is often cheaper.
 - Any saving counts, even 0.50 €. `search_products(cart_id=…)` ends with a verdict against that cart line;
   `recheck_cart(list_name=…)` goes through the lines of a list and names every swap that saves money.
-- Kombi-Knaller (Bundle Deals): search hits marked "Kombi" ship in a separate cart (`add_to_cart(combo=True)`,
+- Kombi-Knaller (Bundle Deals): The Kombi channel is always swept when searching for needs (across
+  default and orders sorts) and deduped against normal search hits. Pass `combo_only=True` to filter results
+  exclusively to Kombi hits. Search hits marked "Kombi" ship in a separate cart (`add_to_cart(combo=True)`,
   `view_cart` reads it). 3 or more such pieces in the combo order pay NO import charge, which is why they are
   often much cheaper: prefer them. `shop_list` does this itself: it prices Kombi hits without the charge when the
   plan reaches 3 combo pieces (and puts the charge back when it does not), reports a "Kombi-Knaller order" apart
