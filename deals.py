@@ -25,7 +25,8 @@ from typing import Callable, Optional
 
 from cart import money
 
-PACK_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:pcs|pc|pieces?|stück|stk|pack|lots?)\b|pack of\s*(\d{1,4})", re.I)
+PACK_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:pcs|pc|pieces?|stück|stücke|stk|pack|lots?|pairs?|paar|teile)\b"
+                     r"|pack of\s*(\d{1,4})", re.I)
 
 
 def pack_size(label: str) -> int:
@@ -34,6 +35,23 @@ def pack_size(label: str) -> int:
         return 1
     n = int(m.group(1) or m.group(2))
     return n if 0 < n <= 1000 else 1
+
+
+def title_pack(title: str) -> int:
+    """Pack size a title states for the whole listing ("10PCS TSAL6100 ..."), else 1.
+
+    A number inside a choice or range ("1/3/5 Pair", "1-10 Stück") says nothing about this listing,
+    and two different stated sizes cancel each other out.
+    """
+    sizes = set()
+    for m in PACK_RE.finditer(title or ""):
+        before = (title[:m.start()].rstrip() or " ")[-1]
+        if before in "-/~,":
+            continue
+        n = int(m.group(1) or m.group(2))
+        if 1 < n <= 1000:
+            sizes.add(n)
+    return sizes.pop() if len(sizes) == 1 else 1
 
 
 def base_name(label: str) -> str:
