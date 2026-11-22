@@ -15,6 +15,7 @@ import fcntl
 import gzip
 import json
 import os
+import math
 import random
 import re
 import asyncio
@@ -494,6 +495,10 @@ def _parse_search_cards(html: str) -> list[dict]:
         sold = next((t for t in parts if re.search(r"verkauft|sold", t, re.I)), None)
         shipping = next((t for t in parts if re.search(r"versand|shipping|delivery", t, re.I)), None)
         choice = bool(card.select_one("img[src*='S135d2af8d57840b28092ceba069bdb6c4']")) or "Choice" in parts
+        combo = (_is_combo(pid) or any(re.search(r"kombi|bundle", t, re.I) for t in parts)
+                 or bool(card.select_one("[class*='combo'], [class*='bundle'], [src*='combo'], [src*='bundle']")))
+        if combo:
+            _remember_combo(pid)
 
         seen.add(pid)
         products.append({
@@ -508,14 +513,61 @@ def _parse_search_cards(html: str) -> list[dict]:
             "sold_count": sold,
             "shipping": shipping,
             "choice": choice,
+            "combo": combo,
             "url": f"{BASE_URL}/item/{pid}.html",
         })
     return products
 
 
+_COMBO_FILE = Path(os.environ.get("ALIEXPRESS_COMBO_CACHE", str(CREDENTIALS_PATH.parent / "aliexpress-combo-cache.json")))
+_COMBO_WRITE_LOCK = threading.Lock()
+COMBO_DISK_TTL = float(os.environ.get("ALIEXPRESS_COMBO_DISK_TTL", "10800"))
+
+
+def _combo_disk_load() -> dict[str, float]:
+    try:
+        data = json.loads(_COMBO_FILE.read_text())
+        now = time.time()
+        return {k: v for k, v in data.items() if now - v < COMBO_DISK_TTL}
+    except (OSError, ValueError):
+        return {}
+
+
+def _combo_disk_store(item_id: str) -> None:
+    import tempfile
+    with _COMBO_WRITE_LOCK:
+        try:
+            data = _combo_disk_load()
+            data[str(item_id)] = time.time()
+            _COMBO_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=_COMBO_FILE.parent, prefix=_COMBO_FILE.name + ".", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, _COMBO_FILE)
+        except OSError:
+            pass
+
+
+def _is_combo(item_id: str) -> bool:
+    iid = str(item_id)
+    if iid in COMBO_ITEMS:
+        return True
+    disk = _combo_disk_load()
+    if iid in disk:
+        COMBO_ITEMS.add(iid)
+        return True
+    return False
+
+
+def _remember_combo(item_id: str) -> None:
+    iid = str(item_id)
+    COMBO_ITEMS.add(iid)
+    _combo_disk_store(iid)
+
+
 # Items seen as "Kombi-Knaller" in a search: the planner prices them without import
 # charge when 3+ pieces of such items go into the combo cart together.
-COMBO_ITEMS: set[str] = set()
+COMBO_ITEMS: set[str] = set(_combo_disk_load().keys())
 COMBO_MIN_PIECES = 3
 # Lines the combo checkout takes per order ("Limit exceeded, remove N items"); 0 = not measured.
 COMBO_MAX_LINES = int(os.environ.get("ALIEXPRESS_COMBO_MAX_LINES", "0"))
@@ -557,6 +609,7 @@ def _parse_search_json(html: str) -> list[dict]:
             orders = int(cdi.get("order")) if cdi.get("order") else None
         except (TypeError, ValueError):
             orders = None
+        combo = (it.get("rainbow") or {}).get("rainbowType") == "channelProduct" or "npieces" in sources or _is_combo(pid)
         out.append({
             "item_id": pid,
             "title": title[:200],
@@ -571,11 +624,11 @@ def _parse_search_json(html: str) -> list[dict]:
             "choice": any("platformFreeShipping" in x or "choice" in x.lower() for x in sources),
             "ship_from": cdi.get("shipFrom"),
             # "Kombi-Knaller" / Bundle Deals: 3+ such items in the combo cart, no import charge
-            "combo": (it.get("rainbow") or {}).get("rainbowType") == "channelProduct" or "npieces" in sources,
+            "combo": combo,
             "url": f"{BASE_URL}/item/{pid}.html",
         })
-        if out[-1]["combo"]:
-            COMBO_ITEMS.add(str(pid))
+        if combo:
+            _remember_combo(str(pid))
     return out
 
 
@@ -680,8 +733,9 @@ def search_products(
             (quantity x pack size); match/avoid default to the line's list tags.
         combo_only: Only "Kombi-Knaller" (Bundle Deals) hits: 3 or more such
             items in the combo cart (a separate channel cart, see view_cart)
-            are ordered without import charge. This IS the search inside the
-            Kombi-Knaller; every hit is flagged "Kombi" anyway.
+            are ordered without import charge. Filters the search results to
+            Kombi-Knaller offers. (When ranking for a need, Kombi offers are
+            swept automatically).
     """
     try:
         products = _search(query, sort_by, page, choice_only)
@@ -690,7 +744,7 @@ def search_products(
     except RuntimeError as e:
         return f"Search not done: {e}" + blocked_msg()
     if combo_only:
-        products = [p for p in products if p.get("combo")]
+        products = [p for p in products if p.get("combo") or _is_combo(p["item_id"])]
     if min_rating > 0:
         products = [p for p in products if p.get("rating") and p["rating"] >= min_rating]
     if max_price > 0:
@@ -711,7 +765,10 @@ def search_products(
             match, avoid = match or tag.get("match", ""), avoid or tag.get("avoid", "")
             # the line is compared like for like: its own quantity x pack, whatever `pieces` says
             pieces = line["qty"] * deals.pack_size(line["variant"])
-        return _rank_for_pieces(query, products, max(1, pieces), match, avoid, rank_top, choice_only, line)
+        cov = None
+        if not combo_only:
+            products, cov = _sweep_search_for_need(query, sort_by=sort_by, page=page, choice_only=choice_only, base_hits=products)
+        return _rank_for_pieces(query, products, max(1, pieces), match, avoid, rank_top, choice_only, line, cov)
 
     if not products:
         filters = []
@@ -747,7 +804,7 @@ def search_products(
             line += f" · {p['sold_count']}"
         if p.get("choice"):
             line += " · Choice"
-        if p.get("combo"):
+        if p.get("combo") or _is_combo(p["item_id"]):
             line += " · Kombi (3+ in the combo cart: no import charge)"
         if p.get("shipping"):
             line += f"\n  shipping: {p['shipping']}"
@@ -758,37 +815,51 @@ def search_products(
 
 
 def _price_hits(products: list[dict], pieces: int, match: str, avoid: str, rank_top: int,
-                choice_only: bool) -> tuple[list[tuple[dict, dict]], int, list[str]]:
+                choice_only: bool, cov: Optional[dict] = None) -> tuple[list[tuple[dict, dict]], int, list[str]]:
     """Top hits priced for `pieces`: ([(best way, hit)] cheapest net first, hits looked at, notes)."""
     avoid_w, match_w = _words(avoid), _words(match)
     hits = [h for h in products if not any(w in (h.get("title") or "").lower() for w in avoid_w)]
     named = [h for h in hits if all(w in (h.get("title") or "").lower() for w in match_w)]
     hits = named or hits
-    # Search order (its price is only a hint), Choice first: shared shipping, about a week to DE.
-    hits = sorted(hits, key=lambda h: not h.get("choice"))[: max(1, min(int(rank_top), 25))]
+    # Search order (its price is only a hint), Choice and Kombi first
+    hits = sorted(hits, key=lambda h: (not h.get("choice"), not (h.get("combo") or _is_combo(h["item_id"]))))[: max(1, min(int(rank_top), 25))]
     spec = {"pieces": pieces, "match": match, "avoid": avoid, "seller": "choice" if choice_only else "any"}
     rows, notes = [], []
     fresh = 0
+    skipped_items = []
     for h in hits:
         cached = h["item_id"] in _PDP_CACHE
         if not cached and not getattr(_CALL, "background", False) and FRESH_PAGES_QUICK > 0:
             if fresh >= FRESH_PAGES_QUICK:
                 notes.append(f"{h['item_id']}: not priced (call limit per request, to avoid the bot check; ask again for more)")
+                skipped_items.append((h["item_id"], "Aufruflimit"))
                 continue
             fresh += 1
+        if _bot_cooldown_left() > 0:
+            notes.append(f"{h['item_id']}: not priced (bot check active)")
+            skipped_items.append((h["item_id"], "Botsperre"))
+            continue
         try:
             ways, n = _ways_for(h["item_id"], spec, 0.0)
         except PermissionError:
             raise
         except Exception as e:
             logger.debug("ranking %s failed: %s", h["item_id"], e)
+            notes.append(f"{h['item_id']}: pricing failed ({e})")
+            skipped_items.append((h["item_id"], f"Fehler ({type(e).__name__})"))
             continue
         if not cached and not getattr(_CALL, "background", False):
             time.sleep(0.5)      # a background job already waits for the pacing gap before every call
         notes += n[:1] if not ways else []
         if ways:
             rows.append((ways[0], h))
+        else:
+            skipped_items.append((h["item_id"], "keine passende Variante"))
     rows.sort(key=lambda r: (r[0]["net"], -r[0]["pieces"]))
+    if cov is not None:
+        cov["priced"] = len(rows)
+        for _, reason in skipped_items:
+            cov["skipped"].append((reason, 1))
     return rows, len(hits), notes
 
 
@@ -815,21 +886,41 @@ def _way_text(w: dict) -> str:
 
 
 def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, avoid: str,
-                     rank_top: int, choice_only: bool, line: Optional[dict] = None) -> str:
+                     rank_top: int, choice_only: bool, line: Optional[dict] = None,
+                     cov: Optional[dict] = None) -> str:
     """The top search hits priced for `pieces` (best pack mix, shipping, import, discounts), cheapest net first.
     With `line` (a cart line) it ends with the verdict against that line."""
+    if cov is None:
+        cov = {
+            "kombi_searched": any(p.get("combo") or _is_combo(p["item_id"]) for p in products),
+            "kombi_hits": sum(1 for p in products if p.get("combo") or _is_combo(p["item_id"])),
+            "choice_hits": sum(1 for p in products if p.get("choice")),
+            "normal_hits": len(products),
+            "priced": 0,
+            "skipped": [],
+        }
     try:
-        rows, looked, notes = _price_hits(products, pieces, match, avoid, rank_top, choice_only)
+        rows, looked, notes = _price_hits(products, pieces, match, avoid, rank_top, choice_only, cov=cov)
     except PermissionError:
         return AUTH_EXPIRED_MSG
+    cov_line = _format_coverage(cov)
     if not rows:
-        return (f"No hit of '{query}' could be priced for {pieces} pieces." + blocked_msg()
+        return (f"No hit of '{query}' could be priced for {pieces} pieces ({cov_line})." + blocked_msg()
                 + ("".join(f"\n{n}" for n in notes[:5])))
-    out = [f"{len(rows)} of the top {looked} hits for '{query}' priced for {pieces} pieces "
-           f"(net incl. shipping, {CURRENCY} {DUTY_PER_LINE:.2f} import per line, discounts; ranked by what the order costs, at least {pieces} pcs):"]
+
+    is_partial = any(r in ("Aufruflimit", "Budget", "Botsperre") for r, _ in cov.get("skipped", []))
+    skipped_count = sum(c for _, c in cov.get("skipped", []))
+
+    if is_partial:
+        out = [f"Teilergebnis: {len(rows)} von {looked} Treffern für '{query}' durchgerechnet, {skipped_count} noch nicht geprüft "
+               f"(net incl. shipping, {CURRENCY} {DUTY_PER_LINE:.2f} import per line, discounts; {cov_line}):"]
+    else:
+        out = [f"{len(rows)} of the top {looked} hits for '{query}' priced for {pieces} pieces "
+               f"(net incl. shipping, {CURRENCY} {DUTY_PER_LINE:.2f} import per line, discounts; ranked by what the order costs, at least {pieces} pcs; {cov_line}):"]
+
     for i, (w, h) in enumerate(rows, 1):
         head = f"{i}. {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
-        if h.get("combo"):
+        if h.get("combo") or _is_combo(h["item_id"]):
             head += f" - KOMBI (with 3+ combo items {w['net'] - (w.get('duty') or 0):.2f} net, no import charge)"
         if h.get("orders") is not None:
             head += f" - {h['orders']} orders"
@@ -854,8 +945,12 @@ def _rank_for_pieces(query: str, products: list[dict], pieces: int, match: str, 
             out.append(f"CHEAPER THAN CART LINE {line['cart_id']} by {gain:.2f} {CURRENCY} net "
                        f"(line now {cur['net']:.2f}, #1 {w['net']:.2f}, item {h['item_id']}). Any saving is a reason to switch: "
                        "there is no trivial-saving threshold. Only a bait variant or the wrong article rules it out (get_variant_images).")
+        elif is_partial:
+            out.append(f"CART LINE {line['cart_id']} ist günstiger als die {len(rows)} bisher geprüften Treffer ({cur['net']:.2f} net) — "
+                       f"Wertung vorläufig, {skipped_count} Treffer noch ungeprüft.")
         else:
             out.append(f"CART LINE {line['cart_id']} is already the cheapest of the {len(rows)} priced ({cur['net']:.2f} net).")
+    out.append(f"Abdeckung: {cov_line}")
     return "\n".join(out)
 
 
@@ -905,6 +1000,169 @@ def _search(query: str, sort_by: str = "best_match", page: int = 1, choice_only:
         return [dict(h) for h in found]
     finally:
         client.close()
+
+
+def _budget_remaining() -> int:
+    """Estimated calls remaining in the 1-minute window without waiting."""
+    if _bot_cooldown_left() > 0:
+        return 0
+    try:
+        now = time.time()
+        times = [float(x) for x in json.loads(_PACE_FILE.read_text() or "[]")]
+        recent = [x for x in times if now - 60 < x <= now]
+        return max(0, MTOP_PER_MINUTE - len(recent))
+    except Exception:
+        return MTOP_PER_MINUTE
+
+
+def _format_coverage(cov: dict) -> str:
+    """
+    Format a coverage dict into a concise single line:
+    e.g. 'Kombi: gesucht, 0 Treffer · Choice: 3 · normal: 60, 10 durchgerechnet, 2 übersprungen (Botsperre)'
+    """
+    parts = []
+    k_hits = cov.get("kombi_hits", 0)
+    if k_hits == 0 and cov.get("kombi_searched"):
+        parts.append("Kombi: gesucht, 0 Treffer")
+    elif k_hits == 0 and not cov.get("kombi_searched"):
+        reason = cov.get("kombi_not_searched_reason") or cov.get("kombi_reason") or "Budget/Botsperre"
+        parts.append(f"Kombi: nicht gesucht ({reason})")
+    elif k_hits > 0:
+        parts.append(f"Kombi: {k_hits}")
+
+    ch_hits = cov.get("choice_hits", 0)
+    parts.append(f"Choice: {ch_hits}")
+
+    norm_hits = cov.get("normal_hits", 0)
+    priced = cov.get("priced", 0)
+    skipped = cov.get("skipped", [])
+
+    norm_str = f"normal: {norm_hits}"
+    if priced > 0 or skipped:
+        norm_str += f", {priced} durchgerechnet"
+    if skipped:
+        reasons_map: dict[str, int] = {}
+        total_skip = 0
+        for entry in skipped:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                a, b = entry
+                if isinstance(b, int):
+                    reason, count = str(a), b
+                elif isinstance(a, int):
+                    reason, count = str(b), a
+                else:
+                    reason, count = str(b), 1
+            else:
+                reason, count = str(entry), 1
+            reasons_map[reason] = reasons_map.get(reason, 0) + count
+            total_skip += count
+        reasons_str = ", ".join(f"{c} {r}" if c > 1 else r for r, c in reasons_map.items())
+        norm_str += f", {total_skip} übersprungen ({reasons_str})"
+    parts.append(norm_str)
+
+    return " · ".join(parts)
+
+
+def _sweep_search_for_need(query: str, sort_by: str = "best_match", page: int = 1,
+                           choice_only: bool = False, base_hits: Optional[list[dict]] = None) -> tuple[list[dict], dict]:
+    """
+    Search for a need: base search plus Kombi sweep across channels (at most 2 extra
+    pages: orders p1, best_match p2, if budget allows and not cooling down). Merges hits deduped by item_id.
+    """
+    cov = {
+        "searched_channels": ["normal", "Choice", "Kombi"],
+        "kombi_searched": False,
+        "kombi_hits": 0,
+        "choice_hits": 0,
+        "normal_hits": 0,
+        "priced": 0,
+        "skipped": [],
+    }
+    all_hits = []
+    seen_ids = set()
+
+    # 1. Base search
+    if base_hits is not None:
+        hits1 = base_hits
+    else:
+        try:
+            hits1 = _search(query, sort_by=sort_by, page=page, choice_only=choice_only)
+        except Exception as e:
+            logger.debug("Base search failed for %s: %s", query, e)
+            hits1 = []
+            cov["skipped"].append((f"Suchfehler ({type(e).__name__})", 1))
+
+    for h in hits1:
+        iid = str(h["item_id"])
+        if iid not in seen_ids:
+            seen_ids.add(iid)
+            if _is_combo(iid):
+                h["combo"] = True
+            all_hits.append(h)
+
+    # 2. Kombi sweeps: at most 2 extra pages: (orders, 1) and (best_match, 2)
+    kombi_targets = [
+        ("orders", 1),
+        ("best_match", 2),
+    ]
+
+    kombi_pages_fetched = 0
+    kombi_skip_reasons = []
+    uncached_swept = 0
+
+    for sb, pg in kombi_targets:
+        if sb == sort_by and pg == page and not choice_only and base_hits is not None:
+            continue
+        cache_key = (query.strip().lower(), sb, pg, False)
+        is_cached = cache_key in _SEARCH_CACHE and (time.time() - _SEARCH_CACHE[cache_key][0] < SEARCH_TTL)
+
+        if not is_cached:
+            if _bot_cooldown_left() > 0:
+                kombi_skip_reasons.append("Botsperre")
+                cov["skipped"].append(("Botsperre", 1))
+                break
+            if _budget_remaining() <= 0:
+                kombi_skip_reasons.append("Budget")
+                cov["skipped"].append(("Budget", 1))
+                continue
+            if uncached_swept >= 2:
+                break
+
+        try:
+            more_hits = _search(query, sort_by=sb, page=pg, choice_only=False)
+            if not is_cached:
+                uncached_swept += 1
+            kombi_pages_fetched += 1
+            for h in more_hits:
+                iid = str(h["item_id"])
+                if iid not in seen_ids:
+                    seen_ids.add(iid)
+                    if _is_combo(iid):
+                        h["combo"] = True
+                    all_hits.append(h)
+                else:
+                    if h.get("combo") or _is_combo(iid):
+                        for eh in all_hits:
+                            if str(eh["item_id"]) == iid:
+                                eh["combo"] = True
+                                break
+        except Exception as e:
+            logger.debug("Kombi sweep search (%s, p%s) failed: %s", sb, pg, e)
+            cov["skipped"].append((f"Suchfehler ({type(e).__name__})", 1))
+
+    if kombi_pages_fetched > 0:
+        cov["kombi_searched"] = True
+    else:
+        cov["kombi_searched"] = False
+        reasons_uniq = sorted(set(kombi_skip_reasons))
+        cov["kombi_not_searched_reason"] = "/".join(reasons_uniq) if reasons_uniq else "Budget/Botsperre"
+        cov["kombi_reason"] = cov["kombi_not_searched_reason"]
+
+    cov["kombi_hits"] = sum(1 for h in all_hits if h.get("combo") or _is_combo(h["item_id"]))
+    cov["choice_hits"] = sum(1 for h in all_hits if h.get("choice"))
+    cov["normal_hits"] = len(all_hits)
+
+    return all_hits, cov
 
 
 # Product pages repeat within one deal search (variants, pictures, best_offer).
@@ -1476,7 +1734,8 @@ def get_product_variants(item_id: str, match: str = "", limit: int = 10) -> str:
     List the variants (SKUs) of a product with price, price per piece,
     purchase limit and sku_id (cheapest per piece first), plus shipping to
     the configured country, Choice threshold, store and promotions.
-    Pack size is read from the variant name ("5PCS", "10 Stück"); the
+    Pack size is read from LOT / numberPerLot, unitContentSkuMap,
+    variant name ("5PCS", "10 Stück", "5 Paar"), and title; the
     "pack ladder" line compares pack sizes of the same variant — bigger packs
     are often nearly free, sometimes dearer per piece. Variant names can be
     identical while the article differs: look at get_variant_images (#n match).
@@ -1589,8 +1848,9 @@ def best_offer(item_id: str, pieces: int, match: str = "", choice_order_over_thr
             (e.g. "5V" or "N16R8 soldered").
         choice_order_over_threshold: For Choice items, whether the whole order's
             Choice part already passes the free-shipping threshold.
-        packs: Pieces per variant when its name does not say so ("5PCS" is read
-            automatically, "5 Black" is not). Format "words=pieces; words=pieces",
+        packs: Override pieces per variant when not stated on the listing
+            (pack size is resolved from LOT, unitContentSkuMap, variant name, and title;
+            e.g. "5PCS" is read automatically, "5 Black" is not). Format "words=pieces; words=pieces",
             e.g. "5 black=5; 1 black=1" for filament where "5 Black" is a bundle
             of 5 spools. Without it every such variant counts as ONE piece.
     """
@@ -1780,22 +2040,70 @@ def _candidate_ids(spec: dict) -> list[str]:
     if not spec.get("query"):
         return ids
     avoid, match = _words(spec.get("avoid", "")), _words(spec.get("match", ""))
-    hits = [h for h in _search(spec["query"], spec.get("sort_by", "best_match"), choice_only=_choice_only(spec))
-            if not any(w in (h.get("title") or "").lower() for w in avoid)]
+    hits, cov = _sweep_search_for_need(spec["query"], spec.get("sort_by", "best_match"), choice_only=_choice_only(spec))
+    spec["_cov"] = cov
+    hits = [h for h in hits if not any(w in (h.get("title") or "").lower() for w in avoid)]
     if _choice_only(spec):
         hits = [h for h in hits if h.get("choice")] or hits
-    # 60 hits per page: keep those naming the match words, cheapest first.
-    # The search price is only a hint (often a bait variant); the product
-    # page decides.
     named = [h for h in hits if all(w in (h.get("title") or "").lower() for w in match)]
-    hits = sorted(named or hits, key=lambda h: h.get("price") if h.get("price") is not None else 1e9)
-    # More than one piece: the cheapest single piece is no guide (a "10PCS" ladder in a
-    # dearer-looking item wins), so look at more items.
-    default = 10 if int(spec.get("pieces", 1) or 1) > 1 else 5
-    for h in hits[: int(spec.get("candidates", default))]:
-        if h["item_id"] not in ids:
-            ids.append(h["item_id"])
-    return ids
+    matching = named if match else hits
+    if not matching:
+        return ids
+
+    kombi_hits = [h for h in matching if h.get("combo") or _is_combo(h["item_id"])]
+    choice_hits = [h for h in matching if h.get("choice")]
+
+    def _rank_score(item_tuple):
+        pos, h = item_tuple
+        orders = int(h.get("orders") or 0)
+        if not orders and h.get("sold_count"):
+            m_sc = re.search(r"(\d+)", h["sold_count"].replace(".", "").replace(",", ""))
+            if m_sc:
+                orders = int(m_sc.group(1))
+                if "tsd" in h["sold_count"].lower() or "k" in h["sold_count"].lower():
+                    orders *= 1000
+        return pos - 3.0 * math.log2(orders + 1)
+
+    ranked_matching = [h for _, h in sorted(enumerate(matching), key=_rank_score)]
+    kombi_sorted = [h for _, h in sorted(enumerate(kombi_hits), key=_rank_score)]
+    choice_sorted = [h for _, h in sorted(enumerate(choice_hits), key=_rank_score)]
+
+    default = 15 if int(spec.get("pieces", 1) or 1) > 1 else 10
+    wanted = int(spec.get("candidates", default))
+    max_slots = max(0, 25 - len(ids))
+    cap = min(max_slots, max(wanted, len(kombi_hits) + len(choice_hits)))
+
+    selected = []
+    seen = set(ids)
+
+    # 1. Prefer Kombi hits (best ranked first)
+    for h in kombi_sorted:
+        if len(selected) >= cap:
+            break
+        iid = str(h["item_id"])
+        if iid not in seen:
+            selected.append(iid)
+            seen.add(iid)
+
+    # 2. Prefer Choice hits (best ranked first)
+    for h in choice_sorted:
+        if len(selected) >= cap:
+            break
+        iid = str(h["item_id"])
+        if iid not in seen:
+            selected.append(iid)
+            seen.add(iid)
+
+    # 3. Other matching hits
+    for h in ranked_matching:
+        if len(selected) >= cap:
+            break
+        iid = str(h["item_id"])
+        if iid not in seen:
+            selected.append(iid)
+            seen.add(iid)
+
+    return (ids + selected)[:25]
 
 
 def _combo_free(w: dict, on: bool) -> None:
@@ -1868,7 +2176,7 @@ def _ways_for(item_id: str, spec: dict, day_cost: float) -> tuple[list[dict], li
         w["days"] = dmax
         w["score"] = w["net"] + day_cost * (dmax if dmax is not None else UNKNOWN_DAYS)
         w.update(offer=offer, quote=quote, disc=disc)
-        if item_id in COMBO_ITEMS:
+        if _is_combo(item_id):
             w["combo"], w["duty_back"] = True, w.get("duty") or 0.0
             if w["pieces"] >= COMBO_MIN_PIECES:     # 3+ pieces of this item alone carry the combo order
                 _combo_free(w, True)
@@ -1922,15 +2230,26 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
             continue
         candidates.update(ids)
         options = []
+        cov = spec.get("_cov")
         for iid in ids:
-            ways, n = _ways_for(iid, spec, day_cost)
-            notes += [f"{need}: {x}" for x in n]
-            options += ways[:3]
+            try:
+                ways, n = _ways_for(iid, spec, day_cost)
+                notes += [f"{need}: {x}" for x in n]
+                options += ways[:3]
+                if cov:
+                    cov["priced"] = cov.get("priced", 0) + (1 if ways else 0)
+                    if not ways:
+                        cov.setdefault("skipped", []).append(("keine passende Variante", 1))
+            except Exception as e:
+                notes.append(f"{need}: {iid} failed: {e}")
+                if cov:
+                    cov.setdefault("skipped", []).append((f"Fehler ({type(e).__name__})", 1))
         options.sort(key=lambda w: w["score"])
         if not options:
-            notes.append(f"{need}: nothing usable found")
+            cov_str = f" ({_format_coverage(cov)})" if cov else ""
+            notes.append(f"{need}: nothing usable found{cov_str}")
             continue
-        picks.append({"need": need, "spec": spec, "options": options})
+        picks.append({"need": need, "spec": spec, "options": options, "cov": cov})
 
     def select() -> None:
         # The parcel is complete when its slowest part arrives: a faster offer is
@@ -2111,6 +2430,8 @@ def _fmt_plan(plan: dict) -> str:
         parts = _way_view(w)["buy"]
         ship = "free" if o["choice"] else f"{w['ship']:.2f}"
         out.append(f"{i}. {p['need']}: {parts} = {w['pieces']} pcs — {o['title'][:60]} ({o['item_id']})")
+        if p.get("cov"):
+            out.append(f"   coverage: {_format_coverage(p['cov'])}")
         if p.get("why"):
             out.append(f"   why: {p['why']}")
         out.append(f"   goods {w['goods']:.2f} + shipping {ship}"
@@ -2238,7 +2559,8 @@ def _line_deal(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
     cur = _current_way(ln, pieces)
     if cur is None:
         return None
-    rows, _, _ = _price_hits(_search(query), pieces, match, avoid, 8, False)
+    hits, cov = _sweep_search_for_need(query)
+    rows, _, _ = _price_hits(hits, pieces, match, avoid, 8, False, cov=cov)
     best = kombi = None
     for w, h in rows:
         if w["pieces"] < pieces or len(w["lines"]) != 1 or w["lines"][0][1] <= 0:
@@ -2256,12 +2578,13 @@ def _line_deal(ln: dict, tag: dict, cache: dict) -> Optional[dict]:
                     "choice": bool(w["offer"].get("choice")), "lines": [{"sku_id": v["sku_id"], "qty": q}]}
         if best is None or w["net"] < best["cost"]:
             best = cand(w["net"], False)
-        if h.get("combo"):
+        iid = str(h.get("item_id") or (w.get("offer") or {}).get("item_id") or "")
+        if h.get("combo") or (iid and _is_combo(iid)):
             kn = w["net"] - (0 if w.get("combo_free") else w.get("duty_back", 0.0))
             if kombi is None or kn < kombi["cost"]:
                 kombi = cand(kn, True)
                 kombi["net"] = round(w["net"], 2)
-    alt = {"now": cur["net"], "now_parts": _way_parts(cur), "best": best, "kombi": kombi}
+    alt = {"now": cur["net"], "now_parts": _way_parts(cur), "best": best, "kombi": kombi, "coverage": _format_coverage(cov)}
     cache[key] = {"at": time.time(), "alt": alt}
     return alt
 
@@ -2554,6 +2877,8 @@ def _chat_plan(plan: dict) -> str:
         if p["others"]:
             nxt = p["others"][0]
             line += f"; nächstbestes {report.eur(nxt['net'])} (+{report.eur(nxt['net'] - w['net'])})"
+        if p.get("cov"):
+            line += f" [{_format_coverage(p['cov'])}]"
         out.append(line)
     if plan.get("combo_picks"):
         out.append(f"Davon Kombi-Knaller: {plan['combo_lines']} Zeilen, {plan['combo_pieces']} Stück, eigene Bestellung im Kombi-Korb.")
@@ -3339,8 +3664,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
         query = t.get("query") or t.get("need") or ln["title"][:60]
         name = t.get("need") or ln["title"][:50]
         try:
-            products = _search(query)
-            rows, _, _ = _price_hits(products, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False)
+            hits, cov = _sweep_search_for_need(query)
+            rows, _, _ = _price_hits(hits, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False, cov=cov)
             cur = _current_way(ln, pieces)
         except PermissionError:
             return AUTH_EXPIRED_MSG
@@ -3348,11 +3673,13 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
             failed.append(f"{name} ({ln['cart_id']}): {e}")
             continue
         gain, best = _saving(rows, cur)
+        cov_s = _format_coverage(cov) if cov else ""
         if best and not t.get("match"):
             # Without match words nothing says the offer is the same article (a 120 W charging station is no 30 W PSU).
             w, h = best
             unsure.append(f"- {name} (cart_id {ln['cart_id']}): cheapest hit {h['title'][:70]} ({h['item_id']}) would be {gain:.2f} "
-                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked\n"
+                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked"
+                          + (f" [{cov_s}]" if cov_s else "") + "\n"
                           + _swap_photos(ln, h, w["lines"][0][0]["sku_id"]))
         elif best:
             w, h = best
@@ -3361,12 +3688,15 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
                                 + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
                                 + f"\n  {_way_text(w)}\n  do: item {h['item_id']} " + _sku_do(w)
                                 + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}\n"
+                                + (f"  Abdeckung: {cov_s}\n" if cov_s else "")
                                 + _swap_photos(ln, h, w["lines"][0][0]["sku_id"])))
         elif cur and not rows:
-            failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced (bot check or no hit with the match words)"
-                          f" - search by hand; the line itself costs {cur['net']:.2f} net")
+            failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced"
+                          + (f" ({cov_s})" if cov_s else " (bot check or no hit with the match words)")
+                          + f" - search by hand; the line itself costs {cur['net']:.2f} net")
         elif cur:
-            same.append(f"- {name} ({ln['cart_id']}): already cheapest of {len(rows)} priced ({cur['net']:.2f} net)")
+            same.append(f"- {name} ({ln['cart_id']}): already cheapest of {len(rows)} priced ({cur['net']:.2f} net)"
+                        + (f" [{cov_s}]" if cov_s else ""))
         else:
             failed.append(f"{name} ({ln['cart_id']}): line could not be priced")
     out = [f"Recheck of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, import, discounts):"]
@@ -4066,7 +4396,7 @@ def _already_in_cart(inv: list[dict], tags: dict, item_id: str, need: str) -> li
 
 @tool()
 def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "", need: str = "",
-                combo: bool = False, force: bool = False) -> str:
+                combo: bool = False, force: bool = False, match: str = "", avoid: str = "") -> str:
     """
     Add a product variant to the AliExpress cart and check it for checkout (the
     Kombi-Knaller cart ticks new lines itself).
@@ -4126,8 +4456,13 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
             # an add of a variant already there replaces its line under a new id: forget the old id
             old = [k for k, v in _line_store().items() if v.get("combo") and v.get("sku_id") == str(sku_id)
                    and v.get("item_id") == str(item_id) and k != cid]
-            _remember_lines({cid: {"list": list_name.strip(), "need": need, "item_id": str(item_id), "sku_id": str(sku_id),
-                                   "own": True, "combo": True}}, drop=old)
+            tag = {"list": list_name.strip(), "need": need, "item_id": str(item_id), "sku_id": str(sku_id),
+                   "own": True, "combo": True}
+            if match:
+                tag["match"] = match
+            if avoid:
+                tag["avoid"] = avoid
+            _remember_lines({cid: tag}, drop=old)
         try:
             line = next((ln for ln in _read_cart(cookies, COMBO)["lines"] if ln["cart_id"] == cid), None)
         except Exception as e:
@@ -4137,6 +4472,10 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
                 if line else f"Added item {item_id} to the Kombi-Knaller cart, cart_id {cid} (view_cart shows it).")
     if list_name:
         tag = {"list": list_name.strip(), "need": need}
+        if match:
+            tag["match"] = match
+        if avoid:
+            tag["avoid"] = avoid
         if cid not in _line_store():
             tag.update(item_id=str(item_id), sku_id=str(sku_id), own=True)
         _remember_lines({cid: tag})
@@ -4316,28 +4655,156 @@ def _attach_images(cards: list[dict]) -> None:
 
 
 def _attach_offer_facts(cards: list[dict]) -> int:
-    """Fill what the product page knows and the card left out: the latest delivery date ("until"), Choice, and the
-    shipping fee of a non-Choice line. Given values win. Returns how many cards with an item_id stay without a date."""
+    """Fill what the product page knows: delivery date ("until"), Choice, shipping fee,
+    pack, price, and Kombi status. Returns how many cards with an item_id stay without a date."""
     undated = 0
     for c in cards:
         if not c.get("item_id"):
             continue
-        if not c.get("until"):
-            with _REPORT_PDP_LOCK:   # same lock as the pictures: the page is usually cached by now
-                offer = _pdp_offer(str(c["item_id"]))
+        with _REPORT_PDP_LOCK:
+            offer = _pdp_offer(str(c["item_id"]))
+        if offer:
             sh = (offer or {}).get("shipping") or {}
             days = (sh.get("days") or (None, None))[1]
-            if days:
+            if days and not c.get("until"):
                 c["until"] = _until(days)
-            if offer and "choice" not in c:
+            if "choice" not in c:
                 c["choice"] = bool(offer.get("choice"))
-            if offer and "ship" not in c and not c.get("choice"):
+            if _is_combo(str(c["item_id"])):
+                c["combo"] = True
+            if "ship" not in c and not c.get("choice"):
                 try:
                     c["ship"] = 0.0 if sh.get("free") else float(sh.get("fee") or 0)
                 except (TypeError, ValueError):
                     pass
+            sku = str(c.get("sku_id") or "")
+            if sku and "variants" in offer:
+                v = next((var for var in offer["variants"] if str(var.get("sku_id")) == sku), None)
+                if v:
+                    if "pack" not in c:
+                        c["pack"] = v.get("pack") or 1
+                    if "price" not in c and v.get("price") is not None:
+                        c["price"] = v["price"]
+        else:
+            if not c.get("badge") and (c.get("price") is not None or c.get("pack") is not None):
+                c["badge"] = "Preis nicht geprüft"
         if not c.get("until"):
             undated += 1
+    return undated
+
+
+def _compute_decide_rows(categories: list[dict]) -> int:
+    """Compute cards from cached product pages (_pdp_offer): pack, price, shipping, Choice/Kombi, duty.
+    Model-typed values are fallbacks when the page cannot be read, and the row gets 'Preis nicht geprüft'."""
+    undated = 0
+    for sec in categories:
+        need = int(sec.get("need") or 0)
+        sec_cards = sec.get("cards") or []
+        for c in sec_cards:
+            c.setdefault("title", c.get("item_id") or "?")
+            iid = str(c.get("item_id") or "")
+            offer = None
+            if iid:
+                with _REPORT_PDP_LOCK:
+                    offer = _pdp_offer(iid)
+            if offer:
+                c["_pdp_read"] = True
+                sku = str(c.get("sku_id") or "")
+                v = next((var for var in (offer.get("variants") or []) if sku and str(var.get("sku_id")) == sku), None)
+                if not v and len(offer.get("variants") or []) == 1:
+                    v = offer["variants"][0]
+                if v:
+                    c["pack"] = v.get("pack") or 1
+                    if v.get("price") is not None:
+                        c["price"] = v["price"]
+                else:
+                    if not c.get("pack"):
+                        c["pack"] = 1
+                c["choice"] = bool(offer.get("choice"))
+                if _is_combo(iid) or c.get("combo"):
+                    c["combo"] = True
+                sh = offer.get("shipping") or {}
+                days = (sh.get("days") or (None, None))[1]
+                if days and not c.get("until"):
+                    c["until"] = _until(days)
+                if c.get("choice") or c.get("combo"):
+                    c["ship"] = 0.0
+                    c["duty"] = 0.0
+                else:
+                    try:
+                        c["ship"] = 0.0 if sh.get("free") else float(sh.get("fee") or 0.0)
+                    except (TypeError, ValueError):
+                        c["ship"] = 0.0
+                    c["duty"] = DUTY_PER_LINE
+            else:
+                # Page could not be read: model values are fallbacks, mark "Preis nicht geprüft"
+                c["_pdp_read"] = False
+                if not c.get("pack"):
+                    c["pack"] = 1
+                if not c.get("badge"):
+                    c["badge"] = "Preis nicht geprüft"
+                tags = c.setdefault("tags", [])
+                if "Preis nicht geprüft" not in tags:
+                    tags.append("Preis nicht geprüft")
+                if c.get("choice") or c.get("combo"):
+                    c["ship"] = 0.0
+                    c["duty"] = 0.0
+                else:
+                    c["ship"] = float(c.get("ship") or 0.0)
+                    c["duty"] = float(c.get("duty") or 0.0)
+
+            if not c.get("until"):
+                undated += 1
+
+            pack = int(c.get("pack") or 1)
+            if not c.get("qty"):
+                c["qty"] = max(1, -(-need // pack)) if need else 1
+            c["pieces"] = pack * int(c["qty"])
+
+            if "need" not in c and sec.get("heading"):
+                c["need"] = sec["heading"]
+            if "match" not in c and sec.get("match"):
+                c["match"] = sec["match"]
+            if "avoid" not in c and sec.get("avoid"):
+                c["avoid"] = sec["avoid"]
+
+        # Handle duty and shipping for same item multi-row ways:
+        # Group as one way only when meant to be bought together (same sku/variant different pack,
+        # or card marks it via 'way' or 'group_item'). Different variants stay alternatives.
+        ways_map: dict[tuple, list[dict]] = {}
+        for c in sec_cards:
+            iid = str(c.get("item_id") or "")
+            if not iid:
+                continue
+            if c.get("way"):
+                key = (iid, "way", str(c["way"]))
+            elif c.get("group_item"):
+                key = (iid, "group", str(c["group_item"]))
+            else:
+                sku = str(c.get("sku_id") or c.get("variant") or "")
+                key = (iid, "sku", sku) if sku else (iid, "id", id(c))
+            ways_map.setdefault(key, []).append(c)
+
+        for key, way_cards in ways_map.items():
+            if len(way_cards) > 1:
+                iid = key[0]
+                is_choice = any(c.get("choice") for c in way_cards)
+                is_combo_item = any(c.get("combo") for c in way_cards) or _is_combo(iid)
+                group_id = str(way_cards[0].get("group_item") or iid)
+                for c in way_cards:
+                    c["duty"] = 0.0
+                    c["item_duty"] = 0.0 if (is_choice or is_combo_item) else DUTY_PER_LINE
+                    c["group_item"] = group_id
+                    if is_choice:
+                        c["choice"] = True
+                    if is_combo_item:
+                        c["combo"] = True
+                if not is_choice and not is_combo_item:
+                    for c in way_cards[1:]:
+                        c["ship"] = 0.0
+
+        for c in sec_cards:
+            c.pop("_pdp_read", None)
     return undated
 
 
@@ -4387,7 +4854,8 @@ def _info_page(name: str, title: str, sections: list[dict], subtitle: str = "",
 @tool()
 def decide_report(name: str, title: str, categories: list[dict], subtitle: str = "",
                   notes: list[dict] = None,
-                  choice_threshold: float = 10.0, choice_ship: float = 1.99) -> str:
+                  choice_threshold: float = 10.0, choice_ship: float = 1.99,
+                  list_name: str = "") -> str:
     """
     THE page for every product search, comparison or parts list: per category (one need each, e.g.
     "Mikrocontroller") its offers as alternatives with Ja / Vielleicht / Nein, a quantity, a live total
@@ -4402,43 +4870,42 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
         name: File name without extension.
         title: Short page name. subtitle: unused on the page, kept for the file.
         notes: [{"text": "...", "warn": true}], shown collapsed. Use rarely.
+        list_name: Shopping list name to tag added items with when 'In den Korb' is pressed.
         categories: [{"heading": "Mikrocontroller", "need": 6 (pieces needed), "cards": [card, ...]}], card =
             {"title": "...", "item_id": "...", "sku_id": "..." (both needed: the choice is put in the cart by them),
-             "price": 20.39 (EUR per piece, number), "ship": 0 (EUR shipping for this line, 0 = free),
-             "choice": true (Choice offer: shipping is shared, free from the threshold), "duty": 0 (estimated import charge per line),
-             "pack": 10 (pieces per listing unit: a 10-pack is 10, a single chip 1; ALWAYS give it, the page
-                     shows pieces and price per piece from it; "price" is per listing unit, i.e. per pack),
+             "price": 20.39 (optional fallback: server computes real price from the product page),
+             "ship": 0 (optional fallback: server computes shipping from the product page),
+             "choice": true (optional fallback: server reads Choice status from the product page),
+             "duty": 0 (optional fallback: server computes import charge per order/line),
+             "combo": true (Kombi-Knaller offer: ordered in the combo cart, 3+ pieces pay no import charge; server sets data-combo),
+             "pack": 10 (optional fallback: server computes pack size from LOT / unitContentSkuMap / variant / title),
              "qty": listing units to buy (default: enough packs for the category's need),
              "default": "yes"|"maybe"|"no" (pre-selected, default no; one "yes" per category), "tags": [...], "text": "...",
              "verdict": "your opinion in one sentence: why this one, what to watch" (ALWAYS fill it: he decides on it),
              "rating": "4,8★ 208" (when it matters),
              "fit": "✓ Highland genannt" (for things that must fit something: whether the seller names it), "url": link,
              "cart_id": only for lines already in the cart (see decide_cart)}.
-            The latest delivery date of every card is read from its product page (item_id); so are "choice" and,
-            for a non-Choice line, "ship" when you leave them out. Give "until" (YYYY-MM-DD) only to override.
-            Keep "title" SHORT (what it is, a few words): the page shows one line per offer, the rest under "tags"/"text" on tap.
+            The server fills pack, price, shipping, Choice/Kombi flag and duty from the cached product page (_pdp_offer).
+            Model-typed price/pack/ship/duty become optional fallbacks only when the page cannot be read, and that row
+            then says "Preis nicht geprüft". Import charge and Choice free-shipping threshold are per order, not per row:
+            rows of the same item that are bought TOGETHER (e.g. 2× a 3-pack + 1× a 1-pack) must carry the same
+            "way": "<any key>" — they are then priced as one way, shipping once, duty once at group/order level,
+            never folded into one row. Rows of the same item without a shared "way" (other sku) stay alternatives.
         choice_threshold, choice_ship: free Choice shipping from this order value, else this fee once.
     """
     for sec in categories:
-        need = int(sec.get("need") or 0)
-        for c in sec.get("cards") or []:
-            c.setdefault("title", c.get("item_id") or "?")
-            pack = int(c.get("pack") or 0)
-            if pack > 0:
-                if not c.get("qty"):
-                    c["qty"] = max(1, -(-need // pack)) if need else 1
-                c["pieces"] = pack * int(c["qty"])
         sec.setdefault("cards", [])
         sec.setdefault("heading", "")
     cards = [c for sec in categories for c in sec["cards"]]
     if not cards:
         return "No cards: give at least one category with cards."
     _attach_images(cards)
-    undated = _attach_offer_facts(cards)
+    undated = _compute_decide_rows(categories)
     safe = _report_file_stem(name, "decide")
     try:
         page = report.decide_page(safe, title, subtitle, [], notes or [], categories,
-                                  time.strftime("%d.%m.%Y %H:%M"), choice_threshold, choice_ship)
+                                  time.strftime("%d.%m.%Y %H:%M"), choice_threshold, choice_ship,
+                                  list_name=list_name or name)
     except ValueError as e:
         return f"Page not written: {e}. Fix those cards, then call decide_report again." + blocked_msg()
     out = _write_report(f"{safe}.html", page)
@@ -4595,6 +5062,7 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         data = _parse_selection(selection)
     except (ValueError, json.JSONDecodeError) as e:
         return f"Cannot read the selection: {e}. Pass the page's whole message, including its json block."
+    list_name = list_name or data.get("list_name") or data.get("report") or ""
     yes, rest, cart = [], [], []
     for it in data["items"]:
         try:
@@ -4612,20 +5080,28 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
             cart.append((cid, it["state"], qty, qty0, item_id, sku_id, str(it.get("category") or ""),
                          bool(it.get("combo")), str(it.get("title") or f"{item_id}/{sku_id}")[:60]))
         else:
+            need = str(it.get("need") or it.get("category") or "")
+            match = str(it.get("match") or "")
+            avoid = str(it.get("avoid") or "")
             (yes if it.get("state") == "yes" else rest).append(
-                (item_id, sku_id, qty, str(it.get("category") or ""), repl, bool(it.get("combo"))))
+                (item_id, sku_id, qty, need, repl, bool(it.get("combo")), match, avoid))
     if not yes and not cart:
         return "Nothing chosen with Ja: nothing added."
     out = [_apply_cart_selection(cart, dry_run)] if cart else []
-    for item_id, sku_id, qty, cat, repl, combo in yes:
+    for item_id, sku_id, qty, cat, repl, combo, match, avoid in yes:
         if dry_run:
             out.append(f"WOULD ADD {qty} x {item_id} / {sku_id} ({cat})" + (f", then REMOVE cart line(s) {', '.join(repl)}" if repl else ""))
             continue
-        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo, force=bool(repl))   # a replacement: the old line goes after
+        kw = {}
+        if match:
+            kw["match"] = match
+        if avoid:
+            kw["avoid"] = avoid
+        res = add_to_cart(item_id, sku_id, qty, list_name=list_name, need=cat, combo=combo, force=bool(repl), **kw)   # a replacement: the old line goes after
         out.append(f"{item_id} / {sku_id} x{qty}: " + res)
         if repl:   # the offer replaces a line (a cheaper way to buy the same): drop the old line only when the new one is in
             out.append(f"Replaced line(s) {', '.join(repl)}: " + (remove_from_cart(repl) if res.startswith("Added") else "NOT removed, the add failed"))
-    left = [f"{i}/{s}" for i, s, _, _, _, _ in rest]
+    left = [f"{x[0]}/{x[1]}" for x in rest]
     return "\n".join(out + ([f"Not added (Vielleicht or Nein): {', '.join(left)}"] if left else []))
 
 
@@ -4719,7 +5195,8 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
             return AUTH_EXPIRED_MSG
         except Exception as e:
             logger.debug("deal for %s failed: %s", ln["cart_id"], e)
-            d = None
+            found.append(f"- {ln['cart_id']} ({tag.get('need') or ln['title'][:30]}): Prüfung fehlgeschlagen ({type(e).__name__})")
+            d = {"now": cartlib.goods(ln), "best": None, "kombi": None, "error": f"{type(e).__name__}: {e}"}
         if d:
             deal_of[ln["cart_id"]] = {**d, "floor": 0.4 * cartlib.goods(ln)}   # under 40 % of the goods: bait, never a winner
     pcs_of = lambda ln: max(1, ln["qty"] * deals.pack_size(ln.get("variant")))
@@ -4810,7 +5287,11 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
             merge_notes.append(f"- {need}: {old} -> {win['buy']} in ONE line ({mg['total']} pieces needed), "
                                f"{report.eur(mg['split'])} -> {report.eur(win['cost'])}, saves {report.eur(mg['saving'])}"
                                + (f"; kept cart line {mg['keep']['cart_id']} (quantity change)" if mg["keep"] else "; new offer replaces the old lines"))
-        cats.append({"heading": heading, "cards": cards})
+        cat = {"heading": heading, "cards": cards}
+        cov_s = next((d["coverage"] for ln, _ in lines if (d := deal_of.get(ln["cart_id"])) and d.get("coverage")), None)
+        if cov_s:
+            cat["coverage"] = cov_s
+        cats.append(cat)
     if alt_cache:
         private.write_json(ALT_CACHE_FILE, alt_cache)
     cards = [x for cat in cats for x in cat["cards"]]

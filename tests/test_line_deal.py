@@ -90,7 +90,7 @@ def test_line_deal_prices_best_and_kombi_and_skips_the_line_itself(monkeypatch):
             (_way("7", "8", 47.0, duty_back=3.0), {"combo": True}),
             (_way("9", "10", 20.0, pieces=2), {"combo": False})]            # too few pieces
     monkeypatch.setattr(m, "_current_way", lambda ln, pieces: {"net": 50.0, "pieces": pieces})
-    monkeypatch.setattr(m, "_search", lambda q: [])
+    monkeypatch.setattr(m, "_search", lambda *a, **k: [])
     monkeypatch.setattr(m, "_price_hits", lambda *a, **k: (rows, 4, []))
     cache = {}
     d = m._line_deal(dict(LINE), {"match": "x"}, cache)

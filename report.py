@@ -556,6 +556,8 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 .tx .pr > span:first-child { display: block; }
 .tx .pr .lt { white-space: nowrap; }
 .grp { border: 1px solid var(--line); border-radius: 12px; margin: 8px 0; padding: 0 12px; }
+.grp.way-grp { border-color: var(--accent); }
+.cat-cov { font-size: .75rem; color: var(--muted); margin: 2px 0 6px; }
 .grp + .row.dec, .row.dec + .grp { border-top: 0; }
 .grp-h { padding: 8px 0 4px; font: 600 .8rem/1.35 var(--body); color: var(--fg); }
 .grp-h .gs { display: block; font-weight: 400; font-size: .76rem; color: var(--muted); }
@@ -620,7 +622,7 @@ section[data-cat] .rows { display: block; background: none; border: 0; border-ra
 
 _DECIDE_JS = r"""<script>
 (function () {
-  var NAME = __NAME__, TH = __TH__, CS = __CS__;
+  var NAME = __NAME__, LIST_NAME = __LIST_NAME__, TH = __TH__, CS = __CS__;
   var T = document.title, key = "decide:" + NAME, saved = {};
   try { saved = JSON.parse(localStorage.getItem(key) || "{}"); } catch (e) {}
   var rows = [].slice.call(document.querySelectorAll(".row.dec"));
@@ -642,11 +644,18 @@ _DECIDE_JS = r"""<script>
   var total = 0, stEl = document.getElementById("sb-state"), send = document.getElementById("sb-send");
   function calc() {
     var goods = 0, duty = 0, ship = 0, save = 0, ch = 0, chs = 0, n = 0, keep = {};
+    var seenDuty = {};
     rows.forEach(function (r) {
       var v = st(r), q = qty(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
       keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value, d: r.dataset.def };
       if (v !== "yes") return;
-      n++; var d = r.dataset, g = parseFloat(d.g) * q; goods += g; ship += parseFloat(d.s); duty += parseFloat(d.d); save += parseFloat(d.r);
+      n++; var d = r.dataset, g = parseFloat(d.g) * q; goods += g; ship += parseFloat(d.s); save += parseFloat(d.r);
+      var itemKey = d.item || r.dataset.id;
+      if (parseFloat(d.itemDuty || 0) > 0.004) {
+        if (!seenDuty[itemKey]) { duty += parseFloat(d.itemDuty); seenDuty[itemKey] = true; }
+      } else {
+        duty += parseFloat(d.d);
+      }
       if (d.choice === "1") { ch += g; chs += parseFloat(d.s); }
     });
     if (ch > 0 && ch < TH && chs < 0.005) ship += CS;   // Choice under the free-shipping line pays once per order
@@ -711,7 +720,9 @@ _DECIDE_JS = r"""<script>
       var s = document.createElement("span"); s.className = "pill eta"; s.textContent = t; box.appendChild(s);
     });
     [].forEach.call(document.querySelectorAll(".grp"), function (g) {   // would the other way move the whole delivery?
-      var x = g.querySelector(".gx"); x.textContent = "";
+      var x = g.querySelector(".gx");
+      if (!x) return;
+      x.textContent = "";
       var ws = [].slice.call(g.querySelectorAll(".row.dec")), on = ws.filter(function (r) { return st(r) === "yes"; });
       if (on.length !== 1 || !last) return;
       var rest = yes.filter(function (o) { return o.closest(".grp") !== g; }).reduce(function (m, o) { return o.dataset.until > m ? o.dataset.until : m; }, "");
@@ -733,6 +744,10 @@ _DECIDE_JS = r"""<script>
       if (r.dataset.replaces) { if (v !== "yes") return; it.replaces = r.dataset.replaces.split(","); }
       if (r.dataset.combo || r.closest("section").dataset.cat === "Kombi-Knaller-Korb") it.combo = true;
       it.title = r.dataset.title.slice(0, 60);
+      if (r.dataset.need) it.need = r.dataset.need;
+      else if (it.category) it.need = it.category;
+      if (r.dataset.match) it.match = r.dataset.match;
+      if (r.dataset.avoid) it.avoid = r.dataset.avoid;
       var nt = r.querySelector('.note-in').value.trim(); if (nt) it.note = nt;
       items.push(it);
     });
@@ -740,7 +755,7 @@ _DECIDE_JS = r"""<script>
       (cnt["delete"] ? ", " + cnt["delete"] + " löschen (" + dels.slice(0, 5).join("; ") + (dels.length > 5 ? " ..." : "") + ")" : "") +
       " | Summe ca. " + f(total) + " (geschätzt)";
     msg.n = items.length;
-    return head + "\n```json\n" + JSON.stringify({ action: "select", report: NAME, items: items }) + "\n```";
+    return head + "\n```json\n" + JSON.stringify({ action: "select", report: NAME, list_name: LIST_NAME, items: items }) + "\n```";
   }
   // "In den Korb": only where the page comes from the report server (it runs the selection itself).
   var cartB = document.getElementById("sb-cart"), note = document.getElementById("sb-note"), sure = 0;
@@ -906,6 +921,19 @@ def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) 
         for x in ids:
             if x in idx_of and idx_of[x] not in member:
                 member[idx_of[x]] = ci
+
+    # Multi-row ways of the same item (e.g. 2× a 3-pack + 1× a 1-pack)
+    item_groups: dict[str, list[int]] = {}
+    for i, c in enumerate(cards):
+        gi = c.get("group_item")
+        if i not in member and gi:
+            item_groups.setdefault(str(gi), []).append(i)
+    for gi, idxs in item_groups.items():
+        if len(idxs) > 1:
+            lead = idxs[0]
+            for j in idxs:
+                member[j] = lead
+
     groups: dict[int, list[int]] = {}
     for i in range(len(rows)):
         if i in member:
@@ -919,18 +947,26 @@ def _grouped(cards: list[dict], rows: list[str], repl_of: dict[int, list[str]]) 
             out.append(rows[i])
             continue
         lead = member[i]
-        olds = [j for j in g if j != lead]
-        order = olds + [lead]
-        done.update(order)
-        new, old = line_total(cards[lead]), sum(line_total(cards[j]) for j in olds)
-        d_new = _until(cards[lead])
-        d_old = max((_until(cards[j]) for j in olds), default="")
-        cmp = (f"{eur(old - new)} billiger" if old - new > 0.004 else f"{eur(new - old)} teurer" if new - old > 0.004 else "gleich teuer")
-        if d_new and d_old and d_new != d_old:
-            cmp += (", aber" if d_new > d_old else " und") + f" Lieferung {_dm(d_new)} statt {_dm(d_old)}"
-        who = "Alternative" if len(olds) == 1 else f"Eine Zeile statt {len(olds)}"
-        head = f"{who}: {cmp}"
-        out.append(f'<div class="grp"><div class="grp-h">{head}<span class="gs">nur einer auf Ja<span class="gx"></span></span></div>{"".join(rows[j] for j in order)}</div>')
+        done.update(g)
+        if lead in repl_of:
+            olds = [j for j in g if j != lead]
+            order = olds + [lead]
+            new, old = line_total(cards[lead]), sum(line_total(cards[j]) for j in olds)
+            d_new = _until(cards[lead])
+            d_old = max((_until(cards[j]) for j in olds), default="")
+            cmp = (f"{eur(old - new)} billiger" if old - new > 0.004 else f"{eur(new - old)} teurer" if new - old > 0.004 else "gleich teuer")
+            if d_new and d_old and d_new != d_old:
+                cmp += (", aber" if d_new > d_old else " und") + f" Lieferung {_dm(d_new)} statt {_dm(d_old)}"
+            who = "Alternative" if len(olds) == 1 else f"Eine Zeile statt {len(olds)}"
+            head = f"{who}: {cmp}"
+            out.append(f'<div class="grp"><div class="grp-h">{head}<span class="gs">nur einer auf Ja<span class="gx"></span></span></div>{"".join(rows[j] for j in order)}</div>')
+        else:
+            tot_pcs = sum(int(cards[j].get("pieces") or 0) for j in g)
+            tot_g = sum(line_total(cards[j]) for j in g)
+            dty = max(float(cards[j].get("item_duty") or 0) for j in g)
+            dty_str = f" · Abgabe {eur(dty)} für die Bestellung" if dty > 0.004 else ""
+            head = f"Ein Weg ({tot_pcs} Stück, {len(g)} Zeilen): Ware {eur(tot_g)}{dty_str}"
+            out.append(f'<div class="grp way-grp"><div class="grp-h">{head}<span class="gs">gehören zusammen</span></div>{"".join(rows[j] for j in g)}</div>')
     return out
 
 
@@ -983,12 +1019,16 @@ def _decide_row(c: dict, rid: str, need: int, state: str, repl: list[str], repla
     cart = f' data-cart="{_e(c["cart_id"])}"' if c.get("cart_id") else ""
     cart += f' data-replaces="{_e(",".join(repl))}"' if repl else ""
     cart += ' data-combo="1"' if c.get("combo") else ""
+    need_attr = f' data-need="{_e(c["need"])}"' if c.get("need") else ""
+    match_attr = f' data-match="{_e(c["match"])}"' if c.get("match") else ""
+    avoid_attr = f' data-avoid="{_e(c["avoid"])}"' if c.get("avoid") else ""
+    item_duty_attr = f' data-item-duty="{float(c.get("item_duty") or 0):.2f}"' if c.get("item_duty") else ""
     until_attr = f' data-until="{_e(until)}"' if until else ""
     # a page default that is itself a change (merged lines) starts from the cart's state
     state0 = c.get("state0") if c.get("state0") in _ICONS else state
     return (
         f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
-        f'data-sku="{_e(c["sku_id"])}"{cart} data-price="{float(c.get("price") or 0):.2f}" data-ship="{float(c.get("ship") or 0):.2f}" '
+        f'data-sku="{_e(c["sku_id"])}"{cart}{need_attr}{match_attr}{avoid_attr}{item_duty_attr} data-price="{float(c.get("price") or 0):.2f}" data-ship="{float(c.get("ship") or 0):.2f}" '
         f'data-duty="{float(c.get("duty") or 0):.2f}" data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" '
         f'data-state0="{state0}" data-def="{state}"{until_attr} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" '
         f'data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
@@ -1002,7 +1042,8 @@ def _decide_row(c: dict, rid: str, need: int, state: str, repl: list[str], repla
 
 
 def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: list[dict],
-                categories: list[dict], stamp: str, choice_threshold: float = 10.0, choice_ship: float = 1.99) -> str:
+                categories: list[dict], stamp: str, choice_threshold: float = 10.0, choice_ship: float = 1.99,
+                list_name: str = "") -> str:
     """
     A page to decide on, dense enough for a long cart. Per category one row per offer: picture (tap = mark),
     short title, the agent's opinion in one line (fit, rating, verdict; tap the text for the rest), price and three icon
@@ -1047,8 +1088,9 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
             if cart_mode and state == "maybe":
                 state = "no"
             rows.append(_decide_row(c, f"r{si}_{ci}", need, state, repl_of.get(ci, []), replaced))
+        cov_html = f'<div class="cat-cov">{_e(sec["coverage"])}</div>' if sec.get("coverage") else ""
         out.append(f'<section data-cat="{_e(sec["heading"])}" data-need="{need}"><div class="cat-h"><h2>{_e(sec["heading"])}</h2>'
-                   f'<span class="sub"></span><button type="button" data-all="1">alle</button></div>'
+                   f'<span class="sub"></span>{cov_html}<button type="button" data-all="1">alle</button></div>'
                    f'<div class="rows">{"".join(_grouped(cards, rows, repl_of))}</div></section>')
     out.append('<div class="dbar"><div class="in"><div class="bulk" id="sb-bulk" hidden><span id="sb-marked"></span>'
                f'<button type="button" class="y" data-bulk="yes" aria-label="Ja">{_ICON_YES}</button>'
@@ -1062,6 +1104,7 @@ def decide_page(name: str, title: str, subtitle: str, facts: list[dict], notes: 
                '<button type="button" id="sb-cart" class="send cart" disabled>In den Korb</button></div>'
                '<p class="why" id="sb-note" hidden></p></div></div>')
     js = (_DECIDE_JS.replace("__NAME__", json.dumps(name).replace("</", "<\\/"))
+          .replace("__LIST_NAME__", json.dumps(list_name).replace("</", "<\\/"))
           .replace("__TH__", repr(float(choice_threshold))).replace("__CS__", repr(float(choice_ship))))
     out.append(js)
     return _page(title, _DECIDE_CSS + "\n" + "\n".join(out))
