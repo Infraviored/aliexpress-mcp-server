@@ -144,6 +144,7 @@ def start(punish_url: str) -> int:
                 slider._click_recaptcha(page, ctx, old)
                 if passed():
                     return _finish(ctx, data, cookies)
+                misses = 0
                 while True:
                     frame = _challenge(page)
                     if not frame:
@@ -155,20 +156,27 @@ def start(punish_url: str) -> int:
                         return 1
                     try:
                         tiles = _snapshot(page, frame)
-                    except Exception:                  # closed while we looked: passed, or a new round
+                        misses = 0
+                    except Exception as e:             # closed while we looked: passed, or a new round
                         time.sleep(3)
                         if passed() or _demo_passed(page, punish_url):
                             return _finish(ctx, data, cookies)
+                        misses += 1
+                        if misses >= 5:                # never loop silently: show what is there and stop
+                            page.screenshot(path=str(SHOT))
+                            _state("failed", why=f"challenge unreadable 5x ({type(e).__name__}); screenshot in {SHOT}")
+                            return 1
                         continue
+                    asked = _read_state()              # the task of THIS picture, before 'clicking' replaces it
                     words = _await_answer()
                     if words is None:
                         _state("failed", why="no answer within 15 min")
                         return 1
-                    _state("clicking")
+                    _state("clicking", task=asked.get("task"), tiles=asked.get("tiles"))
                     for w in words:
                         if w.isdigit() and 1 <= int(w) <= len(tiles):
                             _click(page, tiles[int(w) - 1])
-                    dynamic = "none left" in (_read_state().get("task") or "").lower()
+                    dynamic = "none left" in (asked.get("task") or "").lower()
                     if dynamic and any(w.isdigit() for w in words):
                         time.sleep(4)                      # new tiles fade in: Florian looks again
                         continue
