@@ -1287,6 +1287,13 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
             )
     prices = (res.get("PRICE") or {}).get("skuIdStrPriceInfoMap") or {}
     qty = ((res.get("QUANTITY_PC") or {}).get("allSkuQuantityView")) or {}
+    # Pack size, best source first: what AliExpress itself states (a lot of N, or "10 pcs" per variant),
+    # then the variant name, then the title. A "10PCS" listing whose variants are only named "TSAL6100"
+    # was otherwise priced as one piece per unit (6 units bought for 6 pieces).
+    lot_block = res.get("LOT") or {}
+    lot = int(lot_block.get("numberPerLot") or 0) if (res.get("PRICE") or {}).get("isLot") else 0
+    unit_by_sku = lot_block.get("unitContentSkuMap") or {}
+    subject = ((res.get("GLOBAL_DATA") or {}).get("globalData") or {}).get("subject") or ""
 
     variants = []
     for n, pth in enumerate(paths, 1):
@@ -1298,6 +1305,10 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
         info = prices.get(sid) or {}
         price = parse_price(info.get("salePriceString") or "")
         pack = deals.pack_size(label)
+        if pack == 1:
+            pack = deals.pack_size(str(unit_by_sku.get(sid) or "")) or 1
+        if pack == 1 and lot > 1:
+            pack = lot
         variants.append({
             "sku_id": sid,
             "label": label,
@@ -1310,6 +1321,11 @@ def _pdp_offer(item_id: str) -> Optional[dict]:
             "hot": hot,
             "n": n,
         })
+    tp = deals.title_pack(subject)
+    if tp > 1 and all(v["pack"] == 1 for v in variants):
+        for v in variants:
+            v["pack"] = tp
+            v["unit"] = (v["price"] / tp) if v["price"] else None
     counts: dict[str, int] = {}
     for v in variants:
         counts[v["label"]] = counts.get(v["label"], 0) + 1
