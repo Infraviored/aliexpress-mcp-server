@@ -720,7 +720,9 @@ _DECIDE_JS = r"""<script>
       var s = document.createElement("span"); s.className = "pill eta"; s.textContent = t; box.appendChild(s);
     });
     [].forEach.call(document.querySelectorAll(".grp"), function (g) {   // would the other way move the whole delivery?
-      var x = g.querySelector(".gx"); x.textContent = "";
+      var x = g.querySelector(".gx");
+      if (!x) return;
+      x.textContent = "";
       var ws = [].slice.call(g.querySelectorAll(".row.dec")), on = ws.filter(function (r) { return st(r) === "yes"; });
       if (on.length !== 1 || !last) return;
       var rest = yes.filter(function (o) { return o.closest(".grp") !== g; }).reduce(function (m, o) { return o.dataset.until > m ? o.dataset.until : m; }, "");

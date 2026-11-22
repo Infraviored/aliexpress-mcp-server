@@ -267,8 +267,8 @@ def test_compute_decide_rows_same_item_multi_row_duty(monkeypatch):
         "heading": "Widerstand",
         "need": 6,
         "cards": [
-            {"item_id": "global_item", "sku_id": "v1", "qty": 1},
-            {"item_id": "global_item", "sku_id": "v2", "qty": 1},
+            {"item_id": "global_item", "sku_id": "v1", "qty": 1, "way": "way1"},
+            {"item_id": "global_item", "sku_id": "v2", "qty": 1, "way": "way1"},
         ]
     }]
 
@@ -285,6 +285,99 @@ def test_compute_decide_rows_same_item_multi_row_duty(monkeypatch):
     # Shared shipping: first row keeps shipping, second has 0.0
     assert c1["ship"] == 2.00
     assert c2["ship"] == 0.0
+
+
+def test_compute_decide_rows_single_global_row_computes_duty_from_server(monkeypatch):
+    """Single global row computes duty from DUTY_PER_LINE and ignores model-typed duty/ship."""
+    fake_offer = {
+        "item_id": "global_single",
+        "choice": False,
+        "variants": [{"sku_id": "v1", "pack": 1, "price": 5.00}],
+        "shipping": {"free": False, "fee": 1.80, "days": (10, 15)},
+    }
+    monkeypatch.setattr(m, "_pdp_offer", lambda iid: fake_offer if iid == "global_single" else None)
+
+    cats = [{
+        "heading": "Modul",
+        "need": 1,
+        "cards": [
+            # Model hallucinated 0 duty and 0 ship
+            {"item_id": "global_single", "sku_id": "v1", "qty": 1, "duty": 0.0, "ship": 0.0},
+        ]
+    }]
+
+    m._compute_decide_rows(cats)
+    card = cats[0]["cards"][0]
+    # Server computed from PDP data: DUTY_PER_LINE used, shipping fee populated
+    assert card["duty"] == m.DUTY_PER_LINE
+    assert card["ship"] == 1.80
+    assert "Preis nicht geprüft" not in card.get("tags", [])
+
+
+def test_compute_decide_rows_different_variants_stay_alternatives(monkeypatch):
+    """Different variants of the same listing stay alternatives with their own shipping and duty."""
+    fake_offer = {
+        "item_id": "same_item",
+        "choice": False,
+        "variants": [
+            {"sku_id": "v1", "pack": 1, "price": 2.00},
+            {"sku_id": "v2", "pack": 1, "price": 3.00},
+        ],
+        "shipping": {"free": False, "fee": 2.50, "days": (10, 15)},
+    }
+    monkeypatch.setattr(m, "_pdp_offer", lambda iid: fake_offer if iid == "same_item" else None)
+
+    cats = [{
+        "heading": "Optionen",
+        "need": 1,
+        "cards": [
+            {"item_id": "same_item", "sku_id": "v1", "qty": 1},
+            {"item_id": "same_item", "sku_id": "v2", "qty": 1},
+        ]
+    }]
+
+    m._compute_decide_rows(cats)
+    c1, c2 = cats[0]["cards"]
+    # They are alternative options, not meant to be bought together
+    assert c1["duty"] == m.DUTY_PER_LINE
+    assert c2["duty"] == m.DUTY_PER_LINE
+    assert c1["ship"] == 2.50
+    assert c2["ship"] == 2.50
+    assert "group_item" not in c1
+    assert "group_item" not in c2
+
+
+def test_compute_decide_rows_same_variant_packs_grouped_as_way(monkeypatch):
+    """Same sku/variant with different packs or counts group together as a way."""
+    fake_offer = {
+        "item_id": "pack_item",
+        "choice": False,
+        "variants": [
+            {"sku_id": "v_same", "pack": 5, "price": 2.00},
+        ],
+        "shipping": {"free": False, "fee": 2.20, "days": (10, 15)},
+    }
+    monkeypatch.setattr(m, "_pdp_offer", lambda iid: fake_offer if iid == "pack_item" else None)
+
+    cats = [{
+        "heading": "Widerstand 10x",
+        "need": 10,
+        "cards": [
+            {"item_id": "pack_item", "sku_id": "v_same", "qty": 1, "pack": 5},
+            {"item_id": "pack_item", "sku_id": "v_same", "qty": 1, "pack": 5},
+        ]
+    }]
+
+    m._compute_decide_rows(cats)
+    c1, c2 = cats[0]["cards"]
+    assert c1["group_item"] == "pack_item"
+    assert c2["group_item"] == "pack_item"
+    assert c1["ship"] == 2.20
+    assert c2["ship"] == 0.0
+    assert c1["duty"] == 0.0
+    assert c2["duty"] == 0.0
+    assert c1["item_duty"] == m.DUTY_PER_LINE
+
 
 
 def test_decide_page_renders_group_box_and_combo_flag(tmp_path, monkeypatch):
@@ -461,3 +554,146 @@ def test_add_to_cart_persists_match_and_avoid_in_line_store(tmp_path, monkeypatc
     assert saved_combo_tag["match"] == "T12-BC2"
     assert saved_combo_tag["avoid"] == "T12-K"
     assert saved_combo_tag["combo"] is True
+
+
+def test_candidate_ids_hard_cap_25_prefer_kombi_then_choice(monkeypatch):
+    """_candidate_ids enforces a hard cap of 25 candidates, prioritizing Kombi then Choice."""
+    # 30 kombi hits, 30 choice hits, 10 regular hits
+    raw_hits = []
+    for i in range(30):
+        raw_hits.append({"item_id": f"k_{i}", "title": f"Sensor Kombi {i}", "price": 5.0, "orders": 100, "choice": False, "combo": True})
+    for i in range(30):
+        raw_hits.append({"item_id": f"c_{i}", "title": f"Sensor Choice {i}", "price": 4.0, "orders": 200, "choice": True, "combo": False})
+    for i in range(10):
+        raw_hits.append({"item_id": f"r_{i}", "title": f"Sensor Reg {i}", "price": 3.0, "orders": 500, "choice": False, "combo": False})
+
+    monkeypatch.setattr(m, "_sweep_search_for_need", lambda *a, **k: (raw_hits, {"searched_channels": ["normal", "Choice", "Kombi"]}))
+    spec = {"query": "sensor", "match": "sensor", "avoid": ""}
+
+    cands = m._candidate_ids(spec)
+    assert len(cands) == 25
+    # All 25 should be Kombi items because we have 30 Kombi items and Kombi has priority 1
+    assert all(cid.startswith("k_") for cid in cands)
+
+    # Now test with 10 Kombi, 20 Choice, 10 regular: 10 Kombi + 15 Choice = 25
+    raw_hits2 = raw_hits[:10] + raw_hits[30:50] + raw_hits[60:]
+    monkeypatch.setattr(m, "_sweep_search_for_need", lambda *a, **k: (raw_hits2, {"searched_channels": ["normal", "Choice", "Kombi"]}))
+    cands2 = m._candidate_ids(spec)
+    assert len(cands2) == 25
+    kombi_cands = [c for c in cands2 if c.startswith("k_")]
+    choice_cands = [c for c in cands2 if c.startswith("c_")]
+    assert len(kombi_cands) == 10
+    assert len(choice_cands) == 15
+
+
+def test_format_coverage_honest_kombi_not_searched():
+    """_format_coverage accurately reports when Kombi sweep was not performed due to budget/cooldown."""
+    cov_budget = {
+        "searched_channels": ["normal", "Choice"],
+        "normal_hits": 10,
+        "choice_hits": 2,
+        "kombi_hits": 0,
+        "kombi_searched": False,
+        "kombi_reason": "Budget",
+        "priced": 2,
+        "skipped": [],
+    }
+    line = m._format_coverage(cov_budget)
+    assert "Kombi: nicht gesucht (Budget)" in line
+
+    cov_bot = {
+        "searched_channels": ["normal", "Choice"],
+        "normal_hits": 10,
+        "choice_hits": 2,
+        "kombi_hits": 0,
+        "kombi_searched": False,
+        "kombi_reason": "Botsperre",
+        "priced": 2,
+        "skipped": [],
+    }
+    line2 = m._format_coverage(cov_bot)
+    assert "Kombi: nicht gesucht (Botsperre)" in line2
+
+    cov_default = {
+        "searched_channels": ["normal", "Choice"],
+        "normal_hits": 10,
+        "choice_hits": 2,
+        "kombi_hits": 0,
+        "kombi_searched": False,
+        "priced": 2,
+        "skipped": [],
+    }
+    line_def = m._format_coverage(cov_default)
+    assert "Kombi: nicht gesucht (Budget/Botsperre)" in line_def
+
+    cov_searched = {
+        "searched_channels": ["normal", "Choice", "Kombi"],
+        "normal_hits": 10,
+        "choice_hits": 2,
+        "kombi_hits": 0,
+        "kombi_searched": True,
+        "priced": 2,
+        "skipped": [],
+    }
+    line3 = m._format_coverage(cov_searched)
+    assert "Kombi: gesucht" in line3
+
+
+def test_sweep_search_at_most_two_extra_pages_and_cooldown(monkeypatch):
+    """_sweep_search_for_need adds at most 2 extra pages and stops during bot cooldown."""
+    calls = []
+    def mock_search(query, sort_by="default", page=1, choice_only=False):
+        calls.append((sort_by, page))
+        return [{"item_id": f"id_{sort_by}_{page}", "title": "Hit", "combo": page == 2}]
+
+    monkeypatch.setattr(m, "_search", mock_search)
+    monkeypatch.setattr(m, "_budget_remaining", lambda: 10)
+    monkeypatch.setattr(m, "_bot_cooldown_left", lambda: 0)
+
+    hits, cov = m._sweep_search_for_need("relay")
+    # Base search (best_match, p1) + at most 2 extra pages: (orders, p1) and (best_match, p2)
+    assert len(calls) == 3
+    assert calls == [("best_match", 1), ("orders", 1), ("best_match", 2)]
+    assert cov["kombi_searched"] is True
+
+    # Test cooldown stops extra pages
+    calls.clear()
+    monkeypatch.setattr(m, "_bot_cooldown_left", lambda: 30)
+    hits2, cov2 = m._sweep_search_for_need("relay")
+    assert len(calls) == 1  # only base search ran
+    assert cov2["kombi_searched"] is False
+    assert cov2["kombi_reason"] == "Botsperre"
+
+
+def test_recheck_cart_sweeps_kombi_and_reports_coverage(tmp_path, monkeypatch):
+    """_recheck_run uses _sweep_search_for_need and includes coverage in output."""
+    lines_file = tmp_path / "lines.json"
+    lines_file.write_text(json.dumps({"c1": {"list": "TestList", "need": "ESP32", "match": "ESP32", "avoid": ""}}))
+    monkeypatch.setattr(m, "MCP_LINES_FILE", lines_file)
+    monkeypatch.setattr(m, "load_cookies", lambda: {"session": "dummy"})
+    fake_line = {
+        "cart_id": "c1", "item_id": "item1", "sku_id": "s1", "qty": 1,
+        "title": "ESP32", "variant": "Default", "price": 5.0, "ship": 0.0,
+        "group": "choice", "checked": True, "delivery": ("2026-12-01", "2026-12-10"),
+    }
+    monkeypatch.setattr(m, "_read_cart", lambda *a, **k: {"lines": [fake_line]})
+
+    cov_mock = {
+        "searched_channels": ["normal", "Choice", "Kombi"],
+        "normal_hits": 5, "choice_hits": 2, "kombi_hits": 1,
+        "kombi_searched": True, "priced": 1, "skipped": []
+    }
+    monkeypatch.setattr(m, "_sweep_search_for_need", lambda q: ([{"item_id": "item1", "title": "ESP32", "orders": 10}], cov_mock))
+    monkeypatch.setattr(m, "_price_hits", lambda *a, **k: ([], [], []))
+    monkeypatch.setattr(m, "_current_way", lambda *a, **k: {"net": 5.0})
+
+    out = m._recheck_run("TestList", rank_top=3, max_lines=1, skip=0, progress=lambda *a: None)
+    assert "Kombi: 1" in out
+    assert "Choice: 2" in out
+
+
+def test_report_eta_js_null_guard():
+    """report.py contains the null guard in eta() to prevent crash on .grp elements without .gx."""
+    assert 'var x = g.querySelector(".gx");' in report._DECIDE_JS
+    assert 'if (!x) return;' in report._DECIDE_JS
+

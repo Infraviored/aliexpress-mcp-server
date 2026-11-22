@@ -1024,6 +1024,9 @@ def _format_coverage(cov: dict) -> str:
     k_hits = cov.get("kombi_hits", 0)
     if k_hits == 0 and cov.get("kombi_searched"):
         parts.append("Kombi: gesucht, 0 Treffer")
+    elif k_hits == 0 and not cov.get("kombi_searched"):
+        reason = cov.get("kombi_not_searched_reason") or cov.get("kombi_reason") or "Budget/Botsperre"
+        parts.append(f"Kombi: nicht gesucht ({reason})")
     elif k_hits > 0:
         parts.append(f"Kombi: {k_hits}")
 
@@ -1063,12 +1066,12 @@ def _format_coverage(cov: dict) -> str:
 def _sweep_search_for_need(query: str, sort_by: str = "best_match", page: int = 1,
                            choice_only: bool = False, base_hits: Optional[list[dict]] = None) -> tuple[list[dict], dict]:
     """
-    Search for a need: base search plus Kombi sweep across channels (page 1 and 2,
-    both best_match and orders sort, if budget allows). Merges hits deduped by item_id.
+    Search for a need: base search plus Kombi sweep across channels (at most 2 extra
+    pages: orders p1, best_match p2, if budget allows and not cooling down). Merges hits deduped by item_id.
     """
     cov = {
         "searched_channels": ["normal", "Choice", "Kombi"],
-        "kombi_searched": True,
+        "kombi_searched": False,
         "kombi_hits": 0,
         "choice_hits": 0,
         "normal_hits": 0,
@@ -1084,17 +1087,10 @@ def _sweep_search_for_need(query: str, sort_by: str = "best_match", page: int = 
     else:
         try:
             hits1 = _search(query, sort_by=sort_by, page=page, choice_only=choice_only)
-        except TypeError:
-            try:
-                hits1 = _search(query)
-            except Exception as e:
-                logger.debug("Base search failed for %s: %s", query, e)
-                hits1 = []
-                cov["skipped"].append((f"Suchfehler ({e})", 1))
         except Exception as e:
             logger.debug("Base search failed for %s: %s", query, e)
             hits1 = []
-            cov["skipped"].append((f"Suchfehler ({e})", 1))
+            cov["skipped"].append((f"Suchfehler ({type(e).__name__})", 1))
 
     for h in hits1:
         iid = str(h["item_id"])
@@ -1104,13 +1100,15 @@ def _sweep_search_for_need(query: str, sort_by: str = "best_match", page: int = 
                 h["combo"] = True
             all_hits.append(h)
 
-    # 2. Kombi sweeps: (best_match, 1), (best_match, 2), (orders, 1), (orders, 2)
+    # 2. Kombi sweeps: at most 2 extra pages: (orders, 1) and (best_match, 2)
     kombi_targets = [
-        ("best_match", 1),
-        ("best_match", 2),
         ("orders", 1),
-        ("orders", 2),
+        ("best_match", 2),
     ]
+
+    kombi_pages_fetched = 0
+    kombi_skip_reasons = []
+    uncached_swept = 0
 
     for sb, pg in kombi_targets:
         if sb == sort_by and pg == page and not choice_only and base_hits is not None:
@@ -1120,17 +1118,21 @@ def _sweep_search_for_need(query: str, sort_by: str = "best_match", page: int = 
 
         if not is_cached:
             if _bot_cooldown_left() > 0:
+                kombi_skip_reasons.append("Botsperre")
                 cov["skipped"].append(("Botsperre", 1))
                 break
             if _budget_remaining() <= 0:
+                kombi_skip_reasons.append("Budget")
                 cov["skipped"].append(("Budget", 1))
                 continue
+            if uncached_swept >= 2:
+                break
 
         try:
-            try:
-                more_hits = _search(query, sort_by=sb, page=pg, choice_only=False)
-            except TypeError:
-                more_hits = _search(query) if (sb == "best_match" and pg == 1) else []
+            more_hits = _search(query, sort_by=sb, page=pg, choice_only=False)
+            if not is_cached:
+                uncached_swept += 1
+            kombi_pages_fetched += 1
             for h in more_hits:
                 iid = str(h["item_id"])
                 if iid not in seen_ids:
@@ -1146,7 +1148,15 @@ def _sweep_search_for_need(query: str, sort_by: str = "best_match", page: int = 
                                 break
         except Exception as e:
             logger.debug("Kombi sweep search (%s, p%s) failed: %s", sb, pg, e)
-            cov["skipped"].append((f"Suchfehler ({e})", 1))
+            cov["skipped"].append((f"Suchfehler ({type(e).__name__})", 1))
+
+    if kombi_pages_fetched > 0:
+        cov["kombi_searched"] = True
+    else:
+        cov["kombi_searched"] = False
+        reasons_uniq = sorted(set(kombi_skip_reasons))
+        cov["kombi_not_searched_reason"] = "/".join(reasons_uniq) if reasons_uniq else "Budget/Botsperre"
+        cov["kombi_reason"] = cov["kombi_not_searched_reason"]
 
     cov["kombi_hits"] = sum(1 for h in all_hits if h.get("combo") or _is_combo(h["item_id"]))
     cov["choice_hits"] = sum(1 for h in all_hits if h.get("choice"))
@@ -2055,34 +2065,45 @@ def _candidate_ids(spec: dict) -> list[str]:
         return pos - 3.0 * math.log2(orders + 1)
 
     ranked_matching = [h for _, h in sorted(enumerate(matching), key=_rank_score)]
+    kombi_sorted = [h for _, h in sorted(enumerate(kombi_hits), key=_rank_score)]
+    choice_sorted = [h for _, h in sorted(enumerate(choice_hits), key=_rank_score)]
+
+    default = 15 if int(spec.get("pieces", 1) or 1) > 1 else 10
+    wanted = int(spec.get("candidates", default))
+    max_slots = max(0, 25 - len(ids))
+    cap = min(max_slots, max(wanted, len(kombi_hits) + len(choice_hits)))
 
     selected = []
     seen = set(ids)
 
-    # Always include every Kombi hit that passes match
-    for h in kombi_hits:
-        if h["item_id"] not in seen:
-            selected.append(h["item_id"])
-            seen.add(h["item_id"])
+    # 1. Prefer Kombi hits (best ranked first)
+    for h in kombi_sorted:
+        if len(selected) >= cap:
+            break
+        iid = str(h["item_id"])
+        if iid not in seen:
+            selected.append(iid)
+            seen.add(iid)
 
-    # Always include every Choice hit that passes match
-    for h in choice_hits:
-        if h["item_id"] not in seen:
-            selected.append(h["item_id"])
-            seen.add(h["item_id"])
+    # 2. Prefer Choice hits (best ranked first)
+    for h in choice_sorted:
+        if len(selected) >= cap:
+            break
+        iid = str(h["item_id"])
+        if iid not in seen:
+            selected.append(iid)
+            seen.add(iid)
 
-    default = 15 if int(spec.get("pieces", 1) or 1) > 1 else 10
-    cap = max(int(spec.get("candidates", default)), len(selected))
-    cap = min(cap, 25)
-
+    # 3. Other matching hits
     for h in ranked_matching:
         if len(selected) >= cap:
             break
-        if h["item_id"] not in seen:
-            selected.append(h["item_id"])
-            seen.add(h["item_id"])
+        iid = str(h["item_id"])
+        if iid not in seen:
+            selected.append(iid)
+            seen.add(iid)
 
-    return ids + selected
+    return (ids + selected)[:25]
 
 
 def _combo_free(w: dict, on: bool) -> None:
@@ -2218,11 +2239,11 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
                 if cov:
                     cov["priced"] = cov.get("priced", 0) + (1 if ways else 0)
                     if not ways:
-                        cov.setdefault("skipped", []).append((iid, "keine passende Variante"))
+                        cov.setdefault("skipped", []).append(("keine passende Variante", 1))
             except Exception as e:
                 notes.append(f"{need}: {iid} failed: {e}")
                 if cov:
-                    cov.setdefault("skipped", []).append((iid, f"Fehler ({type(e).__name__})"))
+                    cov.setdefault("skipped", []).append((f"Fehler ({type(e).__name__})", 1))
         options.sort(key=lambda w: w["score"])
         if not options:
             cov_str = f" ({_format_coverage(cov)})" if cov else ""
@@ -3643,8 +3664,8 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
         query = t.get("query") or t.get("need") or ln["title"][:60]
         name = t.get("need") or ln["title"][:50]
         try:
-            products = _search(query)
-            rows, _, _ = _price_hits(products, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False)
+            hits, cov = _sweep_search_for_need(query)
+            rows, _, _ = _price_hits(hits, pieces, t.get("match", ""), t.get("avoid", ""), rank_top, False, cov=cov)
             cur = _current_way(ln, pieces)
         except PermissionError:
             return AUTH_EXPIRED_MSG
@@ -3652,11 +3673,13 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
             failed.append(f"{name} ({ln['cart_id']}): {e}")
             continue
         gain, best = _saving(rows, cur)
+        cov_s = _format_coverage(cov) if cov else ""
         if best and not t.get("match"):
             # Without match words nothing says the offer is the same article (a 120 W charging station is no 30 W PSU).
             w, h = best
             unsure.append(f"- {name} (cart_id {ln['cart_id']}): cheapest hit {h['title'][:70]} ({h['item_id']}) would be {gain:.2f} "
-                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked\n"
+                          f"{CURRENCY} less - UNVERIFIED, no match words on this line; not a swap until the article is checked"
+                          + (f" [{cov_s}]" if cov_s else "") + "\n"
                           + _swap_photos(ln, h, w["lines"][0][0]["sku_id"]))
         elif best:
             w, h = best
@@ -3665,12 +3688,15 @@ def _recheck_run(list_name: str, rank_top: int, max_lines: int, skip: int, progr
                                 + f"\n  {h['title'][:80]}" + (" - Choice" if w["offer"]["choice"] else "")
                                 + f"\n  {_way_text(w)}\n  do: item {h['item_id']} " + _sku_do(w)
                                 + f" (shop_list item_ids / add_to_cart), then remove_from_cart {ln['cart_id']}\n"
+                                + (f"  Abdeckung: {cov_s}\n" if cov_s else "")
                                 + _swap_photos(ln, h, w["lines"][0][0]["sku_id"])))
         elif cur and not rows:
-            failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced (bot check or no hit with the match words)"
-                          f" - search by hand; the line itself costs {cur['net']:.2f} net")
+            failed.append(f"{name} ({ln['cart_id']}): no other offer could be priced"
+                          + (f" ({cov_s})" if cov_s else " (bot check or no hit with the match words)")
+                          + f" - search by hand; the line itself costs {cur['net']:.2f} net")
         elif cur:
-            same.append(f"- {name} ({ln['cart_id']}): already cheapest of {len(rows)} priced ({cur['net']:.2f} net)")
+            same.append(f"- {name} ({ln['cart_id']}): already cheapest of {len(rows)} priced ({cur['net']:.2f} net)"
+                        + (f" [{cov_s}]" if cov_s else ""))
         else:
             failed.append(f"{name} ({ln['cart_id']}): line could not be priced")
     out = [f"Recheck of {len(chunk)} of {len(todo)} listed lines (net incl. shipping, import, discounts):"]
@@ -4682,6 +4708,7 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                 with _REPORT_PDP_LOCK:
                     offer = _pdp_offer(iid)
             if offer:
+                c["_pdp_read"] = True
                 sku = str(c.get("sku_id") or "")
                 v = next((var for var in (offer.get("variants") or []) if sku and str(var.get("sku_id")) == sku), None)
                 if not v and len(offer.get("variants") or []) == 1:
@@ -4702,13 +4729,16 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                     c["until"] = _until(days)
                 if c.get("choice") or c.get("combo"):
                     c["ship"] = 0.0
-                elif "ship" not in c or c.get("ship") is None:
+                    c["duty"] = 0.0
+                else:
                     try:
                         c["ship"] = 0.0 if sh.get("free") else float(sh.get("fee") or 0.0)
                     except (TypeError, ValueError):
                         c["ship"] = 0.0
+                    c["duty"] = DUTY_PER_LINE
             else:
                 # Page could not be read: model values are fallbacks, mark "Preis nicht geprüft"
+                c["_pdp_read"] = False
                 if not c.get("pack"):
                     c["pack"] = 1
                 if not c.get("badge"):
@@ -4716,6 +4746,12 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                 tags = c.setdefault("tags", [])
                 if "Preis nicht geprüft" not in tags:
                     tags.append("Preis nicht geprüft")
+                if c.get("choice") or c.get("combo"):
+                    c["ship"] = 0.0
+                    c["duty"] = 0.0
+                else:
+                    c["ship"] = float(c.get("ship") or 0.0)
+                    c["duty"] = float(c.get("duty") or 0.0)
 
             if not c.get("until"):
                 undated += 1
@@ -4732,37 +4768,43 @@ def _compute_decide_rows(categories: list[dict]) -> int:
             if "avoid" not in c and sec.get("avoid"):
                 c["avoid"] = sec["avoid"]
 
-        # Handle duty and shipping for same item multi-row ways
-        by_item: dict[str, list[dict]] = {}
+        # Handle duty and shipping for same item multi-row ways:
+        # Group as one way only when meant to be bought together (same sku/variant different pack,
+        # or card marks it via 'way' or 'group_item'). Different variants stay alternatives.
+        ways_map: dict[tuple, list[dict]] = {}
         for c in sec_cards:
-            if c.get("item_id"):
-                by_item.setdefault(str(c["item_id"]), []).append(c)
+            iid = str(c.get("item_id") or "")
+            if not iid:
+                continue
+            if c.get("way"):
+                key = (iid, "way", str(c["way"]))
+            elif c.get("group_item"):
+                key = (iid, "group", str(c["group_item"]))
             else:
-                c["duty"] = float(c.get("duty") or 0.0)
+                sku = str(c.get("sku_id") or c.get("variant") or "")
+                key = (iid, "sku", sku) if sku else (iid, "id", id(c))
+            ways_map.setdefault(key, []).append(c)
 
-        for iid, item_cards in by_item.items():
-            if len(item_cards) > 1:
-                is_choice = any(c.get("choice") for c in item_cards)
-                is_combo_item = any(c.get("combo") for c in item_cards) or _is_combo(iid)
-                for c in item_cards:
+        for key, way_cards in ways_map.items():
+            if len(way_cards) > 1:
+                iid = key[0]
+                is_choice = any(c.get("choice") for c in way_cards)
+                is_combo_item = any(c.get("combo") for c in way_cards) or _is_combo(iid)
+                group_id = str(way_cards[0].get("group_item") or iid)
+                for c in way_cards:
                     c["duty"] = 0.0
                     c["item_duty"] = 0.0 if (is_choice or is_combo_item) else DUTY_PER_LINE
-                    c["group_item"] = iid
+                    c["group_item"] = group_id
                     if is_choice:
                         c["choice"] = True
                     if is_combo_item:
                         c["combo"] = True
                 if not is_choice and not is_combo_item:
-                    for c in item_cards[1:]:
+                    for c in way_cards[1:]:
                         c["ship"] = 0.0
-            else:
-                c = item_cards[0]
-                if c.get("choice") or c.get("combo"):
-                    c["duty"] = 0.0
-                elif c.get("duty") is not None:
-                    c["duty"] = float(c["duty"])
-                else:
-                    c["duty"] = 0.0
+
+        for c in sec_cards:
+            c.pop("_pdp_read", None)
     return undated
 
 
