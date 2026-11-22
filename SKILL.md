@@ -77,8 +77,11 @@ the user.
 `fit` on each card of `decide_report`. One sentence per row: why this one, what to watch, the rating where it matters,
 for car parts whether the seller names his model. Short titles (a few words): the row shows one line, two for the opinion.
 
-**Cards of `decide_report`:** each offer needs `item_id` AND `sku_id`, `price` (number, per listing unit), `pack`,
-`ship`, `choice`, and `fit` where the part must fit something (a car model: say whether the seller names it,
+**Cards of `decide_report`:** each offer needs `item_id`, `sku_id` and `qty`; the server reads pack, price, shipping,
+Choice/Kombi and import charge from the product page itself (typed `price`/`pack`/`ship` are only a fallback, the row
+then says "Preis nicht geprüft"). Rows bought TOGETHER (2× a 3-pack + 1× a 1-pack of one item) share a `"way"` key, so
+shipping and import charge count once. Every section shows a coverage line (channels searched, priced, skipped and
+why): read it before you tell him something was checked. Add `fit` where the part must fit something (a car model: say whether the seller names it,
 "✓ Highland genannt" or "Modell nicht genannt"). The page has Ja / Vielleicht / Nein, a quantity and a live ESTIMATE of
 the total; its button hands the choice to the chat as text plus a json block (through the ClaudeVoice dashboard). Pass
 that message unchanged to `apply_selection`: it puts every "Ja" in the cart. Then `view_cart`, and tell him the real

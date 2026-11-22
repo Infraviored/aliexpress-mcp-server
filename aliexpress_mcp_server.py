@@ -4888,8 +4888,9 @@ def decide_report(name: str, title: str, categories: list[dict], subtitle: str =
             The server fills pack, price, shipping, Choice/Kombi flag and duty from the cached product page (_pdp_offer).
             Model-typed price/pack/ship/duty become optional fallbacks only when the page cannot be read, and that row
             then says "Preis nicht geprüft". Import charge and Choice free-shipping threshold are per order, not per row:
-            when several rows of a group are the same item (e.g. 2× a 3-pack + 1× a 1-pack), they are priced as one way
-            and duty is shown once at group/order level, never folded into one row.
+            rows of the same item that are bought TOGETHER (e.g. 2× a 3-pack + 1× a 1-pack) must carry the same
+            "way": "<any key>" — they are then priced as one way, shipping once, duty once at group/order level,
+            never folded into one row. Rows of the same item without a shared "way" (other sku) stay alternatives.
         choice_threshold, choice_ship: free Choice shipping from this order value, else this fee once.
     """
     for sec in categories:
