@@ -226,7 +226,7 @@ def test_compute_decide_rows_from_cached_pdp(monkeypatch):
     assert card["qty"] == 2  # 10 needed // 5 per pack = 2
     assert card["pieces"] == 10
     assert card["choice"] is True
-    assert card["duty"] == 0.0
+    assert card["duty"] == m.DUTY_PER_LINE      # Choice pays import charge like in _ways_for; only Kombi is free
     assert card["ship"] == 0.0
 
 
