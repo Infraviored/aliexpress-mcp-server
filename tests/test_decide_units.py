@@ -7,7 +7,7 @@ def test_pack_and_need(monkeypatch):
     out = {}
     monkeypatch.setattr(m, "_write_report", lambda name, page: out.setdefault("page", page) and name)
     cats = [{"heading": "Sockel", "need": 6, "cards": [
-        {"title": "DIP-14, 10 Stück", "item_id": "1", "sku_id": "2", "price": 1.59, "pack": 10, "default": "yes"},
+        {"title": "DIP-14, 10 Stück", "item_id": "1", "sku_id": "2", "price": 1.59, "pack": 10, "duty": 0, "default": "yes"},
         {"title": "DIP-14, 4 Stück", "item_id": "3", "sku_id": "4", "price": 0.80, "pack": 4}]}]
     m.decide_report("t", "Teile", cats)
     page = out["page"]

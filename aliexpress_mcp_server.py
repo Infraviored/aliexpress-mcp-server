@@ -4727,15 +4727,16 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                 days = (sh.get("days") or (None, None))[1]
                 if days and not c.get("until"):
                     c["until"] = _until(days)
+                # import charge like _ways_for: every line pays it, Choice too; only a Kombi line
+                # (combo cart, 3+ pieces) is free of it
+                c["duty"] = 0.0 if c.get("combo") else DUTY_PER_LINE
                 if c.get("choice") or c.get("combo"):
                     c["ship"] = 0.0
-                    c["duty"] = 0.0
                 else:
                     try:
                         c["ship"] = 0.0 if sh.get("free") else float(sh.get("fee") or 0.0)
                     except (TypeError, ValueError):
                         c["ship"] = 0.0
-                    c["duty"] = DUTY_PER_LINE
             else:
                 # Page could not be read: model values are fallbacks, mark "Preis nicht geprüft"
                 c["_pdp_read"] = False
@@ -4746,12 +4747,10 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                 tags = c.setdefault("tags", [])
                 if "Preis nicht geprüft" not in tags:
                     tags.append("Preis nicht geprüft")
-                if c.get("choice") or c.get("combo"):
-                    c["ship"] = 0.0
-                    c["duty"] = 0.0
-                else:
-                    c["ship"] = float(c.get("ship") or 0.0)
-                    c["duty"] = float(c.get("duty") or 0.0)
+                # unread page: a typed duty stands (it is the model's knowledge), else the usual charge
+                c["duty"] = 0.0 if c.get("combo") else (
+                    float(c["duty"]) if c.get("duty") is not None else DUTY_PER_LINE)
+                c["ship"] = 0.0 if (c.get("choice") or c.get("combo")) else float(c.get("ship") or 0.0)
 
             if not c.get("until"):
                 undated += 1
@@ -4793,7 +4792,7 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                 group_id = str(way_cards[0].get("group_item") or iid)
                 for c in way_cards:
                     c["duty"] = 0.0
-                    c["item_duty"] = 0.0 if (is_choice or is_combo_item) else DUTY_PER_LINE
+                    c["item_duty"] = 0.0 if is_combo_item else DUTY_PER_LINE
                     c["group_item"] = group_id
                     if is_choice:
                         c["choice"] = True
