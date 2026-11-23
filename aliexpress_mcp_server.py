@@ -613,6 +613,41 @@ def _remember_combo(item_id: str) -> None:
     _combo_disk_store(iid)
 
 
+# Customs code (= Kombi-Knaller tab) per item, learned from the Kombi cart lines. The page keeps one basket
+# per tab and only a tab with 3+ checked pieces is free of the import charge.
+_HS_FILE = Path(os.environ.get("ALIEXPRESS_HS_CACHE", str(CREDENTIALS_PATH.parent / "aliexpress-hs-cache.json")))
+_HS_BY_ITEM: dict[str, str] = {}
+
+
+def _hs_load() -> dict[str, str]:
+    if not _HS_BY_ITEM:
+        try:
+            _HS_BY_ITEM.update(json.loads(_HS_FILE.read_text()))
+        except (OSError, ValueError):
+            pass
+    return _HS_BY_ITEM
+
+
+def _remember_hs(lines: list[dict]) -> None:
+    known = _hs_load()
+    new = {str(ln["item_id"]): ln["hs"] for ln in lines if ln.get("hs") and known.get(str(ln["item_id"])) != ln["hs"]}
+    if not new:
+        return
+    known.update(new)
+    try:
+        _HS_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _HS_FILE.write_text(json.dumps(known))
+    except OSError:
+        pass
+
+
+def _combo_tab(item_id: str) -> str:
+    """The Kombi tab an item lands in. Items not yet seen in the cart share the tab "?": planning counts them
+    together until the cart shows their real customs category (kombi_check and the page then count per tab)."""
+    hs = _hs_load().get(str(item_id))
+    return cartlib.tab_name(hs) if hs else "?"
+
+
 # Items seen as "Kombi-Knaller" in a search: the planner prices them without import
 # charge when 3+ pieces of such items go into the combo cart together.
 COMBO_ITEMS: set[str] = set(_combo_disk_load().keys())
@@ -2323,24 +2358,39 @@ def _plan(specs: list[dict], day_cost: float = DAY_COST, extra_choice: float = 0
                     p["others"].append(w)
             p["way"] = best
 
-    def combo_all(on: bool) -> None:
+    def combo_all(on_of) -> None:
         for p in picks:
             for w in p["options"]:
+                on = on_of(_combo_tab(w["offer"]["item_id"])) if w.get("combo") else False
                 if on or w["pieces"] < COMBO_MIN_PIECES:     # a way of 3+ pieces carries the combo order by itself
                     _combo_free(w, on)
 
-    # Kombi-Knaller: 3+ combo pieces in the combo order carry no import charge. Price
-    # the Kombi offers that way when the best Kombi offers of the list reach 3 pieces,
-    # and take the charge back when the picks end up with fewer.
-    reach = sum(max((w["pieces"] for w in p["options"] if w.get("combo")), default=0) for p in picks)
-    combo_all(reach >= COMBO_MIN_PIECES)
+    # Kombi-Knaller: each TAB (customs category) is its own order and carries no import charge from 3 checked
+    # pieces. Price the Kombi offers of a tab that way when the best Kombi offers of the list reach 3 pieces
+    # in that tab, and take the charge back for a tab where the picks end up with fewer.
+    reach: dict[str, int] = {}
+    for p in picks:
+        by_tab: dict[str, int] = {}
+        for w in p["options"]:
+            if w.get("combo"):
+                t = _combo_tab(w["offer"]["item_id"])
+                by_tab[t] = max(by_tab.get(t, 0), w["pieces"])
+        for t, n in by_tab.items():
+            reach[t] = reach.get(t, 0) + n
+    combo_all(lambda tab: reach.get(tab, 0) >= COMBO_MIN_PIECES)
     select()
-    if reach >= COMBO_MIN_PIECES and sum(p["way"]["pieces"] for p in picks if p["way"].get("combo")) < COMBO_MIN_PIECES:
-        combo_all(False)
+    got: dict[str, int] = {}
+    for p in picks:
+        if p["way"].get("combo"):
+            t = _combo_tab(p["way"]["offer"]["item_id"])
+            got[t] = got.get(t, 0) + p["way"]["pieces"]
+    short = {t for t, n in reach.items() if n >= COMBO_MIN_PIECES and got.get(t, 0) < COMBO_MIN_PIECES}
+    if short:
+        combo_all(lambda tab: tab not in short and reach.get(tab, 0) >= COMBO_MIN_PIECES)
         select()
     for p in picks:
         if p["way"].get("combo") and not p["way"].get("combo_free"):
-            p["way"]["combo"] = False       # too few Kombi pieces: a normal cart line, import charge included
+            p["way"]["combo"] = False       # too few Kombi pieces in its tab: a normal cart line, import charge included
 
     choice_goods, threshold, choice_fee = _choice_basket(picks, extra_choice)
     if choice_fee:
@@ -4034,7 +4084,9 @@ def _combo_lines(cookies: dict[str, str], cart: dict) -> Optional[list[dict]]:
     if not _combo_channel(cart) and cart["lines"]:
         return None
     try:
-        return _read_cart(cookies, COMBO)["lines"] or (None if not _combo_channel(cart) else [])
+        lines = _read_cart(cookies, COMBO)["lines"]
+        _remember_hs(lines)
+        return lines or (None if not _combo_channel(cart) else [])
     except Exception as e:
         logger.debug("combo cart not readable: %s", e)
         return None if not _combo_channel(cart) else []
@@ -4531,6 +4583,9 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
             line = next((ln for ln in _read_cart(cookies, COMBO)["lines"] if ln["cart_id"] == cid), None)
         except Exception as e:
             return f"Added {quantity} × item {item_id} to the Kombi-Knaller cart, cart_id {cid}, but reading it failed: {e}"
+        if line and not line.get("valid", True):
+            return (f"ERROR: item {item_id} went into the Kombi-Knaller cart as cart_id {cid} but AliExpress lists it as NOT AVAILABLE "
+                    "(usually not deliverable to the selected address). It cannot be ordered: do not count it, pick another offer.")
         return (f"Added to the Kombi-Knaller cart: {line['qty']} × {line['title'][:50]} ({line['variant']}), {line['price']} each, "
                 + ("checked" if line["checked"] else "NOT checked") + f", cart_id {cid}. 3+ pieces there pay no import charge."
                 if line else f"Added item {item_id} to the Kombi-Knaller cart, cart_id {cid} (view_cart shows it).")
@@ -4557,6 +4612,10 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
             dropped = [ln for k, ln in before.items() if k not in now]
     except Exception as e:
         return f"Added {quantity} × item {item_id} (sku {sku_id}), cart_id {cid}, but checking it failed: {e}"
+    if line and not line.get("valid", True):
+        return (f"ERROR: item {item_id} (sku {sku_id}) went into the cart as cart_id {cid} but AliExpress lists it as NOT AVAILABLE "
+                "(usually 'not deliverable to the selected address'). It cannot be ordered: do not count it. "
+                "Pick another offer of the part; remove this line in the cart page (remove_from_cart does not find invalid lines).")
     if not line:
         return (f"Added item {item_id} (sku {sku_id}), cart_id {cid}, but it is not in the main cart — "
                 "AliExpress may have put it in a channel cart (see view_cart).")
@@ -4798,6 +4857,8 @@ def _compute_decide_rows(categories: list[dict]) -> int:
                 # import charge like _ways_for: every line pays it, Choice too; only a Kombi line
                 # (combo cart, 3+ pieces) is free of it
                 c["duty"] = 0.0 if c.get("combo") else DUTY_PER_LINE
+                if c.get("combo"):
+                    c["tab"], c["duty_full"] = _combo_tab(iid), DUTY_PER_LINE     # the page counts 3 pieces per tab
                 if c.get("choice") or c.get("combo"):
                     c["ship"] = 0.0
                 else:
@@ -5296,6 +5357,8 @@ def _decide_run(name, title, list_name, opinions, check_deals, approved_alternat
                           "item_id": ln["item_id"], "sku_id": ln["sku_id"], "cart_id": ln["cart_id"],
                           "price": ln["price"] or 0, "ship": ln.get("ship") or 0, "choice": ln.get("group") == "group_choice",
                           "duty": DUTY_PER_LINE if (heading != "Kombi-Knaller-Korb" and ln.get("group") != "group_choice") else 0,
+                          **({"tab": cartlib.tab_name(ln.get("hs", "")), "duty_full": DUTY_PER_LINE}
+                             if heading == "Kombi-Knaller-Korb" else {}),
                           "qty": ln["qty"], "default": "yes" if ln["checked"] else "no",
                           "until": (ln.get("delivery") or (None, None))[1], "pieces": pcs_of(ln),
                           "seller": "Choice" if ln.get("group") == "group_choice" else (ln.get("store") or "Händler"),

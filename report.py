@@ -642,9 +642,16 @@ _DECIDE_JS = r"""<script>
   }
   rows.forEach(function (r) { if (r.dataset.replaces && st(r) === "yes") exclusive(r); });
   var total = 0, stEl = document.getElementById("sb-state"), send = document.getElementById("sb-send");
+  function tabs() {   // Kombi-Knaller: a tab (customs category) is its own order, free of import charge from 3 checked pieces
+    var pcs = {};
+    rows.forEach(function (r) { if (r.dataset.tab && st(r) === "yes") pcs[r.dataset.tab] = (pcs[r.dataset.tab] || 0) + Math.round(parseFloat(r.dataset.pk) * qty(r)); });
+    rows.forEach(function (r) { if (r.dataset.tab) r._duty = (pcs[r.dataset.tab] || 0) >= 3 ? 0 : parseFloat(r.dataset.dfull); });
+  }
+  function dutyOf(r) { return r.dataset.tab && r._duty !== undefined ? r._duty : parseFloat(r.dataset.d); }
   function calc() {
     var goods = 0, duty = 0, ship = 0, save = 0, ch = 0, chs = 0, n = 0, keep = {};
     var seenDuty = {};
+    tabs();
     rows.forEach(function (r) {
       var v = st(r), q = qty(r); r.classList.toggle("is-no", v === "no" || v === "maybe"); r.classList.toggle("is-del", v === "delete");
       keep[r.dataset.id] = { st: v, q: q, n: r.querySelector('.note-in').value, d: r.dataset.def };
@@ -654,7 +661,7 @@ _DECIDE_JS = r"""<script>
       if (parseFloat(d.itemDuty || 0) > 0.004) {
         if (!seenDuty[itemKey]) { duty += parseFloat(d.itemDuty); seenDuty[itemKey] = true; }
       } else {
-        duty += parseFloat(d.d);
+        duty += dutyOf(r);
       }
       if (d.choice === "1") { ch += g; chs += parseFloat(d.s); }
     });
@@ -673,7 +680,7 @@ _DECIDE_JS = r"""<script>
     try { localStorage.setItem(key, JSON.stringify(keep)); } catch (e) {}
   }
   function lineTotal(r) {
-    var d = r.dataset; return parseFloat(d.g) * qty(r) + parseFloat(d.s) + parseFloat(d.d) - parseFloat(d.r);
+    var d = r.dataset; return parseFloat(d.g) * qty(r) + parseFloat(d.s) + dutyOf(r) - parseFloat(d.r);
   }
   function line(r) {   // what the line costs at checkout, the same way for every row: goods + shipping + import - discount
     var d = r.dataset, q = qty(r), t = lineTotal(r);
@@ -684,7 +691,7 @@ _DECIDE_JS = r"""<script>
       if (nd) pc.appendChild(document.createTextNode(" für Bedarf " + nd)); }
     var b = r.querySelector(".bd"); if (!b) return;
     var N = "\u00a0", fn = function (x) { return fp(x).replace("\u202f", N); };   // the receipt never breaks inside an amount
-    var gs = parseFloat(d.s), dt = parseFloat(d.d), rb = parseFloat(d.r), parts = [q + N + "×" + N + fn(parseFloat(d.g)) + N + "Ware"];
+    var gs = parseFloat(d.s), dt = dutyOf(r), rb = parseFloat(d.r), parts = [q + N + "×" + N + fn(parseFloat(d.g)) + N + "Ware"];
     parts.push(gs > 0.004 ? "+" + N + fn(gs) + N + "Versand" : "Versand" + N + "frei");
     if (dt > 0.004) parts.push("+" + N + fn(dt) + N + "Abgabe");
     if (rb > 0.004) parts.push("−" + N + fn(rb) + N + "Rabatt");
@@ -1022,13 +1029,15 @@ def _decide_row(c: dict, rid: str, need: int, state: str, repl: list[str], repla
     need_attr = f' data-need="{_e(c["need"])}"' if c.get("need") else ""
     match_attr = f' data-match="{_e(c["match"])}"' if c.get("match") else ""
     avoid_attr = f' data-avoid="{_e(c["avoid"])}"' if c.get("avoid") else ""
+    tab_attr = (f' data-tab="{_e(c["tab"])}" data-dfull="{float(c.get("duty_full") or 0):.2f}"'
+                if c.get("tab") and c.get("duty_full") else "")
     item_duty_attr = f' data-item-duty="{float(c.get("item_duty") or 0):.2f}"' if c.get("item_duty") else ""
     until_attr = f' data-until="{_e(until)}"' if until else ""
     # a page default that is itself a change (merged lines) starts from the cart's state
     state0 = c.get("state0") if c.get("state0") in _ICONS else state
     return (
         f'<div class="row dec" data-id="{_e(c.get("cart_id") or "")}{_e(c["item_id"])}-{_e(c["sku_id"])}" data-item="{_e(c["item_id"])}" '
-        f'data-sku="{_e(c["sku_id"])}"{cart}{need_attr}{match_attr}{avoid_attr}{item_duty_attr} data-price="{float(c.get("price") or 0):.2f}" data-ship="{float(c.get("ship") or 0):.2f}" '
+        f'data-sku="{_e(c["sku_id"])}"{cart}{need_attr}{match_attr}{avoid_attr}{item_duty_attr}{tab_attr} data-price="{float(c.get("price") or 0):.2f}" data-ship="{float(c.get("ship") or 0):.2f}" '
         f'data-duty="{float(c.get("duty") or 0):.2f}" data-choice="{1 if c.get("choice") else 0}" data-title="{_e(c["title"])}" '
         f'data-state0="{state0}" data-def="{state}"{until_attr} data-g="{g1:.4f}" data-s="{s1:.2f}" data-d="{d1:.2f}" data-r="{r1:.2f}" '
         f'data-pk="{pk:.3f}" data-qty0="{int(c.get("qty0") or qty)}">'
