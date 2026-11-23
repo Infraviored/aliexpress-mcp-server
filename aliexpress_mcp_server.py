@@ -18,6 +18,8 @@ import os
 import math
 import random
 import re
+import subprocess
+import sys
 import asyncio
 import reportserver
 import uuid
@@ -133,6 +135,52 @@ AUTH_EXPIRED_MSG = (
     "AliExpress session expired or missing. Open aliexpress.com in Chrome, "
     "log in, and click 'Save AliExpress' in the MCP Auth Bridge extension."
 )
+
+
+_SESSION_OK_UNTIL = 0.0          # a login proven alive stays trusted this long (monotonic seconds)
+_SESSION_LOCK = threading.Lock()
+
+
+def session_alive(force: bool = False) -> bool:
+    """Is the saved login really a member session? Only AliExpress knows: the cart answers a guest
+    too (into a guest cart that the member never sees), the order list does not.
+    Anything but a clear "expired" (network, bot-check pause) counts as alive: that is not a login problem."""
+    global _SESSION_OK_UNTIL
+    if not force and time.monotonic() < _SESSION_OK_UNTIL:
+        return True
+    if not load_cookies():
+        return False
+    try:
+        _orders_call(orderslib.init_payload("all"))
+    except PermissionError:
+        return False
+    except Exception as e:                      # noqa: BLE001 - see docstring
+        logger.info("login probe inconclusive (%s): not treating it as logged out", type(e).__name__)
+        return True
+    _SESSION_OK_UNTIL = time.monotonic() + 600
+    return True
+
+
+def _login_guard() -> str | None:
+    """None when logged in. Otherwise log in by ourselves (login.py: the profile has the account and its
+    saved password) and return None on success; the user is only asked when that fails."""
+    global _SESSION_OK_UNTIL
+    if session_alive():
+        return None
+    with _SESSION_LOCK:
+        if session_alive(force=True):           # another call logged in while we waited
+            return None
+        logger.info("AliExpress session is gone: logging in by ourselves")
+        try:
+            r = subprocess.run([sys.executable, str(Path(__file__).with_name("login.py"))],
+                               capture_output=True, text=True, timeout=240)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return AUTH_EXPIRED_MSG + f" (Auto-login failed: {type(e).__name__}.)"
+        if r.returncode == 0 and session_alive(force=True):
+            return None
+        why = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no detail"]
+        return (AUTH_EXPIRED_MSG + f" Auto-login failed: {why[0][:200]}. "
+                "Last resort: run `.venv/bin/python import_profile.py --ask` and let the user log in once.")
 
 
 # ─── MTOP API Client ────────────────────────────────────────────────────────
@@ -3128,6 +3176,8 @@ def shop_list(items: list[dict], apply: bool = False, day_cost: float = DAY_COST
     """
     if choice_only:
         items = [{**it, "seller": "choice"} for it in items]
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     extra = 0.0
     if cookies and not apply:
@@ -3407,6 +3457,8 @@ def checkout_preview(cart_ids: Optional[list[str]] = None, list_name: str = "") 
         cart_ids: Cart lines to price.
         list_name: A shopping list (see shop_list / set_cart_list).
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -3564,6 +3616,8 @@ def set_cart_list(cart_ids: list[str], list_name: str, need: str = "", query: st
         optional: True for parts that are only "to compare" or nice to have;
             the overview offers to drop them.
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -3631,6 +3685,8 @@ def recheck_cart(list_name: str = "", rank_top: int = 8, max_lines: int = 8, ski
 
 def _listed_lines(list_name: str, purpose: str) -> tuple[list[dict], dict, str]:
     """(cart lines on a shopping list [of `list_name`], line tags, message): the message is the answer when there is nothing to work on."""
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return [], {}, AUTH_EXPIRED_MSG
@@ -3885,6 +3941,8 @@ def combo_round(plan_id: str, round_no: int = 0, add: bool = True) -> str:
     plan = store.get(plan_id)
     if not plan:
         return f"No plan '{plan_id}' (ids come from shop_list; the last 20 are kept)."
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -4068,6 +4126,8 @@ def view_cart(checked_only: bool = False, checkout: bool = True, summary: str = 
         alternatives: search Choice offers for global seller lines (cached
             6 h; the first call takes a while).
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -4141,6 +4201,8 @@ def select_cart_items(cart_ids: list[str], only: bool = False, selected: bool = 
     A cart_id that is not in the main cart is looked up in the Kombi-Knaller
     cart (view_cart lists both); `only` then applies to each cart on its own.
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -4422,6 +4484,8 @@ def add_to_cart(item_id: str, sku_id: str, quantity: int = 1, list_name: str = "
         force: Add even though the item or the need is already in a cart (a
             deliberate second line, or a replacement whose old line is removed afterwards).
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -4520,6 +4584,8 @@ def update_cart_quantity(cart_id: str, quantity: int) -> str:
         cart_id: cart_id from view_cart.
         quantity: New quantity (>= 1; use remove_from_cart to delete).
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -4545,6 +4611,8 @@ def remove_from_cart(cart_ids: list[str]) -> str:
             list with the user before calling, unless they are lines this MCP
             added itself that a plan replaced.
     """
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG
@@ -5057,6 +5125,8 @@ def apply_selection(selection: str, list_name: str = "", dry_run: bool = False) 
         list_name: Shopping list the lines belong to (see set_cart_list); empty = none.
         dry_run: Only list what would be added.
     """
+    if not dry_run and (g := _login_guard()):
+        return g
     try:
         data = _parse_selection(selection)
     except (ValueError, json.JSONDecodeError) as e:
@@ -5147,6 +5217,8 @@ def decide_cart(name: str = "warenkorb", title: str = "Warenkorb", list_name: st
 
 
 def _decide_run(name, title, list_name, opinions, check_deals, approved_alternatives, progress) -> str:
+    if (g := _login_guard()):
+        return g
     cookies = load_cookies()
     if not cookies:
         return AUTH_EXPIRED_MSG

@@ -151,6 +151,11 @@ adds delivery date and tracking for open orders. Cancelled orders are hidden unl
   yourself, do not ask the user. `.venv/bin/python captcha.py start` in the background, Read the
   numbered picture, `captcha.py answer <tile numbers>`, Read the next picture, repeat until
   `passed` (`v` when new tiles keep coming and none match). Then tell the user it passed.
+- Login: never ask the user to log in. Every cart tool first asks AliExpress whether the saved session is
+  alive (the order list answers "expired" for a guest, the cart does not) and, if not, runs `login.py`:
+  the profile has the account and its saved password, the script opens it on a virtual screen, types the
+  password and clicks "Anmelden". Only when that fails does the message say so; then
+  `import_profile.py --ask` is the last resort. Never write into the cart as a guest.
 - "Bot check not passed" (slider): do not keep calling (every call extends it). Fastest way out:
   `.venv/bin/python import_profile.py --ask` — the user passes the check once in a real Chrome
   (remote-browser card in the dashboard, run it in the background and tell him), the cookies
